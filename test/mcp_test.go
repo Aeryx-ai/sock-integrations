@@ -1,0 +1,83 @@
+package test
+
+import (
+	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+const mcpSendText = "smoke: mcp"
+
+// TestMCPSend is the real-path check of sock-mcp's sock_send: the real binary,
+// over stdio, to a NotifyOwner endpoint. By default the endpoint is the stub
+// and the test asserts the stub saw one authenticated request with the text.
+// With SOCK_SMOKE=1 it targets SOCK_URL with SOCK_TOKEN from the environment
+// (scripts/smoke.sh) and asserts only that the call succeeded.
+func TestMCPSend(t *testing.T) {
+	url, tok := "", token
+	var s *stub
+	if os.Getenv("SOCK_SMOKE") == "1" {
+		url, tok = os.Getenv("SOCK_URL"), os.Getenv("SOCK_TOKEN")
+		if url == "" || tok == "" {
+			t.Fatal("SOCK_SMOKE=1 needs SOCK_URL and SOCK_TOKEN")
+		}
+	} else {
+		s = newStub(t)
+		url = s.URL
+	}
+	c := startMCP(t, url, tok)
+	line := c.request(2, "tools/call", `{"name":"sock_send","arguments":{"text":"`+mcpSendText+`"}}`)
+	var resp struct {
+		Error  json.RawMessage `json:"error"`
+		Result struct {
+			IsError bool `json:"isError"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(line, &resp); err != nil {
+		c.die("sock_send response: %v: %s", err, line)
+	}
+	if len(resp.Error) > 0 {
+		c.die("sock_send returned a JSON-RPC error: %s", line)
+	}
+	if resp.Result.IsError {
+		c.die("sock_send returned isError:true: %s", line)
+	}
+	if s == nil {
+		return
+	}
+	got := s.Requests()
+	if len(got) != 1 || got[0].Auth != "Bearer "+token || got[0].Text != mcpSendText {
+		t.Fatalf("stub saw %+v", got)
+	}
+}
+
+// TestMCPSendFailsOnBadResponses proves TestMCPSend is not a rubber stamp: it
+// must fail against servers that answer id 2 with isError:true or with a
+// JSON-RPC error.
+func TestMCPSendFailsOnBadResponses(t *testing.T) {
+	cases := []struct{ name, resp, want string }{
+		{"isError", `{"jsonrpc":"2.0","id":2,"result":{"isError":true,"content":[{"type":"text","text":"permanent: nope"}]}}`, "isError:true"},
+		{"rpc error", `{"jsonrpc":"2.0","id":2,"error":{"code":-32602,"message":"bad params"}}`, "JSON-RPC error"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			fake := filepath.Join(t.TempDir(), "fake-mcp")
+			script := "#!/bin/sh\nread l\necho '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"serverInfo\":{\"name\":\"fake\",\"version\":\"0\"}}}'\nread l\nread l\necho '" + c.resp + "'\nexec sleep 600\n"
+			if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(os.Args[0], "-test.run=^TestMCPSend$")
+			cmd.Env = append(os.Environ(), "SOCK_MCP_BIN="+fake, "SOCK_SMOKE=")
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("TestMCPSend passed against a failing server:\n%s", out)
+			}
+			if !strings.Contains(string(out), c.want) {
+				t.Fatalf("want %q in failure:\n%s", c.want, out)
+			}
+		})
+	}
+}

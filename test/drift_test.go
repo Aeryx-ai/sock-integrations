@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,18 +27,30 @@ func mcpBin(t *testing.T) string {
 	return p
 }
 
-// mcpTimeout bounds a whole tools/list exchange; a silent server is killed.
+// mcpTimeout bounds a whole MCP exchange; a silent server is killed.
 const mcpTimeout = 10 * time.Second
 
-// listTools speaks MCP over stdio: initialize, initialized, tools/list. The
-// process is killed after mcpTimeout so a silent server fails the test
-// instead of hanging it. Failures include the server's stderr.
-func listTools(t *testing.T, url string) map[string]bool {
+// mcpClient is the one hand-rolled MCP stdio client in this module. The child
+// is killed after mcpTimeout so a silent server fails the test instead of
+// hanging it, and stdin stays open until stop so a server that exits on EOF
+// still gets to answer. Failures include the server's stderr.
+type mcpClient struct {
+	t      *testing.T
+	in     io.WriteCloser
+	rd     *bufio.Reader
+	stderr *bytes.Buffer
+	stop   func()
+	redact []string
+}
+
+// startMCP launches the sock-mcp binary with the given SOCK_URL and
+// SOCK_TOKEN, then runs the initialize handshake.
+func startMCP(t *testing.T, url, tok string) *mcpClient {
 	t.Helper()
+	c := &mcpClient{t: t, stderr: &bytes.Buffer{}, redact: []string{tok}}
 	cmd := exec.Command(mcpBin(t))
-	cmd.Env = []string{"PATH=/usr/bin:/bin", "SOCK_TOKEN=" + token, "SOCK_URL=" + url}
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	cmd.Env = []string{"PATH=/usr/bin:/bin", "SOCK_TOKEN=" + tok, "SOCK_URL=" + url}
+	cmd.Stderr = c.stderr
 	in, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -49,9 +62,11 @@ func listTools(t *testing.T, url string) map[string]bool {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
+	c.in = in
+	c.rd = bufio.NewReader(out)
 	timer := time.AfterFunc(mcpTimeout, func() { _ = cmd.Process.Kill() })
 	var waited bool
-	stop := func() {
+	c.stop = func() {
 		timer.Stop()
 		_ = in.Close()
 		_ = cmd.Process.Kill()
@@ -60,51 +75,45 @@ func listTools(t *testing.T, url string) map[string]bool {
 			_ = cmd.Wait()
 		}
 	}
-	t.Cleanup(stop)
-	die := func(format string, args ...any) {
-		t.Helper()
-		stop()
-		t.Fatalf("%s\nsock-mcp stderr:\n%s", fmt.Sprintf(format, args...), stderr.String())
-	}
-	rd := bufio.NewReader(out)
-	send := func(s string) {
-		t.Helper()
-		if _, err := in.Write([]byte(s + "\n")); err != nil {
-			die("write to sock-mcp: %v", err)
+	t.Cleanup(c.stop)
+	c.send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"integrations-test","version":"0"}}}`)
+	c.readID(1)
+	c.send(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)
+	return c
+}
+
+// scrub removes the token from anything that goes into a failure message.
+func (c *mcpClient) scrub(s string) string {
+	for _, r := range c.redact {
+		if r != "" {
+			s = strings.ReplaceAll(s, r, "[redacted]")
 		}
 	}
-	send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"drift","version":"0"}}}`)
-	readID(rd, 1, die)
-	send(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)
-	send(`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
-	var resp struct {
-		Result struct {
-			Tools []struct {
-				Name string `json:"name"`
-			} `json:"tools"`
-		} `json:"result"`
+	return s
+}
+
+func (c *mcpClient) die(format string, args ...any) {
+	c.t.Helper()
+	c.stop()
+	c.t.Fatalf("%s\nsock-mcp stderr:\n%s", c.scrub(fmt.Sprintf(format, args...)), c.scrub(c.stderr.String()))
+}
+
+func (c *mcpClient) send(s string) {
+	c.t.Helper()
+	if _, err := c.in.Write([]byte(s + "\n")); err != nil {
+		c.die("write to sock-mcp: %v", err)
 	}
-	if err := json.Unmarshal(readID(rd, 2, die), &resp); err != nil {
-		die("tools/list response: %v", err)
-	}
-	names := map[string]bool{}
-	for _, tl := range resp.Result.Tools {
-		names[tl.Name] = true
-	}
-	if len(names) == 0 {
-		die("tools/list returned no tools")
-	}
-	return names
 }
 
 // readID returns the raw JSON-RPC line with the given id, skipping
 // notifications. A read error (including the timeout kill closing stdout)
-// goes to die.
-func readID(rd *bufio.Reader, id int, die func(string, ...any)) []byte {
+// fails the test.
+func (c *mcpClient) readID(id int) []byte {
+	c.t.Helper()
 	for {
-		line, err := rd.ReadBytes('\n')
+		line, err := c.rd.ReadBytes('\n')
 		if err != nil {
-			die("waiting for response id %d (timeout %s): %v", id, mcpTimeout, err)
+			c.die("waiting for response id %d (timeout %s): %v", id, mcpTimeout, err)
 		}
 		var h struct {
 			ID *int `json:"id"`
@@ -113,6 +122,40 @@ func readID(rd *bufio.Reader, id int, die func(string, ...any)) []byte {
 			return line
 		}
 	}
+}
+
+// request sends one JSON-RPC request with the given id and returns its response line.
+func (c *mcpClient) request(id int, method, params string) []byte {
+	c.t.Helper()
+	if params == "" {
+		params = "null"
+	}
+	c.send(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":%q,"params":%s}`, id, method, params))
+	return c.readID(id)
+}
+
+// listTools speaks MCP over stdio: initialize, initialized, tools/list.
+func listTools(t *testing.T, url string) map[string]bool {
+	t.Helper()
+	c := startMCP(t, url, token)
+	var resp struct {
+		Result struct {
+			Tools []struct {
+				Name string `json:"name"`
+			} `json:"tools"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(c.request(2, "tools/list", ""), &resp); err != nil {
+		c.die("tools/list response: %v", err)
+	}
+	names := map[string]bool{}
+	for _, tl := range resp.Result.Tools {
+		names[tl.Name] = true
+	}
+	if len(names) == 0 {
+		c.die("tools/list returned no tools")
+	}
+	return names
 }
 
 // TestListToolsBoundsSilentServer: a server that stays alive and silent fails
