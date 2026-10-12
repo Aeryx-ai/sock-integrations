@@ -3,7 +3,7 @@
 Outbound only: hooks message you when Codex needs permission or finishes a turn, and the model can call `sock_send`. No inbound in v1. The token is forwarded from your shell and never written to config.
 
 1. Put `sock` and `sock-mcp` on `PATH` (`make install-bins`).
-2. Mint a puppet for this machine in the sock app, then `export SOCK_TOKEN=sock_pt_...` in the shell that starts Codex. Optionally set `SOCK_URL` too.
+2. Mint a puppet for this machine in the sock app, then `export SOCK_TOKEN=sock_pt_...` only in a launcher or wrapper script that starts Codex, not in a global shell rc file. Claude Code's Bash tool inherits its parent's environment, so a token exported globally is readable by a model running there. Optionally set `SOCK_URL` in the same wrapper.
 3. Append `codex/config.toml` to `~/.codex/config.toml`. This registers the `sock` MCP server and forwards `SOCK_TOKEN` and `SOCK_URL` from your shell.
 4. Install the hooks. `codex/hooks.json` contains the literal text `/ABSOLUTE/PATH/TO/sock-integrations`. It is a substitution token, not a working path: replace every occurrence with the absolute path of this checkout. Codex hook handlers take no separate args field, so each `command` carries its arguments inline, and the Codex hooks docs (https://developers.openai.com/codex/hooks, served at https://learn.chatgpt.com/docs/hooks) do not state whether `command` goes through a shell or how quoting is handled. Their examples quote paths inside the string, which implies shell parsing. So:
    - Path rule: the checkout path must contain no spaces. If it does, clone or symlink the checkout to a path without spaces, or the command will break.
@@ -12,13 +12,14 @@ Outbound only: hooks message you when Codex needs permission or finishes a turn,
 
      ```sh
      mkdir -p ~/.codex
+     hooks=$(mktemp)
      SOCK_ROOT="$PWD" awk 'BEGIN { tok = "/ABSOLUTE/PATH/TO/sock-integrations"; r = ENVIRON["SOCK_ROOT"] }
        { out = ""; while ((i = index($0, tok)) > 0) { out = out substr($0, 1, i - 1) r; $0 = substr($0, i + length(tok)) } print out $0 }' \
-       codex/hooks.json > /tmp/sock-codex-hooks.json
+       codex/hooks.json > "$hooks"
      ```
 
      The path is inserted verbatim, so a path containing a double quote or a backslash would need JSON escaping; use a plain path.
-   - First install, no `~/.codex/hooks.json` yet: `cp /tmp/sock-codex-hooks.json ~/.codex/hooks.json`.
-   - Existing `~/.codex/hooks.json`: merge by hand. Add the `PermissionRequest` and `Stop` entries from `/tmp/sock-codex-hooks.json` to the arrays under `hooks` (create the array if the event is absent). All matching hooks run, so merging is additive.
+   - First install, no `~/.codex/hooks.json` yet: `cp "$hooks" ~/.codex/hooks.json`.
+   - Existing `~/.codex/hooks.json`: merge by hand. Add the `PermissionRequest` and `Stop` entries from the file at `$hooks` to the arrays under `hooks` (create the array if the event is absent). All matching hooks run, so merging is additive. Remove the temp file afterwards: `rm -f "$hooks"`.
 5. Run `/hooks` in Codex, then review and trust both hooks. Codex skips an untrusted hook, and editing `notify.sh` requires trusting again.
 6. Optional: `export SOCK_NOTIFY_ON_STOP=1` to get a message at the end of each turn.

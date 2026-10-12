@@ -6,6 +6,10 @@
 // 60 sends per minute. Use one puppet per binding.
 // Pass text (and optionally conversation_id) to sock_send; omit conversation_id
 // to message the owner.
+//
+// Inbound reads (sock_fetch, sock_ack) are deliberately not auto-approved:
+// fetch returns messages from every sender in every conversation the puppet
+// is in, and that text is untrusted.
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
 const token = process.env.SOCK_TOKEN;
@@ -25,8 +29,6 @@ for await (const msg of query({
       "mcp__sock__sock_whoami",
       "mcp__sock__sock_list_conversations",
       "mcp__sock__sock_send",
-      "mcp__sock__sock_fetch",
-      "mcp__sock__sock_ack",
     ],
   },
 })) {
