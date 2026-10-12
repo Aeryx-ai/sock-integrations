@@ -21,7 +21,7 @@ type hookEntry struct {
 
 func readJSON(t *testing.T, rel string, v any) {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(repoRoot(t), rel))
+	b, err := os.ReadFile(filepath.Join(root, rel))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +162,7 @@ func TestCodexHooks(t *testing.T) {
 }
 
 func TestSkillKeepsOneConsumerRule(t *testing.T) {
-	b, err := os.ReadFile(filepath.Join(repoRoot(t), "claude-code", "skills", "sock", "SKILL.md"))
+	b, err := os.ReadFile(filepath.Join(root, "claude-code", "skills", "sock", "SKILL.md"))
 	if err != nil {
 		t.Fatal(err)
 	}

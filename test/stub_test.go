@@ -109,16 +109,11 @@ var root = func() string {
 	return filepath.Dir(wd)
 }()
 
-func repoRoot(t *testing.T) string {
-	t.Helper()
-	return root
-}
-
 func sockBin(t *testing.T) string {
 	t.Helper()
 	p := os.Getenv("SOCK_BIN")
 	if p == "" {
-		p = filepath.Join(repoRoot(t), "..", "cli", "bin", "sock")
+		p = filepath.Join(root, "..", "cli", "bin", "sock")
 	}
 	if _, err := os.Stat(p); err != nil {
 		t.Fatalf("sock binary missing at %s: run `make deps` (or set SOCK_BIN)", p)
@@ -137,7 +132,7 @@ type hookEnv struct {
 	Env       map[string]string // extra or overriding env
 	Stdin     string
 	StdinFile *os.File // used instead of Stdin when set
-	HomeRO    bool     // make HOME and XDG_STATE_HOME unwritable
+	HomeRO    bool     // make the state dir (XDG_STATE_HOME) unwritable
 }
 
 // runHook runs the real notify.sh with a clean environment. The real sock
@@ -170,7 +165,7 @@ func runHook(t *testing.T, stubURL string, he hookEnv, args ...string) result {
 		_ = os.Chmod(state, 0o500)
 		t.Cleanup(func() { _ = os.Chmod(state, 0o700) })
 	}
-	cmd := exec.Command(filepath.Join(repoRoot(t), "claude-code", "hooks", "notify.sh"), args...)
+	cmd := exec.Command(filepath.Join(root, "claude-code", "hooks", "notify.sh"), args...)
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}

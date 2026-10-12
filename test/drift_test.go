@@ -19,7 +19,7 @@ func mcpBin(t *testing.T) string {
 	t.Helper()
 	p := os.Getenv("SOCK_MCP_BIN")
 	if p == "" {
-		p = filepath.Join(repoRoot(t), "..", "mcp", "bin", "sock-mcp")
+		p = filepath.Join(root, "..", "mcp", "bin", "sock-mcp")
 	}
 	if _, err := os.Stat(p); err != nil {
 		t.Fatalf("sock-mcp missing at %s: run `make deps` (or set SOCK_MCP_BIN)", p)
@@ -27,8 +27,15 @@ func mcpBin(t *testing.T) string {
 	return p
 }
 
-// mcpTimeout bounds a whole MCP exchange; a silent server is killed.
-const mcpTimeout = 10 * time.Second
+// mcpTimeout bounds a whole MCP exchange; a silent server is killed. The
+// default is 10s; MCP_TEST_TIMEOUT (a Go duration) overrides it for a child
+// test process.
+var mcpTimeout = func() time.Duration {
+	if d, err := time.ParseDuration(os.Getenv("MCP_TEST_TIMEOUT")); err == nil && d > 0 {
+		return d
+	}
+	return 10 * time.Second
+}()
 
 // mcpClient is the one hand-rolled MCP stdio client in this module. The child
 // is killed after mcpTimeout so a silent server fails the test instead of
@@ -171,15 +178,16 @@ func TestListToolsBoundsSilentServer(t *testing.T) {
 		return
 	}
 	cmd := exec.Command(os.Args[0], "-test.run=^TestListToolsBoundsSilentServer$", "-test.v")
-	cmd.Env = append(os.Environ(), "DRIFT_SILENT_CHILD=1", "SOCK_MCP_BIN="+fake)
+	const childTimeout = time.Second
+	cmd.Env = append(os.Environ(), "DRIFT_SILENT_CHILD=1", "SOCK_MCP_BIN="+fake, "MCP_TEST_TIMEOUT="+childTimeout.String())
 	start := time.Now()
 	out, err := cmd.CombinedOutput()
 	el := time.Since(start)
 	if err == nil {
 		t.Fatalf("silent server did not fail the test:\n%s", out)
 	}
-	if el > mcpTimeout+3*time.Second {
-		t.Fatalf("took %s, want about %s", el, mcpTimeout)
+	if el > childTimeout+3*time.Second {
+		t.Fatalf("took %s, want about %s", el, childTimeout)
 	}
 	if !strings.Contains(string(out), "booting") {
 		t.Fatalf("stderr not in failure message:\n%s", out)
@@ -233,7 +241,7 @@ func TestScanTools(t *testing.T) {
 
 func TestToolNamesExist(t *testing.T) {
 	have := listTools(t, newStub(t).URL)
-	root := repoRoot(t)
+	root := root
 	for _, rel := range []string{"claude-code/skills/sock/SKILL.md", "agent-sdk/example.ts", "codex/install.md", "docs/specs/integrations.md"} {
 		b, err := os.ReadFile(filepath.Join(root, rel))
 		if err != nil {
