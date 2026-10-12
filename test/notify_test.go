@@ -19,10 +19,53 @@ func TestPermissionPrompt(t *testing.T) {
 	}
 }
 
-func TestSockTokenWinsOverPluginOption(t *testing.T) {
+func TestPluginOptionTokenWinsOverSockToken(t *testing.T) {
 	s := newStub(t)
-	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_other_other"}}, "x")
-	if g := s.Requests(); len(g) != 1 || g[0].Auth != "Bearer "+token {
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_other_other", "CLAUDE_PLUGIN_OPTION_SOCK_URL": s.URL, "SOCK_URL": ""}}, "x")
+	if g := s.Requests(); len(g) != 1 || g[0].Auth != "Bearer sock_pt_other_other" {
+		t.Fatalf("%+v", g)
+	}
+}
+
+// The plugin token must go only to the plugin URL, never to an ambient SOCK_URL.
+func TestPluginTokenNeverReachesAmbientURL(t *testing.T) {
+	plugin, ambient := newStub(t), newStub(t)
+	runHook(t, ambient.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_other_other", "CLAUDE_PLUGIN_OPTION_SOCK_URL": plugin.URL}}, "x")
+	if g := ambient.Requests(); len(g) != 0 {
+		t.Fatalf("plugin token leaked to ambient SOCK_URL: %+v", g)
+	}
+	if g := plugin.Requests(); len(g) != 1 || g[0].Auth != "Bearer sock_pt_other_other" {
+		t.Fatalf("%+v", g)
+	}
+}
+
+// With no URL from the token's source, the CLI config applies and the ambient SOCK_URL does not.
+func TestNoURLFromSourceUsesCLIConfig(t *testing.T) {
+	cfgStub, ambient := newStub(t), newStub(t)
+	cfg := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cfg, "sock"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg, "sock", "config.toml"), []byte("url = \""+cfgStub.URL+"\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runHook(t, ambient.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_other_other", "XDG_CONFIG_HOME": cfg}}, "x")
+	if g := ambient.Requests(); len(g) != 0 {
+		t.Fatalf("token leaked to ambient SOCK_URL: %+v", g)
+	}
+	if g := cfgStub.Requests(); len(g) != 1 || g[0].Auth != "Bearer sock_pt_other_other" {
+		t.Fatalf("%+v", g)
+	}
+}
+
+// An env token must go only to SOCK_URL, never to the plugin URL.
+func TestEnvTokenNeverReachesPluginURL(t *testing.T) {
+	env, plugin := newStub(t), newStub(t)
+	runHook(t, env.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_OPTION_SOCK_URL": plugin.URL}}, "x")
+	if g := plugin.Requests(); len(g) != 0 {
+		t.Fatalf("env token leaked to plugin URL: %+v", g)
+	}
+	if g := env.Requests(); len(g) != 1 || g[0].Auth != "Bearer "+token {
 		t.Fatalf("%+v", g)
 	}
 }
@@ -80,6 +123,10 @@ func TestSockMissingFromPath(t *testing.T) {
 
 func TestStopGate(t *testing.T) {
 	s := newStub(t)
+	runHook(t, s.URL, hookEnv{}, "--stop", "finished a turn")
+	if n := len(s.Requests()); n != 0 {
+		t.Fatalf("sent %d with both gates unset", n)
+	}
 	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_OPTION_NOTIFY_ON_STOP": "false"}}, "--stop", "finished a turn")
 	if n := len(s.Requests()); n != 0 {
 		t.Fatalf("sent %d with option false", n)

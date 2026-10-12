@@ -85,7 +85,7 @@ Files under `codex/`: `config.toml` snippet, `hooks.json`, `install.md`.
 Shared by Claude Code and Codex. Behavior:
 
 1. Drain stdin. Ignore its content.
-2. Resolve token: `SOCK_TOKEN`, else `CLAUDE_PLUGIN_OPTION_SOCK_TOKEN`. Resolve URL the same way with `SOCK_URL`. Missing token: log one line and exit 0.
+2. Resolve token: `CLAUDE_PLUGIN_OPTION_SOCK_TOKEN` (set only under the plugin), else `SOCK_TOKEN`. The plugin token wins because `.mcp.json` always gives sock-mcp the plugin token, and an ambient `SOCK_TOKEN` exported for Codex must not make Claude Code hooks post as the Codex puppet. The URL comes from the same source as the token: `CLAUDE_PLUGIN_OPTION_SOCK_URL` for the plugin token, `SOCK_URL` for the env token, never the other. A URL from the matching source is passed as `sock --url`, so a config file cannot override it; with none, no `--url` is passed and the CLI default or config applies. Missing token: log one line and exit 0.
 3. With `--stop` (first argument), exit 0 unless `CLAUDE_PLUGIN_OPTION_NOTIFY_ON_STOP` is `true` or `SOCK_NOTIFY_ON_STOP` is `1`.
 4. Text is `<basename of CLAUDE_PROJECT_DIR, else PWD>: <phrase>`. The name has control characters stripped and is cut to 100 characters.
 5. Run `sock send -- "<text>"` (the `--` keeps a project name like `-v` from parsing as a flag) as a child with a watchdog that kills it after `SOCK_HOOK_TIMEOUT` seconds, default 10. Async hooks are not timed out by the host, so the script bounds itself.
@@ -99,11 +99,14 @@ A Go test module under `test/`, run by `make test`. It runs the real `notify.sh`
 | Case | Expect |
 |---|---|
 | `permission_prompt` entry, `CLAUDE_PROJECT_DIR=/x/proj` | One request, `Authorization: Bearer` with the token, text `proj: needs permission` |
-| `SOCK_TOKEN` and `CLAUDE_PLUGIN_OPTION_SOCK_TOKEN` both set | `SOCK_TOKEN` wins |
+| `SOCK_TOKEN` and `CLAUDE_PLUGIN_OPTION_SOCK_TOKEN` both set | The plugin token wins |
+| Plugin token with a different ambient `SOCK_URL` | The plugin token reaches only the plugin URL |
+| Env token with a different plugin URL | The env token reaches only `SOCK_URL` |
+| Plugin token, no plugin URL | Ambient `SOCK_URL` ignored, CLI config applies |
 | Stub always returns 503 | Exit 0 within 15 seconds, one log line |
 | Stub returns `TOKEN_INVALID` | Exit 0, one log line, no retry storm |
 | `sock` absent from `PATH` | Exit 0, one log line |
-| `Stop`, option false then true | No request, then one request |
+| `Stop`, both gates unset, option false, then true | No request, no request, then one request |
 | Hook JSON on stdin, and closed stdin | No hang |
 | Token value anywhere in the log | Never |
 

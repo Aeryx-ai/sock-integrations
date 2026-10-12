@@ -13,7 +13,17 @@ phrase=${1:-}
 
 state_dir=${XDG_STATE_HOME:-${HOME:-/nonexistent}/.local/state}/sock-integrations
 log=$state_dir/hook.log
-token=${SOCK_TOKEN:-${CLAUDE_PLUGIN_OPTION_SOCK_TOKEN:-}}
+# The token and the URL come from the same source, so a token never goes to a
+# server chosen by a different source. The plugin option wins: .mcp.json gives
+# sock-mcp the plugin token, and an ambient SOCK_TOKEN exported for another
+# platform (Codex) must not make these hooks post as that puppet.
+if [ -n "${CLAUDE_PLUGIN_OPTION_SOCK_TOKEN:-}" ]; then
+	token=$CLAUDE_PLUGIN_OPTION_SOCK_TOKEN
+	url=${CLAUDE_PLUGIN_OPTION_SOCK_URL:-}
+else
+	token=${SOCK_TOKEN:-}
+	url=${SOCK_URL:-}
+fi
 
 log_line() {
 	local msg=${1//$'\n'/ }
@@ -55,9 +65,12 @@ project=$(basename "${CLAUDE_PROJECT_DIR:-$PWD}" | LC_ALL=C tr -d '[:cntrl:]' | 
 text="$project: $phrase"
 
 export SOCK_TOKEN=$token
-url=${SOCK_URL:-${CLAUDE_PLUGIN_OPTION_SOCK_URL:-}}
+# Never inherit a URL from another source. With no URL of our own, the CLI
+# default or config file applies. An explicit --url beats a config file.
+unset SOCK_URL
+url_args=()
 if [ -n "$url" ]; then
-	export SOCK_URL=$url
+	url_args=(--url "$url")
 fi
 
 errf=$(mktemp "${TMPDIR:-/tmp}/sock-hook.XXXXXX") || {
@@ -72,7 +85,7 @@ case $timeout in
 *) [ "$timeout" -gt 0 ] || timeout=10 ;;
 esac
 
-sock send -- "$text" >/dev/null 2>"$errf" </dev/null &
+sock ${url_args[@]+"${url_args[@]}"} send -- "$text" >/dev/null 2>"$errf" </dev/null &
 pid=$!
 (
 	sleep "$timeout"
