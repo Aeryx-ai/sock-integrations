@@ -182,11 +182,58 @@ func TestProjectNameSanitized(t *testing.T) {
 	if len(g) != 2 {
 		t.Fatalf("%+v", g)
 	}
-	if g[0].Text != "ab[31mc: p" {
+	if g[0].Text != "ab31mc: p" {
 		t.Fatalf("control chars kept: %q", g[0].Text)
 	}
 	if want := strings.Repeat("n", 100) + ": p"; g[1].Text != want {
 		t.Fatalf("not cut: %d chars", len(g[1].Text))
+	}
+}
+
+func TestProjectNameAllowlist(t *testing.T) {
+	cases := []struct{ name, dir, want string }{
+		{"bidi override and C1 control removed", "/x/pro\u202eje\u0085ct", "project: p"},
+		{"all non-ASCII becomes project", "/x/\u65e5\u672c\u8a9e", "project: p"},
+		{"multibyte mixed with ASCII keeps ASCII", "/x/caf\u00e9-1.2_x y", "caf-1.2_x y: p"},
+	}
+	for _, c := range cases {
+		for _, loc := range []string{"C", "en_US.UTF-8"} {
+			s := newStub(t)
+			runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PROJECT_DIR": c.dir, "LANG": loc, "LC_ALL": loc}}, "p")
+			if g := s.Requests(); len(g) != 1 || g[0].Text != c.want {
+				t.Fatalf("%s (%s): %+v, want %q", c.name, loc, g, c.want)
+			}
+		}
+	}
+}
+
+// A normal run, including reaping the watchdog, writes nothing to stderr.
+func TestNormalRunSilentOnStderr(t *testing.T) {
+	s := newStub(t)
+	r := runHook(t, s.URL, hookEnv{}, "x")
+	if r.Code != 0 || len(s.Requests()) != 1 || r.Stderr != "" {
+		t.Fatalf("%+v", r)
+	}
+}
+
+// A fake sock printing terminal escapes must not put control bytes in the log.
+func TestLogHasNoControlCharacters(t *testing.T) {
+	s := newStub(t)
+	tmp := t.TempDir()
+	fake := filepath.Join(tmp, "sock")
+	script := "#!/bin/sh\nprintf '\\033]0;pwned\\007\\033[2J\\tend\\r' >&2\nexit 1\n"
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": tmp + ":/usr/bin:/bin"}}, "x")
+	if !strings.Contains(r.Log, "pwned") {
+		t.Fatalf("no log: %q", r.Log)
+	}
+	body := strings.TrimSuffix(r.Log, "\n")
+	for i := range len(body) {
+		if body[i] < 0x20 || body[i] == 0x7f {
+			t.Fatalf("control byte %#x at %d in %q", body[i], i, r.Log)
+		}
 	}
 }
 

@@ -130,6 +130,7 @@ type result struct {
 	Code    int
 	Elapsed time.Duration
 	Log     string
+	Stderr  string
 }
 
 type hookEnv struct {
@@ -178,9 +179,11 @@ func runHook(t *testing.T, stubURL string, he hookEnv, args ...string) result {
 	} else if he.Stdin != "" {
 		cmd.Stdin = strings.NewReader(he.Stdin)
 	}
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
 	start := time.Now()
 	err := cmd.Run()
-	r := result{Elapsed: time.Since(start)}
+	r := result{Elapsed: time.Since(start), Stderr: stderr.String()}
 	if ee := (*exec.ExitError)(nil); errors.As(err, &ee) {
 		r.Code = ee.ExitCode()
 	} else if err != nil {

@@ -26,7 +26,10 @@ else
 fi
 
 log_line() {
-	local msg=${1//$'\n'/ }
+	# Strip every control character (escape sequences, CR, tab, newline) so
+	# tool output cannot drive the terminal of whoever reads the log.
+	local msg
+	msg=$(printf '%s' "$1" | LC_ALL=C tr -d '[:cntrl:]')
 	if [ -n "$token" ]; then
 		msg=${msg//"$token"/[redacted]}
 	fi
@@ -61,7 +64,9 @@ if ! command -v sock >/dev/null 2>&1; then
 	exit 0
 fi
 
-project=$(basename "${CLAUDE_PROJECT_DIR:-$PWD}" | LC_ALL=C tr -d '[:cntrl:]' | cut -c1-100)
+# Allowlist, in the C locale so multibyte input is dropped bytewise instead of cut mid-character.
+project=$(basename "${CLAUDE_PROJECT_DIR:-$PWD}" | LC_ALL=C tr -cd 'A-Za-z0-9._ -' | LC_ALL=C cut -c1-100)
+[ -n "$project" ] || project=project
 text="$project: $phrase"
 
 export SOCK_TOKEN=$token
@@ -92,6 +97,7 @@ pid=$!
 	kill "$pid" 2>/dev/null
 ) >/dev/null 2>&1 &
 watchdog=$!
+disown "$watchdog" 2>/dev/null # no "Terminated" job notice on stderr when we reap it below
 
 wait "$pid"
 rc=$?
