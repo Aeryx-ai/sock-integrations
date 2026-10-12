@@ -1,13 +1,16 @@
 .DEFAULT_GOAL := build
-.PHONY: build deps test install redeploy check lint smoke
+.PHONY: build deps test install install-bins redeploy check lint smoke
 
 deps:
 	$(MAKE) -C ../cli build
 	$(MAKE) -C ../mcp build
 
 build: deps
-	claude plugin validate ./claude-code --strict
-	claude plugin validate . --strict
+	@if command -v claude >/dev/null 2>&1; then \
+		claude plugin validate ./claude-code --strict && claude plugin validate . --strict; \
+	else \
+		echo "claude not found, skipping plugin validation"; \
+	fi
 	cd test && go vet ./...
 
 test: deps
@@ -19,7 +22,13 @@ lint:
 
 check: build lint test
 
-install:
+# Binaries land in $(go env GOPATH)/bin, which must be on PATH, including the
+# PATH of the Claude Code process.
+install-bins:
+	$(MAKE) -C ../cli install
+	$(MAKE) -C ../mcp install
+
+install: install-bins
 	claude plugin marketplace add "$(CURDIR)"
 	claude plugin install sock@sock-integrations
 
