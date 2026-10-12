@@ -22,7 +22,7 @@ log_line() {
 	fi
 	(
 		umask 077
-		mkdir -p "$state_dir" || exit 0
+		mkdir -p "$state_dir"
 		if [ -f "$log" ] && [ "$(wc -c <"$log")" -gt 102400 ]; then
 			: >"$log"
 		fi
@@ -66,20 +66,32 @@ errf=$(mktemp "${TMPDIR:-/tmp}/sock-hook.XXXXXX") || {
 }
 trap 'rm -f "$errf"' EXIT
 
+timeout=${SOCK_HOOK_TIMEOUT:-10}
+case $timeout in
+'' | *[!0-9]*) timeout=10 ;;
+*) [ "$timeout" -gt 0 ] || timeout=10 ;;
+esac
+
 sock send -- "$text" >/dev/null 2>"$errf" </dev/null &
 pid=$!
 (
-	sleep "${SOCK_HOOK_TIMEOUT:-10}"
+	sleep "$timeout"
 	kill "$pid" 2>/dev/null
 ) >/dev/null 2>&1 &
 watchdog=$!
 
 wait "$pid"
 rc=$?
-pkill -P "$watchdog" 2>/dev/null
 kill "$watchdog" 2>/dev/null
+pkill -P "$watchdog" 2>/dev/null
 
 if [ "$rc" -ne 0 ]; then
-	log_line "sock send exit $rc: $(head -c 300 "$errf")"
+	# Redact the whole captured stderr before cutting, so a token straddling the cut cannot leak a prefix.
+	detail=$(head -c 65536 "$errf")
+	if [ -n "$token" ]; then
+		detail=${detail//"$token"/[redacted]}
+	fi
+	detail=$(printf '%s' "$detail" | head -c 300)
+	log_line "sock send exit $rc: $detail"
 fi
 exit 0

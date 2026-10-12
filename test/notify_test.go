@@ -50,7 +50,13 @@ func TestServerDownExitsZeroLogsOnce(t *testing.T) {
 	if r.Code != 0 || strings.Count(r.Log, "\n") != 1 {
 		t.Fatalf("%+v", r)
 	}
-	if r.Elapsed.Seconds() > 15 {
+	if n := len(s.Requests()); n > 4 {
+		t.Fatalf("%d requests in %v", n, r.Elapsed)
+	}
+	if !strings.Contains(r.Log, "sock send exit 1: sock: context canceled") {
+		t.Fatalf("log line: %q", r.Log)
+	}
+	if r.Elapsed.Seconds() > 3 {
 		t.Fatalf("took %v", r.Elapsed)
 	}
 }
@@ -92,6 +98,22 @@ func TestStdinShapesDoNotHang(t *testing.T) {
 		if r.Code != 0 || r.Elapsed.Seconds() > 8 {
 			t.Fatalf("stdin len %d: %+v", len(in), r)
 		}
+	}
+}
+
+func TestStdinHeldOpenIsBounded(t *testing.T) {
+	s := newStub(t)
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pw.Close(); _ = pr.Close() })
+	r := runHook(t, s.URL, hookEnv{StdinFile: pr}, "x")
+	if r.Code != 0 || r.Elapsed.Seconds() < 1.5 || r.Elapsed.Seconds() > 5 {
+		t.Fatalf("%+v", r)
+	}
+	if n := len(s.Requests()); n != 1 {
+		t.Fatalf("sent %d", n)
 	}
 }
 
@@ -138,11 +160,29 @@ func TestTokenNeverInLog(t *testing.T) {
 	}
 }
 
-func TestLogModeAndTruncation(t *testing.T) {
+func TestLogCreatedWithPrivateModes(t *testing.T) {
 	s := newStub(t)
 	s.setFail(func(int) error { return unavailable() })
-	tmp := t.TempDir()
-	state := filepath.Join(tmp, "state")
+	state := filepath.Join(t.TempDir(), "state")
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"XDG_STATE_HOME": state}}, "x")
+	dir := filepath.Join(state, "sock-integrations")
+	di, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fi, err := os.Stat(filepath.Join(dir, "hook.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if di.Mode().Perm() != 0o700 || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("dir %v file %v", di.Mode().Perm(), fi.Mode().Perm())
+	}
+}
+
+func TestLogTruncatedAboveLimit(t *testing.T) {
+	s := newStub(t)
+	s.setFail(func(int) error { return unavailable() })
+	state := filepath.Join(t.TempDir(), "state")
 	dir := filepath.Join(state, "sock-integrations")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -158,17 +198,17 @@ func TestLogModeAndTruncation(t *testing.T) {
 	if fi.Size() > 1024 {
 		t.Fatalf("not truncated: %d", fi.Size())
 	}
-	if fi.Mode().Perm() != 0o600 {
-		t.Fatalf("mode %v", fi.Mode().Perm())
-	}
 }
 
 // Review Focus 4
 func TestUnwritableLogDirStillExitsZero(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
 	s := newStub(t)
 	s.setFail(func(int) error { return unavailable() })
 	r := runHook(t, s.URL, hookEnv{HomeRO: true}, "x")
-	if r.Code != 0 || r.Elapsed.Seconds() > 8 {
+	if r.Code != 0 || r.Elapsed.Seconds() > 3 || r.Log != "" {
 		t.Fatalf("%+v", r)
 	}
 }
@@ -180,7 +220,7 @@ func TestHungServerKilledByWatchdog(t *testing.T) {
 	s.setBlock(blk)
 	t.Cleanup(func() { close(blk) })
 	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"SOCK_HOOK_TIMEOUT": "1"}}, "x")
-	if r.Code != 0 || r.Elapsed.Seconds() > 6 || strings.Count(r.Log, "\n") != 1 {
+	if r.Code != 0 || r.Elapsed.Seconds() > 3 || strings.Count(r.Log, "\n") != 1 || !strings.Contains(r.Log, "sock send exit 1: sock: context canceled") {
 		t.Fatalf("%+v", r)
 	}
 }
@@ -196,5 +236,31 @@ func TestProjectFallsBackToPWD(t *testing.T) {
 	runHook(t, s.URL, hookEnv{}, "needs permission")
 	if g := s.Requests(); len(g) != 1 || g[0].Text != "fromcwd: needs permission" {
 		t.Fatalf("%+v", g)
+	}
+}
+
+// Token straddling the 300 byte cut must not leave a prefix in the log.
+func TestTokenStraddlingCutIsRedacted(t *testing.T) {
+	s := newStub(t)
+	tmp := t.TempDir()
+	fake := filepath.Join(tmp, "sock")
+	script := "#!/bin/sh\nprintf '%0290d' 0 >&2\necho \"$SOCK_TOKEN\" >&2\nexit 1\n"
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": tmp + ":/usr/bin:/bin"}}, "x")
+	if r.Log == "" {
+		t.Fatal("no log")
+	}
+	if strings.Contains(r.Log, token[:8]) {
+		t.Fatalf("token prefix leaked: %q", r.Log)
+	}
+}
+
+func TestInvalidTimeoutFallsBackToDefault(t *testing.T) {
+	s := newStub(t)
+	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"SOCK_HOOK_TIMEOUT": "abc"}}, "x")
+	if r.Code != 0 || len(s.Requests()) != 1 || r.Log != "" {
+		t.Fatalf("%+v reqs=%d", r, len(s.Requests()))
 	}
 }

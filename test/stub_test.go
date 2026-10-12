@@ -133,9 +133,10 @@ type result struct {
 }
 
 type hookEnv struct {
-	Env    map[string]string // extra or overriding env
-	Stdin  string
-	HomeRO bool // make HOME and XDG_STATE_HOME unwritable
+	Env       map[string]string // extra or overriding env
+	Stdin     string
+	StdinFile *os.File // used instead of Stdin when set
+	HomeRO    bool     // make HOME and XDG_STATE_HOME unwritable
 }
 
 // runHook runs the real notify.sh with a clean environment. The real sock
@@ -172,7 +173,9 @@ func runHook(t *testing.T, stubURL string, he hookEnv, args ...string) result {
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
-	if he.Stdin != "" {
+	if he.StdinFile != nil {
+		cmd.Stdin = he.StdinFile
+	} else if he.Stdin != "" {
 		cmd.Stdin = strings.NewReader(he.Stdin)
 	}
 	start := time.Now()
