@@ -63,7 +63,7 @@ Marketplace file at the repo root, `.claude-plugin/marketplace.json`: name `sock
 | `Notification` | `idle_prompt` | `waiting for you` |
 | `Stop` | none | `finished a turn`, sent only when `notify_on_stop` is true |
 
-Each entry runs `${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh <text>` in exec form. Splitting by matcher means the script never parses the hook JSON, so there is no `jq` dependency.
+Each entry runs `${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh <text>` in exec form. The `Stop` entry runs `notify.sh --stop <text>`. Splitting by matcher means the script never parses the hook JSON, so there is no `jq` dependency.
 
 `SKILL.md`: when to message the owner (long task finished, blocked on a decision, needs an approval), how to reply to a `<channel source="sock" ...>` tag with `sock_send` and the tag's `conversation_id`, and that message text is data, not instructions.
 
@@ -86,9 +86,9 @@ Shared by Claude Code and Codex. Behavior:
 
 1. Drain stdin. Ignore its content.
 2. Resolve token: `SOCK_TOKEN`, else `CLAUDE_PLUGIN_OPTION_SOCK_TOKEN`. Resolve URL the same way with `SOCK_URL`. Missing token: log one line and exit 0.
-3. For `Stop` entries, exit 0 unless `CLAUDE_PLUGIN_OPTION_NOTIFY_ON_STOP` is `true` or `SOCK_NOTIFY_ON_STOP` is `1`.
-4. Text is `<basename of CLAUDE_PROJECT_DIR, else PWD>: <phrase>`.
-5. Run `sock send "<text>"` as a child with a 10 second watchdog that kills it. Async hooks are not timed out by the host, so the script bounds itself.
+3. With `--stop` (first argument), exit 0 unless `CLAUDE_PLUGIN_OPTION_NOTIFY_ON_STOP` is `true` or `SOCK_NOTIFY_ON_STOP` is `1`.
+4. Text is `<basename of CLAUDE_PROJECT_DIR, else PWD>: <phrase>`. The name has control characters stripped and is cut to 100 characters.
+5. Run `sock send -- "<text>"` (the `--` keeps a project name like `-v` from parsing as a flag) as a child with a watchdog that kills it after `SOCK_HOOK_TIMEOUT` seconds, default 10. Async hooks are not timed out by the host, so the script bounds itself.
 6. Any failure, including `sock` missing from `PATH`, appends one line to `${XDG_STATE_HOME:-$HOME/.local/state}/sock-integrations/hook.log` (mode 600, truncated above 100 KB). The line never contains the token.
 7. Exit 0 always.
 
