@@ -18,7 +18,7 @@ Out, tracked in bd:
 - Managed Agents bridge (a daemon, own spec).
 - Codex and headless inbound (no channel equivalent).
 - Hosted HTTP surfaces: Responses API hosted MCP, claude.ai, ChatGPT, Managed Agents cloud MCP. sock-mcp is stdio only, and these need a public URL and an OAuth-style credential.
-- A `Stop` hook that fetches pending messages. Claude Code inbound is the channel.
+- Won't do: a `Stop` hook that fetches pending messages. The channel is the inbound path.
 
 ## Rules
 
@@ -41,9 +41,9 @@ hooks/notify.sh
 skills/sock/SKILL.md
 ```
 
-Marketplace file at the repo root, `.claude-plugin/marketplace.json`: name `sock-integrations`, one entry `{"name": "sock", "source": "./claude-code"}`. Install: `/plugin marketplace add guygrigsby/sock-integrations`, then `/plugin install sock@sock-integrations`.
+Marketplace file at the repo root, `.claude-plugin/marketplace.json`: name `sock-integrations`, a `description`, an `owner`, and one plugin entry `{"name": "sock", "source": "./claude-code", "description": ...}`. Install: `/plugin marketplace add guygrigsby/sock-integrations`, then `/plugin install sock@sock-integrations`.
 
-`plugin.json`: name `sock`, MIT, `userConfig` options:
+`plugin.json`: name `sock`, `version`, `author`, `description`, MIT, plus whatever `claude plugin validate --strict` requires. `make build` runs the validator, so it is the authority on required manifest fields. Every `userConfig` option carries a `title` and a `description`. Options:
 
 | Key | Type | Notes |
 |---|---|---|
@@ -72,24 +72,24 @@ Each entry runs `${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh <text>` in exec form. The
 Files under `codex/`: `config.toml` snippet, `hooks.json`, `install.md`.
 
 - `mcp_servers.sock`: `command = "sock-mcp"`, `env_vars = ["SOCK_TOKEN", "SOCK_URL"]` so the token is forwarded from the shell and never written to config.
-- `hooks.json`: `PermissionRequest` (text `needs permission`) and `Stop` (text `finished a turn`, only when `SOCK_NOTIFY_ON_STOP=1`), both `async: true`, running the shared `notify.sh`.
-- `install.md`: merge the entries into `~/.codex/hooks.json` (all matching hooks run), export `SOCK_TOKEN`, then review and trust the hooks with `/hooks`. Codex skips a hook until it is trusted, and changing the script re-requires trust.
+- `hooks.json`: `PermissionRequest` (text `needs permission`) and `Stop` (text `finished a turn`, only when `SOCK_NOTIFY_ON_STOP=1`), both `async: true`, running the shared `notify.sh`. Codex handlers take no `args` field, so each `command` carries its arguments inline. The file holds the placeholder `/ABSOLUTE/PATH/TO/sock-integrations`, which install substitutes with the checkout path (`install.md` gives an awk recipe that treats `#`, `&` and `\` literally). The checkout path must contain no spaces. Whether Codex parses `command` through a shell or as exec form is unconfirmed in its docs, so the inline quoting is verified by hand at release.
+- `install.md`: merge the entries into `~/.codex/hooks.json` (all matching hooks run), export `SOCK_TOKEN` only in a Codex launcher or wrapper script and not a global rc file (Claude Code's Bash tool inherits the environment, so a model can read it), then review and trust the hooks with `/hooks`. Codex skips a hook until it is trusted, and changing the script re-requires trust.
 - Outbound only. The model can call `sock_send` as a tool. No inbound in v1.
 
 ## Agent SDK
 
-`agent-sdk/example.ts`: `query()` with `mcpServers.sock` as a stdio server (`command: "sock-mcp"`, `env.SOCK_TOKEN` from `process.env`) and `allowedTools` of every `mcp__sock__sock_*` tool. Auto-approving `sock_send` is the point for headless agents. The blast radius is the puppet: its owner and conversations it belongs to, 60 sends per minute. The example says so in a comment.
+`agent-sdk/example.ts`: `query()` with `mcpServers.sock` as a stdio server (`command: "sock-mcp"`, `env.SOCK_TOKEN` from `process.env`) and `allowedTools` of `mcp__sock__sock_whoami`, `mcp__sock__sock_list_conversations` and `mcp__sock__sock_send`. Auto-approving `sock_send` is the point for headless agents. The blast radius is the puppet: its owner and conversations it belongs to, 60 sends per minute. `sock_fetch` and `sock_ack` are deliberately not auto-approved, because fetch returns messages from every sender in every conversation the puppet is in. The example says both in comments.
 
 ## notify.sh
 
 Shared by Claude Code and Codex. Behavior:
 
-1. Drain stdin. Ignore its content.
-2. Resolve token: `CLAUDE_PLUGIN_OPTION_SOCK_TOKEN` (set only under the plugin), else `SOCK_TOKEN`. The plugin token wins because `.mcp.json` always gives sock-mcp the plugin token, and an ambient `SOCK_TOKEN` exported for Codex must not make Claude Code hooks post as the Codex puppet. The URL comes from the same source as the token: `CLAUDE_PLUGIN_OPTION_SOCK_URL` for the plugin token, `SOCK_URL` for the env token, never the other. A URL from the matching source is passed as `sock --url`, so a config file cannot override it; with none, no `--url` is passed and the CLI default or config applies. Missing token: log one line and exit 0.
+1. Drain stdin, bounded to 2 seconds so a held-open stdin cannot hang the hook. Ignore its content.
+2. Resolve token: `CLAUDE_PLUGIN_OPTION_SOCK_TOKEN` (set only under the plugin), else `SOCK_TOKEN`. The plugin token wins because `.mcp.json` always gives sock-mcp the plugin token, and an ambient `SOCK_TOKEN` exported for Codex must not make Claude Code hooks post as the Codex puppet. The URL comes from the same source as the token: `CLAUDE_PLUGIN_OPTION_SOCK_URL` for the plugin token, `SOCK_URL` for the env token, never the other. A URL from the matching source is passed as `sock --url`, so a config file cannot override it; with none, `SOCK_URL` is unset for the child, no `--url` is passed and the CLI default or config applies. Missing token: log one line and exit 0.
 3. With `--stop` (first argument), exit 0 unless `CLAUDE_PLUGIN_OPTION_NOTIFY_ON_STOP` is `true` or `SOCK_NOTIFY_ON_STOP` is `1`.
-4. Text is `<basename of CLAUDE_PROJECT_DIR, else PWD>: <phrase>`. The name has control characters stripped and is cut to 100 characters.
-5. Run `sock send -- "<text>"` (the `--` keeps a project name like `-v` from parsing as a flag) as a child with a watchdog that kills it after `SOCK_HOOK_TIMEOUT` seconds, default 10. Async hooks are not timed out by the host, so the script bounds itself.
-6. Any failure, including `sock` missing from `PATH`, appends one line to `${XDG_STATE_HOME:-$HOME/.local/state}/sock-integrations/hook.log` (mode 600, truncated above 100 KB). The line never contains the token.
+4. Text is `<name>: <phrase>`, where `<name>` is the basename of `CLAUDE_PROJECT_DIR`, else `PWD`. Under `LC_ALL=C` the name keeps only `[A-Za-z0-9._ -]`, is cut to 100 characters, and becomes `project` when nothing remains.
+5. Run `sock send -- "<text>"` (the `--` keeps a project name like `-v` from parsing as a flag) as a child with a watchdog that kills it after `SOCK_HOOK_TIMEOUT` seconds, default 10; a value that is not a positive integer falls back to 10. Async hooks are not timed out by the host, so the script bounds itself. The watchdog is reaped without a job notice on stderr.
+6. Any failure, including `sock` missing from `PATH`, appends one line to `${XDG_STATE_HOME:-$HOME/.local/state}/sock-integrations/hook.log` (mode 600, truncated above 100 KB). A failed send logs `sock send exit <code>:` and the child's stderr, with the token redacted from the whole captured stderr first and the result then cut to 300 bytes, so a token straddling the cut cannot leak a prefix. Every control character is stripped from the line, so tool output cannot drive a terminal that reads the log. The line never contains the token.
 7. Exit 0 always.
 
 ## Tests
@@ -103,24 +103,41 @@ A Go test module under `test/`, run by `make test`. It runs the real `notify.sh`
 | Plugin token with a different ambient `SOCK_URL` | The plugin token reaches only the plugin URL |
 | Env token with a different plugin URL | The env token reaches only `SOCK_URL` |
 | Plugin token, no plugin URL | Ambient `SOCK_URL` ignored, CLI config applies |
-| Stub always returns 503 | Exit 0 within 15 seconds, one log line |
+| Stub always returns 503 | Exit 0 within the watchdog timeout plus slack, one log line naming a nonzero `sock send` exit |
+| Stub holds the call open | Watchdog kills `sock`, exit 0, one log line |
 | Stub returns `TOKEN_INVALID` | Exit 0, one log line, no retry storm |
 | `sock` absent from `PATH` | Exit 0, one log line |
 | `Stop`, both gates unset, option false, then true | No request, no request, then one request |
 | Hook JSON on stdin, and closed stdin | No hang |
-| Token value anywhere in the log | Never |
+| Token value anywhere in the log, including straddling the 300 byte cut | Never |
+| Fake `sock` prints escape sequences to stderr | No byte below 0x20 in the log except the trailing newline |
+| Project name with multibyte, bidi override or C1 characters, under `LANG=C` | Delivered, with only allowlisted characters, or `project` |
+| Normal run | Nothing on stderr |
+| Invalid `SOCK_HOOK_TIMEOUT` | Falls back to 10, request still sent |
+| Unwritable state dir | Exit 0 within the timeout plus slack |
 
-Drift guard: spawn the real `sock-mcp` binary over stdio, call `tools/list`, and assert every `sock_*` name in `SKILL.md`, `example.ts`, `install.md` and this spec exists in the list. `SOCK_MCP_BIN` points at the binary.
+Drift guard: spawn the real `sock-mcp` binary over stdio, call `tools/list`, assert the list is exactly the pinned tool set (a new or missing tool fails), and assert every `sock_*` name in `SKILL.md`, `example.ts`, `install.md` and this spec exists in the list. `SOCK_MCP_BIN` points at the binary. One hand-rolled stdio client serves the drift guard and the send check, and kills the child after a bounded time so a silent server fails instead of hanging.
 
-`make check` also runs `claude plugin validate ./claude-code` and `claude plugin validate .` when `claude` is on `PATH`, plus the linters.
+Send check (`TestMCPSend`): spawn the real `sock-mcp`, hold stdin open, call `sock_send`, and fail on a JSON-RPC error or `isError:true`. Against the stub it asserts one request with the right bearer token and text. With `SOCK_SMOKE=1` it uses `SOCK_URL` and `SOCK_TOKEN` from the environment and asserts only success. Another test proves it fails against fake servers that return each bad response.
 
-`make smoke` sends through the real `sock` binary to a local sock-server with a real puppet token, and runs `sock-mcp` through a `tools/call` of `sock_send` to the same server.
+`make check` also runs `claude plugin validate ./claude-code --strict` and `claude plugin validate . --strict` when `claude` is on `PATH`, plus the linters.
 
-Not covered by automation, done by hand once per release: the plugin loading in a live Claude Code session, the channel with the dev flag, and Codex hook trust. All three are interactive.
+`make smoke` sends through the real `sock` binary to a local sock-server with a real puppet token, runs `notify.sh` against it (failing if the hook log grew), and runs `TestMCPSend` with `SOCK_SMOKE=1` against the same server.
+
+Not covered by automation, done by hand once per release: the plugin loading in a live Claude Code session, the channel with the dev flag, Codex hook trust, and whether Codex runs a hook `command` through a shell or as exec form (the inline quoting in `codex/hooks.json`). All are interactive.
 
 ## Makefile
 
-`build` and `check` run the plugin validation and `go vet`. `test` runs the Go module. `lint` runs `golangci-lint` and `shellcheck` on `notify.sh`. `install` registers this checkout as a local marketplace and installs `sock`. `redeploy` refreshes the marketplace and reinstalls. The exact `claude plugin` subcommands are confirmed against `claude plugin --help` when the targets are written.
+- `deps` builds the sibling `../cli` and `../mcp` binaries. `build`, `test` and `smoke` depend on it.
+- `build` (default) runs `claude plugin validate --strict` on `./claude-code` and on the repo root, only when `command -v claude` finds it, and otherwise prints `claude not found, skipping plugin validation`. Then `go vet`.
+- `test` runs the Go module under `-race`.
+- `lint` runs `golangci-lint` and `shellcheck` on `notify.sh` and `smoke.sh`.
+- `check` is `build`, `lint`, `test`.
+- `install-bins` runs `make install` in `../cli` and `../mcp`. The binaries land in `$(go env GOPATH)/bin`, which must be on `PATH`, including the `PATH` of the Claude Code process. `install` depends on it, then registers this checkout as a local marketplace and installs `sock`.
+- `redeploy` refreshes the marketplace and reinstalls.
+- `smoke` runs `scripts/smoke.sh`.
+
+The `claude plugin` subcommands were confirmed against `claude plugin --help`.
 
 ## Review gates
 
