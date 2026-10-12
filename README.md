@@ -34,13 +34,13 @@ See `agent-sdk/example.ts`.
 
 ## Make targets
 
+- `make deps`: build the sibling CLI and MCP binaries.
 - `make build` (default): build `../cli` and `../mcp`, validate the plugin and marketplace manifests, `go vet` the tests.
 - `make test`: run the Go tests with `-race`.
 - `make lint`: `shellcheck` and `golangci-lint`.
 - `make check`: build, lint and test.
 - `make install`: add this directory as a local marketplace and install the plugin.
 - `make redeploy`: update the marketplace and the installed plugin.
-- `make deps`: build the sibling CLI and MCP binaries.
 - `make smoke`: send one message each through the CLI, `notify.sh` and `sock-mcp`. Needs a running server, `SOCK_URL` and a puppet `SOCK_TOKEN`, and someone to look at the owner's inbox for three messages. Not part of `make check`.
 
 ## Manual checks per release
