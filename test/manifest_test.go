@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -75,6 +76,7 @@ func TestPluginManifest(t *testing.T) {
 			Type      string `json:"type"`
 			Sensitive bool   `json:"sensitive"`
 			Required  bool   `json:"required"`
+			Default   any    `json:"default"`
 		} `json:"userConfig"`
 		Channels []struct {
 			Server string `json:"server"`
@@ -91,6 +93,9 @@ func TestPluginManifest(t *testing.T) {
 		if _, ok := p.UserConfig[k]; !ok {
 			t.Fatalf("missing userConfig %s", k)
 		}
+	}
+	if d := p.UserConfig["sock_url"].Default; d != any("https://api.sock.aeryx.ai") {
+		t.Fatalf("sock_url default %q", d)
 	}
 	if len(p.Channels) != 1 || p.Channels[0].Server != "sock" {
 		t.Fatalf("channels %+v", p.Channels)
@@ -126,5 +131,42 @@ func TestMarketplace(t *testing.T) {
 	readJSON(t, ".claude-plugin/marketplace.json", &m)
 	if m.Name != "sock-integrations" || len(m.Plugins) != 1 || m.Plugins[0].Name != "sock" || m.Plugins[0].Source != "./claude-code" {
 		t.Fatalf("%+v", m)
+	}
+}
+
+// Codex hook handlers have no args field (developers.openai.com/codex/hooks,
+// served at learn.chatgpt.com/docs/hooks): arguments ride in the command string.
+func TestCodexHooks(t *testing.T) {
+	var f struct {
+		Hooks map[string][]hookEntry `json:"hooks"`
+	}
+	readJSON(t, "codex/hooks.json", &f)
+	const script = "/ABSOLUTE/PATH/TO/sock-integrations/claude-code/hooks/notify.sh"
+	want := map[string]string{
+		"PermissionRequest": script + ` "needs permission"`,
+		"Stop":              script + ` --stop "finished a turn"`,
+	}
+	if len(f.Hooks) != len(want) {
+		t.Fatalf("unexpected events: %v", f.Hooks)
+	}
+	for ev, cmd := range want {
+		got := f.Hooks[ev]
+		if len(got) != 1 || len(got[0].Hooks) != 1 {
+			t.Fatalf("%s: %+v", ev, got)
+		}
+		h := got[0].Hooks[0]
+		if !h.Async || h.Type != "command" || h.Cmd != cmd || len(h.Args) != 0 {
+			t.Fatalf("%s: %+v", ev, h)
+		}
+	}
+}
+
+func TestSkillKeepsOneConsumerRule(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join(repoRoot(t), "claude-code", "skills", "sock", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "Do not call `sock_fetch` or `sock_ack`") {
+		t.Fatal("SKILL.md lost the one-consumer rule")
 	}
 }

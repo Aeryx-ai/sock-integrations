@@ -1,0 +1,3 @@
+[mcp_servers.sock]
+command = "sock-mcp"
+env_vars = ["SOCK_TOKEN", "SOCK_URL"]
