@@ -1,0 +1,130 @@
+package test
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+type hookCmd struct {
+	Type  string   `json:"type"`
+	Cmd   string   `json:"command"`
+	Args  []string `json:"args"`
+	Async bool     `json:"async"`
+}
+type hookEntry struct {
+	Matcher string    `json:"matcher"`
+	Hooks   []hookCmd `json:"hooks"`
+}
+
+func readJSON(t *testing.T, rel string, v any) {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(repoRoot(t), rel))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(b, v); err != nil {
+		t.Fatalf("%s: %v", rel, err)
+	}
+}
+
+func TestClaudeCodeHooks(t *testing.T) {
+	var f struct {
+		Hooks map[string][]hookEntry `json:"hooks"`
+	}
+	readJSON(t, "claude-code/hooks/hooks.json", &f)
+	want := map[string][][]string{ // event -> [matcher, arg0, arg1...]
+		"Notification": {{"permission_prompt", "needs permission"}, {"idle_prompt", "waiting for you"}},
+		"Stop":         {{"", "--stop", "finished a turn"}},
+	}
+	for ev, rows := range want {
+		got := f.Hooks[ev]
+		if len(got) != len(rows) {
+			t.Fatalf("%s: %d entries, want %d", ev, len(got), len(rows))
+		}
+		for i, row := range rows {
+			e := got[i]
+			if e.Matcher != row[0] || len(e.Hooks) != 1 {
+				t.Fatalf("%s[%d]: %+v", ev, i, e)
+			}
+			h := e.Hooks[0]
+			if h.Type != "command" || h.Cmd != "${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh" || !h.Async {
+				t.Fatalf("%s[%d]: %+v", ev, i, h)
+			}
+			if len(h.Args) != len(row)-1 {
+				t.Fatalf("%s[%d] args %v", ev, i, h.Args)
+			}
+			for j, a := range row[1:] {
+				if h.Args[j] != a {
+					t.Fatalf("%s[%d] args %v, want %v", ev, i, h.Args, row[1:])
+				}
+			}
+		}
+	}
+	if len(f.Hooks) != len(want) {
+		t.Fatalf("unexpected events: %v", f.Hooks)
+	}
+}
+
+func TestPluginManifest(t *testing.T) {
+	var p struct {
+		Name       string `json:"name"`
+		License    string `json:"license"`
+		UserConfig map[string]struct {
+			Type      string `json:"type"`
+			Sensitive bool   `json:"sensitive"`
+			Required  bool   `json:"required"`
+		} `json:"userConfig"`
+		Channels []struct {
+			Server string `json:"server"`
+		} `json:"channels"`
+	}
+	readJSON(t, "claude-code/.claude-plugin/plugin.json", &p)
+	if p.Name != "sock" || p.License != "MIT" {
+		t.Fatalf("%+v", p)
+	}
+	if c := p.UserConfig["sock_token"]; !c.Sensitive || !c.Required {
+		t.Fatalf("sock_token must be sensitive and required: %+v", c)
+	}
+	for _, k := range []string{"sock_url", "notify_on_stop"} {
+		if _, ok := p.UserConfig[k]; !ok {
+			t.Fatalf("missing userConfig %s", k)
+		}
+	}
+	if len(p.Channels) != 1 || p.Channels[0].Server != "sock" {
+		t.Fatalf("channels %+v", p.Channels)
+	}
+}
+
+func TestMCPConfigNeverHoldsLiteralToken(t *testing.T) {
+	var m struct {
+		MCPServers map[string]struct {
+			Command string            `json:"command"`
+			Args    []string          `json:"args"`
+			Env     map[string]string `json:"env"`
+		} `json:"mcpServers"`
+	}
+	readJSON(t, "claude-code/.mcp.json", &m)
+	s := m.MCPServers["sock"]
+	if s.Command != "sock-mcp" || len(s.Args) != 1 || s.Args[0] != "--channel" {
+		t.Fatalf("%+v", s)
+	}
+	if s.Env["SOCK_TOKEN"] != "${user_config.sock_token}" || s.Env["SOCK_URL"] != "${user_config.sock_url}" {
+		t.Fatalf("env %+v", s.Env)
+	}
+}
+
+func TestMarketplace(t *testing.T) {
+	var m struct {
+		Name    string `json:"name"`
+		Plugins []struct {
+			Name   string `json:"name"`
+			Source string `json:"source"`
+		} `json:"plugins"`
+	}
+	readJSON(t, ".claude-plugin/marketplace.json", &m)
+	if m.Name != "sock-integrations" || len(m.Plugins) != 1 || m.Plugins[0].Name != "sock" || m.Plugins[0].Source != "./claude-code" {
+		t.Fatalf("%+v", m)
+	}
+}

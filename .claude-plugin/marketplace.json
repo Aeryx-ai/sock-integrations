@@ -1,0 +1,6 @@
+{
+  "name": "sock-integrations",
+  "description": "Plugins that let agents message their human through sock.",
+  "owner": { "name": "Guy Grigsby" },
+  "plugins": [{ "name": "sock", "source": "./claude-code", "description": "Message your human through sock." }]
+}
