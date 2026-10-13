@@ -134,10 +134,10 @@ func (c *mcpClient) readID(id int) []byte {
 // request sends one JSON-RPC request with the given id and returns its response line.
 func (c *mcpClient) request(id int, method, params string) []byte {
 	c.t.Helper()
-	if params == "" {
-		params = "null"
+	if params != "" {
+		params = `,"params":` + params
 	}
-	c.send(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":%q,"params":%s}`, id, method, params))
+	c.send(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":%q%s}`, id, method, params))
 	return c.readID(id)
 }
 
@@ -241,7 +241,6 @@ func TestScanTools(t *testing.T) {
 
 func TestToolNamesExist(t *testing.T) {
 	have := listTools(t, newStub(t).URL)
-	root := root
 	for _, rel := range []string{"claude-code/skills/sock/SKILL.md", "agent-sdk/example.ts", "codex/install.md", "docs/specs/integrations.md"} {
 		b, err := os.ReadFile(filepath.Join(root, rel))
 		if err != nil {

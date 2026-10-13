@@ -75,6 +75,26 @@ func TestEnvTokenNeverReachesPluginURL(t *testing.T) {
 	}
 }
 
+// An ambient access gate belongs to the env-token deployment and must not go to the plugin URL.
+func TestPluginTokenDropsAmbientAccessGate(t *testing.T) {
+	s := newStub(t)
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_other_other", "CLAUDE_PLUGIN_OPTION_SOCK_URL": s.URL, "SOCK_ACCESS_GATE": "gate-secret"}}, "x")
+	g := s.Requests()
+	if len(g) != 1 || g[0].Gate != "" {
+		t.Fatalf("access gate leaked to plugin URL: %+v", g)
+	}
+}
+
+// The env-token path keeps its gate.
+func TestEnvTokenKeepsAccessGate(t *testing.T) {
+	s := newStub(t)
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"SOCK_ACCESS_GATE": "gate-secret"}}, "x")
+	g := s.Requests()
+	if len(g) != 1 || g[0].Gate != "gate-secret" {
+		t.Fatalf("%+v", g)
+	}
+}
+
 func TestPluginOptionTokenUsedWhenSockTokenUnset(t *testing.T) {
 	s := newStub(t)
 	runHook(t, s.URL, hookEnv{Env: map[string]string{"SOCK_TOKEN": "", "CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_opt_opt", "CLAUDE_PLUGIN_OPTION_SOCK_URL": s.URL, "SOCK_URL": ""}}, "x")
@@ -230,7 +250,7 @@ func TestLogHasNoControlCharacters(t *testing.T) {
 	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": tmp + ":/usr/bin:/bin"}}, "x")
+	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": tmp + ":/usr/bin:/bin", "SOCK_HOOK_TIMEOUT": "10"}}, "x")
 	if !strings.Contains(r.Log, "pwned") {
 		t.Fatalf("no log: %q", r.Log)
 	}
@@ -250,7 +270,7 @@ func TestTokenNeverInLog(t *testing.T) {
 	if err := os.WriteFile(fake, []byte("#!/bin/sh\necho \"boom token=$SOCK_TOKEN\" >&2\nexit 1\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": tmp + ":/usr/bin:/bin"}}, "x")
+	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": tmp + ":/usr/bin:/bin", "SOCK_HOOK_TIMEOUT": "10"}}, "x")
 	if r.Log == "" || strings.Contains(r.Log, token) {
 		t.Fatalf("log %q", r.Log)
 	}
@@ -347,7 +367,26 @@ func TestTokenStraddlingCutIsRedacted(t *testing.T) {
 	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": tmp + ":/usr/bin:/bin"}}, "x")
+	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": tmp + ":/usr/bin:/bin", "SOCK_HOOK_TIMEOUT": "10"}}, "x")
+	if r.Log == "" {
+		t.Fatal("no log")
+	}
+	if strings.Contains(r.Log, token[:8]) {
+		t.Fatalf("token prefix leaked: %q", r.Log)
+	}
+}
+
+// A token split by a control byte is only whole after control characters are
+// stripped. The redaction must run after the strip, before the 300 byte cut.
+func TestTokenSplitByControlByteIsRedacted(t *testing.T) {
+	s := newStub(t)
+	tmp := t.TempDir()
+	fake := filepath.Join(tmp, "sock")
+	script := "#!/bin/sh\nprintf '%0290d' 0 >&2\nprintf '%s\\001%s\\n' \"${SOCK_TOKEN%????????}\" \"${SOCK_TOKEN#${SOCK_TOKEN%????????}}\" >&2\nexit 1\n"
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": tmp + ":/usr/bin:/bin", "SOCK_HOOK_TIMEOUT": "10"}}, "x")
 	if r.Log == "" {
 		t.Fatal("no log")
 	}

@@ -21,7 +21,7 @@ import (
 
 const token = "sock_pt_testdevice_testsecret"
 
-type rec struct{ Auth, Text string }
+type rec struct{ Auth, Gate, Text string }
 
 // stub is a loopback NotifyOwner. fail(n) returns the error for call n (1-based),
 // nil to succeed. block, when set, holds every call open until closed.
@@ -63,7 +63,7 @@ func newStub(t *testing.T) *stub {
 
 func (s *stub) NotifyOwner(ctx context.Context, req *connect.Request[sockv1.NotifyOwnerRequest]) (*connect.Response[sockv1.NotifyOwnerResponse], error) {
 	s.mu.Lock()
-	s.reqs = append(s.reqs, rec{req.Header().Get("Authorization"), req.Msg.GetText()})
+	s.reqs = append(s.reqs, rec{req.Header().Get("Authorization"), req.Header().Get("Sock-Access-Gate"), req.Msg.GetText()})
 	n := len(s.reqs)
 	fail, block := s.fail, s.block
 	s.mu.Unlock()

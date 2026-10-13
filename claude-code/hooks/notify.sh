@@ -20,6 +20,8 @@ log=$state_dir/hook.log
 if [ -n "${CLAUDE_PLUGIN_OPTION_SOCK_TOKEN:-}" ]; then
 	token=$CLAUDE_PLUGIN_OPTION_SOCK_TOKEN
 	url=${CLAUDE_PLUGIN_OPTION_SOCK_URL:-}
+	# An ambient access gate belongs to the env-token deployment, not this URL.
+	unset SOCK_ACCESS_GATE
 else
 	token=${SOCK_TOKEN:-}
 	url=${SOCK_URL:-}
@@ -105,8 +107,9 @@ kill "$watchdog" 2>/dev/null
 pkill -P "$watchdog" 2>/dev/null
 
 if [ "$rc" -ne 0 ]; then
-	# Redact the whole captured stderr before cutting, so a token straddling the cut cannot leak a prefix.
-	detail=$(head -c 65536 "$errf")
+	# Strip control bytes, then redact the whole captured stderr, then cut, so a
+	# token split by a control byte or straddling the cut cannot leak a prefix.
+	detail=$(head -c 65536 "$errf" | LC_ALL=C tr -d '[:cntrl:]')
 	if [ -n "$token" ]; then
 		detail=${detail//"$token"/[redacted]}
 	fi
