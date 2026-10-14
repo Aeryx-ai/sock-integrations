@@ -692,7 +692,7 @@ EOF
 
 # --- tool confirmations brokered through the owner ---------------------------
 # confirm.pending holds one line per call waiting on the owner:
-#   <code> <conversationId> <session> <tool_use_id> <pending|sent> <message id|-> <tool|?> <server|?>
+#   <code> <conversationId> <session> <tool_use_id> <pending|sent> <message id|-> <tool|?> <server|?> [<sent at>]
 # The code is 6 characters of a-km-z2-9 from /dev/urandom. It goes only into
 # this file and to the owner: never into the session, a request, the log or
 # any process's argv (a child gets it in its environment, BRIDGE_CODE or
@@ -701,10 +701,12 @@ EOF
 # most 50 lines (ask keeps the bound).
 confirm_file=$state_dir/confirm.pending
 
-# confirm_put FILE replaces confirm.pending with FILE
+# confirm_put FILE replaces confirm.pending with FILE, less any line marked
+# sent more than 24 hours ago (field 9, the time it was marked): its turn is
+# long over, and it would hold room in the bound for good
 confirm_put() {
 	{
-		cat "$1" >"$confirm_file.tmp" && chmod 600 "$confirm_file.tmp" && mv "$confirm_file.tmp" "$confirm_file"
+		awk -v t="$(($(now) - 86400))" '!($5 == "sent" && $9 + 0 < t + 0)' "$1" >"$confirm_file.tmp" && chmod 600 "$confirm_file.tmp" && mv "$confirm_file.tmp" "$confirm_file"
 	} 2>/dev/null || {
 		log_line "confirm not writable"
 		exit 1
@@ -747,11 +749,18 @@ new_code() {
 
 # pending_codes prints every code in confirm.pending, one per line
 pending_codes() { cut -d' ' -f1 "$confirm_file" 2>/dev/null; }
-# scrub_jq defines scrub: every code of $ENV.BRIDGE_CODES replaced by [code],
-# in any case, with format characters (Cf) allowed between its characters
+# scrub_jq defines scrub: every code of $ENV.BRIDGE_CODES replaced by [code].
+# The match folds, the text it leaves does not change: each character of the
+# code matches itself in either case and its fullwidth forms (U+FF01 to
+# U+FF5E), and may be followed by format characters (Cf, U+200B among them)
+# and combining marks (U+0300 to U+036F). Spacing, precomposed letters and
+# homoglyphs from other scripts are not folded (a residual the spec records).
 # shellcheck disable=SC2016 # jq's variables
-scrub_jq='def scrub: reduce ($ENV.BRIDGE_CODES // "" | split("\n")[] | select(test("\\A[a-km-z2-9]{6}\\z"))) as $c
-	(.; gsub($c | split("") | join("\\p{Cf}*"); "[code]"; "i"));'
+scrub_jq='def fw: explode | map(. + 65248) | implode;
+def pat: split("") | map(. as $ch | ($ch | ascii_upcase) as $up
+	| "[" + $ch + ($ch | fw) + (if $up != $ch then $up + ($up | fw) else "" end) + "][\\p{Cf}\\x{0300}-\\x{036F}]*") | join("");
+def scrub: reduce ($ENV.BRIDGE_CODES // "" | split("\n")[] | select(test("\\A[a-km-z2-9]{6}\\z"))) as $c
+	(.; gsub($c | pat; "[code]"));'
 
 # requests prints, for each line of this conversation and session still
 # pending, what the owner replies to answer it
@@ -813,24 +822,19 @@ EOF
 		confirm_put "$cfnew"
 		answer "the agent is waiting for approval of a tool call" "waiting for approval"
 	fi
-	# The bound, 50 lines. A sent line and a call of this turn are never
-	# evicted; other pending lines go oldest first, and calls past the bound
-	# are not asked: the owner answers those in the console.
-	held=$(awk -v s="$session" '$5 == "sent" || "" $3 == "" s' "$cfnew" | wc -l | tr -d ' ')
-	others=$(($(wc -l <"$cfnew" | tr -d ' ') - held))
-	room=$((50 - held))
+	# The bound: 50 lines, sent ones counted, and at most 20 new codes a
+	# turn. No line is evicted, another session's least of all: calls past
+	# the bound are not asked, and the owner answers those in the console.
+	confirm_put "$cfnew"
+	room=$((50 - $(wc -l <"$confirm_file" | tr -d ' ')))
+	[ "$room" -le 20 ] || room=20
 	[ "$room" -ge 0 ] || room=0
 	skipped=0
 	if [ "$added" -gt "$room" ]; then
 		skipped=$((added - room))
 		added=$room
 	fi
-	drop=$((others - (room - added)))
-	[ "$drop" -ge 0 ] || drop=0
-	if ! {
-		awk -v s="$session" -v d="$drop" '$5 == "sent" || "" $3 == "" s { print; next } ++n > d' "$cfnew" &&
-			awk -v a="$added" 'NR <= a' "$cfadd"
-	} >"$cfall" 2>/dev/null; then
+	if ! { cat "$confirm_file" && awk -v a="$added" 'NR <= a' "$cfadd"; } >"$cfall" 2>/dev/null; then
 		log_line "confirm not writable"
 		exit 1
 	fi
@@ -898,13 +902,12 @@ confirm_line() {
 }
 
 # confirm_body writes the confirmation to $body: the reason, if any, cleaned of
-# control and format characters, every code in confirm.pending replaced by
-# [code] in any case, cut to 1000 bytes on a character boundary
+# control characters, every code in confirm.pending replaced by [code] (as
+# scrub matches it; the reason's other format characters stay), cut to 1000
+# bytes on a character boundary
 confirm_body() {
 	if [ "$verb" = deny ]; then
-		# format characters (Cf, U+200B among them) go before the codes are
-		# looked for, so none can hide a code
-		clean_text <"$reasonf" | BRIDGE_CODES=$(pending_codes) jq -Rjs "$scrub_jq"'gsub("\\p{Cf}"; "") | scrub' >"$cfadd" || exit 1
+		clean_text <"$reasonf" | BRIDGE_CODES=$(pending_codes) jq -Rjs "$scrub_jq"'scrub' >"$cfadd" || exit 1
 		LC_ALL=C awk -v max=1000 "$awk_cut"'
 			BEGIN { ord_init() } { buf = buf (NR > 1 ? "\n" : "") $0 } END { printf "%s", substr(buf, 1, cut_at(buf, max)) }' "$cfadd" >"$reasonf" || exit 1
 	fi
@@ -937,7 +940,7 @@ confirm() {
 	# marked sent before the POST, as sent.ids is: a confirmation that may
 	# have landed is looked up in the history before it is posted again
 	# shellcheck disable=SC2016 # awk's fields
-	confirm_keep '"" $1 == "" c && "" $2 == "" v { $5 = "sent"; $6 = m } { print }'
+	confirm_keep '"" $1 == "" c && "" $2 == "" v { $5 = "sent"; $6 = m; $9 = '"$(now)"' } { print }'
 	pass=400
 	if ! api POST "$base?beta=true" "$body"; then
 		# not pending at the API: answered in the console, or the session

@@ -567,25 +567,6 @@ func TestConfirmAsksFromHistory(t *testing.T) {
 	}
 }
 
-func TestConfirmPendingHoldsAtMostFiftyLines(t *testing.T) {
-	h := newBridgeHarness(t)
-	if err := os.MkdirAll(h.state, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	var b strings.Builder
-	for i := range 60 {
-		b.WriteString("aaaaa" + string(rune('a'+i%10)) + " " + bnConv2 + " sesn_OTHER sevt_old" + string(rune('a'+i%26)) + " pending - x ?\n")
-	}
-	if err := os.WriteFile(filepath.Join(h.state, "confirm.pending"), []byte(b.String()), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	code := h.askOnce()
-	p := h.pendingFile()
-	if n := strings.Count(p, "\n"); n > 50 || !strings.Contains(p, code+" "+rnConvID) {
-		t.Fatalf("%d lines, new line kept: %v", n, strings.Contains(p, code))
-	}
-}
-
 // awk compares strings that read as numbers as numbers: 2e3333 and 9e9999 are
 // both infinite. A code is matched as text.
 func TestConfirmCodesMatchAsTextNotNumbers(t *testing.T) {
@@ -739,44 +720,6 @@ func TestConfirmCodesAreInNoArgv(t *testing.T) {
 	}
 }
 
-// L5: the bound never evicts a sent line or a call of the current turn; calls
-// past it are not asked, and the owner is told to answer them in the console
-func TestConfirmTheBoundEvictsNoSentLine(t *testing.T) {
-	h := newBridgeHarness(t)
-	if err := os.MkdirAll(h.state, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	sent := "sssss2 " + bnConv2 + " sesn_OTHER sevt_sent sent aaaaaaaa-aaaa-4aaa-8aaa-000000000099 x ?\n"
-	old := ""
-	for i := range 3 {
-		old += "oooo" + string(rune('a'+i)) + "2 " + bnConv2 + " sesn_OTHER sevt_old" + string(rune('a'+i)) + " pending - x ?\n"
-	}
-	if err := os.WriteFile(filepath.Join(h.state, "confirm.pending"), []byte(sent+old), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	var evs []any
-	var ids []string
-	for i := range 55 {
-		id := "sevt_many" + strconv.Itoa(i)
-		evs = append(evs, toolUse(id, "agent.tool_use", cfName, "ask"))
-		ids = append(ids, id)
-	}
-	h.script(append(evs, blocked(ids...))...)
-	if r := h.run(rnOpts{}); r.Code != 0 {
-		t.Fatalf("exit %d", r.Code)
-	}
-	p := h.pendingFile()
-	if n := strings.Count(p, "\n"); n != 50 || !strings.Contains(p, sent) || strings.Contains(p, "sevt_olda") {
-		t.Fatalf("%d lines, sent kept %v: %q", n, strings.Contains(p, sent), p)
-	}
-	if c := h.codes(); len(c) != 49 {
-		t.Fatalf("%d codes", len(c))
-	}
-	if !strings.Contains(h.sends()[0].Text, "6 more tool calls wait for approval: answer them in the Managed Agents console") {
-		t.Fatalf("posted %q", h.sends()[0].Text[len(h.sends()[0].Text)-200:])
-	}
-}
-
 // L6: an id listed twice is one call with one code
 func TestConfirmDuplicateEventIDsGetOneCode(t *testing.T) {
 	h := newBridgeHarness(t)
@@ -786,5 +729,193 @@ func TestConfirmDuplicateEventIDsGetOneCode(t *testing.T) {
 	}
 	if c := h.codes(); len(c) != 1 || strings.Count(h.pendingFile(), "\n") != 1 {
 		t.Fatalf("codes %v pending %q", c, h.pendingFile())
+	}
+}
+
+// writeLines puts n lines of another conversation and session in
+// confirm.pending, in state st, sent at that time when st is sent
+func (h *bnHarness) writeLines(n int, st string, at int64) string {
+	h.t.Helper()
+	if err := os.MkdirAll(h.state, 0o700); err != nil {
+		h.t.Fatal(err)
+	}
+	var b strings.Builder
+	for i := range n {
+		code := fmt.Sprintf("%c%c%c222", 'a'+i%10, 'a'+i/10%10, 'q')
+		if st == "sent" {
+			fmt.Fprintf(&b, "%s %s sesn_OTHER sevt_o%d sent aaaaaaaa-aaaa-4aaa-8aaa-%012d x ? %d\n", code, bnConv2, i, i, at)
+		} else {
+			fmt.Fprintf(&b, "%s %s sesn_OTHER sevt_o%d pending - x ?\n", code, bnConv2, i)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(h.state, "confirm.pending"), []byte(b.String()), 0o600); err != nil {
+		h.t.Fatal(err)
+	}
+	return b.String()
+}
+
+// manyCalls plays a turn that waits on n calls evaluated ask
+func (h *bnHarness) manyCalls(n int) {
+	var evs []any
+	var ids []string
+	for i := range n {
+		id := "sevt_many" + strconv.Itoa(i)
+		evs = append(evs, toolUse(id, "agent.tool_use", cfName, "ask"))
+		ids = append(ids, id)
+	}
+	h.script(append(evs, blocked(ids...))...)
+}
+
+func (h *bnHarness) note(n int) string {
+	if n == 1 {
+		return "1 more tool call waits for approval: answer them in the Managed Agents console"
+	}
+	return strconv.Itoa(n) + " more tool calls wait for approval: answer them in the Managed Agents console"
+}
+
+// R3: one turn asks at most 20 calls
+func TestConfirmATurnAsksAtMostTwenty(t *testing.T) {
+	h := newBridgeHarness(t)
+	h.manyCalls(25)
+	if r := h.run(rnOpts{}); r.Code != 0 {
+		t.Fatalf("exit %d", r.Code)
+	}
+	if c := h.codes(); len(c) != 20 || strings.Count(h.pendingFile(), "\n") != 20 || !strings.Contains(h.sends()[0].Text, h.note(5)) {
+		t.Fatalf("%d codes, %d lines, posted %q", len(c), strings.Count(h.pendingFile(), "\n"), h.sends()[0].Text)
+	}
+}
+
+// R3: a turn never evicts another session's lines; with the file full it asks
+// nothing and says so (the reviewer's input: 50 lines, then 55 calls)
+func TestConfirmATurnNeverEvictsAnotherSession(t *testing.T) {
+	h := newBridgeHarness(t)
+	old := h.writeLines(50, "pending", 0)
+	h.manyCalls(55)
+	if r := h.run(rnOpts{}); r.Code != 0 {
+		t.Fatalf("exit %d", r.Code)
+	}
+	if p := h.pendingFile(); p != old || len(h.codes()) != 0 || h.sends()[0].Text != h.note(55) {
+		t.Fatalf("kept %v, codes %v, posted %q", p == old, h.codes(), h.sends()[0].Text)
+	}
+	// with room for a few, only those are asked, and nothing is evicted
+	g := newBridgeHarnessNoParallel(t)
+	old = g.writeLines(47, "pending", 0)
+	g.manyCalls(5)
+	if r := g.run(rnOpts{}); r.Code != 0 {
+		t.Fatalf("exit %d", r.Code)
+	}
+	if p := g.pendingFile(); !strings.HasPrefix(p, old) || strings.Count(p, "\n") != 50 || len(g.codes()) != 3 || !strings.Contains(g.sends()[0].Text, g.note(2)) {
+		t.Fatalf("%d lines, codes %v, posted %q", strings.Count(p, "\n"), g.codes(), g.sends()[0].Text)
+	}
+}
+
+// R4: sent lines count toward the bound
+func TestConfirmSentLinesCountTowardTheBound(t *testing.T) {
+	h := newBridgeHarness(t)
+	old := h.writeLines(50, "sent", time.Now().Unix())
+	h.manyCalls(1)
+	if r := h.run(rnOpts{}); r.Code != 0 {
+		t.Fatalf("exit %d", r.Code)
+	}
+	if p := h.pendingFile(); p != old || len(h.codes()) != 0 || h.sends()[0].Text != h.note(1) {
+		t.Fatalf("kept %v, codes %v, posted %q", p == old, h.codes(), h.sends()[0].Text)
+	}
+}
+
+// R4: a sent line older than 24 hours is dropped (the reviewer's input: 60)
+func TestConfirmAnOldSentLineIsDropped(t *testing.T) {
+	h := newBridgeHarness(t)
+	h.writeLines(60, "sent", time.Now().Unix()-25*3600)
+	code := h.askOnce()
+	if p := h.pendingFile(); strings.Count(p, "\n") != 1 || !strings.HasPrefix(p, code+" ") {
+		t.Fatalf("pending %q", p)
+	}
+}
+
+// fullwidth is s in the fullwidth forms U+FF01 to U+FF5E
+func fullwidth(s string) string {
+	return strings.Map(func(r rune) rune { return r + 0xFEE0 }, s)
+}
+
+// marked is s with a combining mark after each character
+func marked(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		b.WriteRune(r)
+		b.WriteString("\u0323")
+	}
+	return b.String()
+}
+
+// folded is s as the scrub reads it: fullwidth folded, combining marks and
+// format characters dropped, lower case
+func folded(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 0xFF01 && r <= 0xFF5E {
+			r -= 0xFEE0
+		}
+		if (r >= 0x300 && r <= 0x36F) || unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return unicode.ToLower(r)
+	}, s)
+}
+
+// R1: fullwidth forms and combining marks hide no code from the scrub
+func TestConfirmScrubFoldsFullwidthAndCombiningMarks(t *testing.T) {
+	h := newBridgeHarness(t)
+	h.script(toolUse(cfTool, "agent.tool_use", cfName, "ask"), toolUse(cfTool2, "agent.tool_use", cfName, "ask"), blocked(cfTool, cfTool2))
+	if r := h.run(rnOpts{}); r.Code != 0 {
+		t.Fatalf("exit %d", r.Code)
+	}
+	c := h.codes()
+	o := c[1]
+	h.script(blocked(cfTool2))
+	reason := "FW:" + fullwidth(o) + " FWU:" + fullwidth(strings.ToUpper(o)) + " CB:" + marked(o) + " MIX:" + fullwidth(o[:3]) + "\u0301\u200b" + o[3:] + " keep é ｘ"
+	if r := h.run(h.reply(2, "deny "+c[0]+" "+reason)); r.Code != 0 {
+		t.Fatalf("exit %d", r.Code)
+	}
+	m, _ := h.api.confirmations()[0]["deny_message"].(string)
+	if strings.Contains(folded(m), o) || m != "FW:[code] FWU:[code] CB:[code] MIX:[code] keep é ｘ" {
+		t.Fatalf("deny_message %q", m)
+	}
+}
+
+// R1: the same in an ordinary reply, in another conversation's session
+func TestConfirmReplyScrubFoldsFullwidthAndCombiningMarks(t *testing.T) {
+	h := newConvHarness(t)
+	code := h.askOnce()
+	o := h.inConv(2, bnConv2)
+	f := h.fields()
+	f["id"] = o.Env["SOCK_MESSAGE_ID"]
+	f["conversationId"] = bnConv2
+	f["text"] = "a " + fullwidth(code) + " b " + marked(strings.ToUpper(code)) + " c"
+	o.Stdin = rnMessage(f)
+	h.script(idle("end_turn"))
+	if r := h.run(o); r.Code != 0 {
+		t.Fatalf("exit %d", r.Code)
+	}
+	b := h.api.sentBodies()
+	var body struct {
+		Events []struct{ Content []struct{ Text string } }
+	}
+	mustJSON(t, []byte(b[len(b)-1]), &body)
+	if text := body.Events[0].Content[0].Text; strings.Contains(folded(text), code) || !strings.Contains(text, "a [code] b [code] c") {
+		t.Fatalf("user.message %q", text)
+	}
+}
+
+// R2: a deny reason with no code keeps its format characters: an emoji's
+// joiners, right-to-left marks, a soft hyphen
+func TestConfirmDenyReasonKeepsJoinersAndMarks(t *testing.T) {
+	h := newBridgeHarness(t)
+	code := h.askOnce()
+	h.script(idle("end_turn"))
+	reason := "family \U0001F468\u200d\U0001F469\u200d\U0001F467 \u200fשלום\u200f \u061cمرحبا soft\u00adhyphen flag \U0001F3F4\U000E0067\U000E0062\U000E007F"
+	if r := h.run(h.reply(2, "deny "+code+" "+reason)); r.Code != 0 {
+		t.Fatalf("exit %d", r.Code)
+	}
+	if m, _ := h.api.confirmations()[0]["deny_message"].(string); m != reason {
+		t.Fatalf("deny_message %q, want %q", m, reason)
 	}
 }
