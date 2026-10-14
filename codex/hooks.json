@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/ABSOLUTE/PATH/TO/sock-integrations/claude-code/hooks/notify.sh \"needs permission\"",
+            "command": "/ABSOLUTE/PATH/TO/sock-integrations/claude-code/hooks/notify.sh --permission",
             "async": true
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/ABSOLUTE/PATH/TO/sock-integrations/claude-code/hooks/notify.sh --stop \"finished a turn\"",
+            "command": "/ABSOLUTE/PATH/TO/sock-integrations/claude-code/hooks/notify.sh --stop --ask-now",
             "async": true
           }
         ]

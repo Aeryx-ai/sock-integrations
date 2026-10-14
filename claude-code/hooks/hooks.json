@@ -7,7 +7,7 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh",
-            "args": ["needs permission"],
+            "args": ["--permission"],
             "async": true
           }
         ]
@@ -18,7 +18,7 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh",
-            "args": ["waiting for you"],
+            "args": ["--idle"],
             "async": true
           }
         ]
@@ -30,7 +30,7 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh",
-            "args": ["--stop", "finished a turn"],
+            "args": ["--stop"],
             "async": true
           }
         ]

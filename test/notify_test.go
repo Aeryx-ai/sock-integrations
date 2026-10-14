@@ -1,6 +1,7 @@
 package test
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -417,5 +418,169 @@ func TestInvalidTimeoutFallsBackToDefault(t *testing.T) {
 	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"SOCK_HOOK_TIMEOUT": "abc"}}, "x")
 	if r.Code != 0 || len(s.Requests()) != 1 || r.Log != "" {
 		t.Fatalf("%+v reqs=%d", r, len(s.Requests()))
+	}
+}
+
+// --- what the owner reads: the ask, not a fixed phrase ----------------------
+
+func hookJSON(fields map[string]any) string {
+	b, _ := json.Marshal(fields)
+	return string(b)
+}
+
+func stopInput(session, last string) string {
+	return hookJSON(map[string]any{"session_id": session, "hook_event_name": "Stop", "last_assistant_message": last, "stop_hook_active": false})
+}
+
+func idleInput(session string) string {
+	return hookJSON(map[string]any{"session_id": session, "hook_event_name": "Notification", "notification_type": "idle_prompt", "message": "Claude is waiting for your input"})
+}
+
+const askMessage = "I ran the tests and they pass.\n\n```sh\nexport SECRET_TOKEN_9f1=abc\n```\n\nShould I push the branch, or wait for the review?\n\n1) push now\n2) wait"
+
+const askExpected = "proj: Should I push the branch, or wait for the review?\n\n1) push now\n2) wait"
+
+func TestPermissionPromptForwardsTheNotificationText(t *testing.T) {
+	s := newStub(t)
+	in := hookJSON(map[string]any{"hook_event_name": "Notification", "notification_type": "permission_prompt", "message": "Claude needs your permission to use Bash"})
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PROJECT_DIR": "/x/proj"}, Stdin: in}, "--permission")
+	if g := s.Requests(); len(g) != 1 || g[0].Text != "proj: Claude needs your permission to use Bash" {
+		t.Fatalf("%+v", g)
+	}
+}
+
+func TestStopRecordsTheAskAndSendsNothing(t *testing.T) {
+	s := newStub(t)
+	runHook(t, s.URL, hookEnv{Stdin: stopInput("s1", askMessage)}, "--stop")
+	if g := s.Requests(); len(g) != 0 {
+		t.Fatalf("stop sent %+v", g)
+	}
+}
+
+func TestIdleSendsTheRecordedAskOnce(t *testing.T) {
+	s := newStub(t)
+	state := t.TempDir()
+	env := map[string]string{"CLAUDE_PROJECT_DIR": "/x/proj"}
+	runHook(t, s.URL, hookEnv{Env: env, Stdin: stopInput("s1", askMessage), State: state}, "--stop")
+	runHook(t, s.URL, hookEnv{Env: env, Stdin: idleInput("s1"), State: state}, "--idle")
+	g := s.Requests()
+	if len(g) != 1 || g[0].Text != askExpected {
+		t.Fatalf("%+v", g)
+	}
+	if strings.Contains(g[0].Text, "SECRET_TOKEN_9f1") {
+		t.Fatalf("code block forwarded: %q", g[0].Text)
+	}
+	runHook(t, s.URL, hookEnv{Env: env, Stdin: idleInput("s1"), State: state}, "--idle")
+	if g := s.Requests(); len(g) != 1 {
+		t.Fatalf("the same ask was reposted: %+v", g)
+	}
+}
+
+func TestIdleWithNoAskSendsNothing(t *testing.T) {
+	s := newStub(t)
+	state := t.TempDir()
+	runHook(t, s.URL, hookEnv{Stdin: stopInput("s2", "Done. The tests pass and the branch is pushed."), State: state}, "--stop")
+	runHook(t, s.URL, hookEnv{Stdin: idleInput("s2"), State: state}, "--idle")
+	if g := s.Requests(); len(g) != 0 {
+		t.Fatalf("nothing was pending, yet %+v", g)
+	}
+}
+
+func TestANewAskAfterTheSameSessionIsSent(t *testing.T) {
+	s := newStub(t)
+	state := t.TempDir()
+	runHook(t, s.URL, hookEnv{Stdin: stopInput("s3", "First question?"), State: state}, "--stop")
+	runHook(t, s.URL, hookEnv{Stdin: idleInput("s3"), State: state}, "--idle")
+	runHook(t, s.URL, hookEnv{Stdin: stopInput("s3", "Second question?"), State: state}, "--stop")
+	runHook(t, s.URL, hookEnv{Stdin: idleInput("s3"), State: state}, "--idle")
+	g := s.Requests()
+	if len(g) != 2 || !strings.HasSuffix(g[0].Text, "First question?") || !strings.HasSuffix(g[1].Text, "Second question?") {
+		t.Fatalf("%+v", g)
+	}
+}
+
+func TestAskIsCappedAt600Bytes(t *testing.T) {
+	s := newStub(t)
+	state := t.TempDir()
+	long := strings.Repeat("Which of these many options would you like me to take for the deployment? ", 20)
+	runHook(t, s.URL, hookEnv{Stdin: stopInput("s4", long), State: state}, "--stop")
+	runHook(t, s.URL, hookEnv{Stdin: idleInput("s4"), State: state}, "--idle")
+	g := s.Requests()
+	if len(g) != 1 || len(g[0].Text) > 600+len("test: ") || !strings.HasPrefix(g[0].Text, "test: Which of these") {
+		t.Fatalf("len %d %q", len(g[0].Text), g[0].Text)
+	}
+}
+
+func TestIdleFallsBackToTheTranscript(t *testing.T) {
+	s := newStub(t)
+	tmp := t.TempDir()
+	transcript := filepath.Join(tmp, "s5.jsonl")
+	lines := []string{
+		hookJSON(map[string]any{"type": "user", "message": map[string]any{"content": "hi"}}),
+		hookJSON(map[string]any{"type": "assistant", "message": map[string]any{"content": []map[string]any{{"type": "text", "text": "Earlier answer."}}}}),
+		hookJSON(map[string]any{"type": "assistant", "message": map[string]any{"content": []map[string]any{{"type": "tool_use", "name": "Bash"}, {"type": "text", "text": "Deploy to staging first, or straight to production?"}}}}),
+	}
+	if err := os.WriteFile(transcript, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	in := hookJSON(map[string]any{"session_id": "s5", "hook_event_name": "Notification", "notification_type": "idle_prompt", "transcript_path": transcript})
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PROJECT_DIR": "/x/proj"}, Stdin: in}, "--idle")
+	if g := s.Requests(); len(g) != 1 || g[0].Text != "proj: Deploy to staging first, or straight to production?" {
+		t.Fatalf("%+v", g)
+	}
+}
+
+func TestStopWithAskNowSendsAtOnce(t *testing.T) {
+	s := newStub(t)
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PROJECT_DIR": "/x/proj"}, Stdin: stopInput("s6", askMessage)}, "--stop", "--ask-now")
+	if g := s.Requests(); len(g) != 1 || g[0].Text != askExpected {
+		t.Fatalf("%+v", g)
+	}
+}
+
+func TestNotifyOnStopStillSendsFinishedATurn(t *testing.T) {
+	s := newStub(t)
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PROJECT_DIR": "/x/proj", "CLAUDE_PLUGIN_OPTION_NOTIFY_ON_STOP": "true"}, Stdin: stopInput("s7", "Done.")}, "--stop")
+	if g := s.Requests(); len(g) != 1 || g[0].Text != "proj: finished a turn" {
+		t.Fatalf("%+v", g)
+	}
+}
+
+// binWithoutJq builds a PATH directory holding sock and the utilities the hook
+// needs, and no jq: macOS ships one in /usr/bin, so the system dirs cannot be
+// on the PATH.
+func binWithoutJq(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Symlink(sockBin(t), filepath.Join(dir, "sock")); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"env", "bash", "sh", "tr", "cut", "basename", "awk", "sed", "head", "tail", "shasum", "sha256sum", "find", "wc", "mktemp", "cat", "mkdir", "date", "sleep", "kill", "pkill", "rm"} {
+		for _, d := range []string{"/usr/bin", "/bin"} {
+			if _, err := os.Stat(filepath.Join(d, name)); err == nil {
+				if err := os.Symlink(filepath.Join(d, name), filepath.Join(dir, name)); err != nil {
+					t.Fatal(err)
+				}
+				break
+			}
+		}
+	}
+	return dir
+}
+
+func TestWithoutJqPermissionKeepsThePhraseAndIdleStaysQuiet(t *testing.T) {
+	s := newStub(t)
+	env := map[string]string{"PATH": binWithoutJq(t), "CLAUDE_PROJECT_DIR": "/x/proj"}
+	in := hookJSON(map[string]any{"hook_event_name": "Notification", "notification_type": "permission_prompt", "message": "Claude needs your permission to use Bash"})
+	r := runHook(t, s.URL, hookEnv{Env: env, Stdin: in}, "--permission")
+	if g := s.Requests(); len(g) != 1 || g[0].Text != "proj: needs permission" {
+		t.Fatalf("%+v", g)
+	}
+	if !strings.Contains(r.Log, "jq") {
+		t.Fatalf("log %q", r.Log)
+	}
+	runHook(t, s.URL, hookEnv{Env: env, Stdin: idleInput("s8")}, "--idle")
+	if g := s.Requests(); len(g) != 1 {
+		t.Fatalf("idle without jq sent: %+v", g)
 	}
 }

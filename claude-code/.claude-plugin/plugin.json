@@ -1,7 +1,7 @@
 {
   "name": "sock",
   "description": "Message your human through sock: hooks for permission and idle prompts, the sock-mcp tools and the Claude Code channel.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": { "name": "Guy Grigsby" },
   "license": "MIT",
   "userConfig": {

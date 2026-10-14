@@ -36,8 +36,8 @@ func TestClaudeCodeHooks(t *testing.T) {
 	}
 	readJSON(t, "claude-code/hooks/hooks.json", &f)
 	want := map[string][][]string{ // event -> [matcher, arg0, arg1...]
-		"Notification": {{"permission_prompt", "needs permission"}, {"idle_prompt", "waiting for you"}},
-		"Stop":         {{"", "--stop", "finished a turn"}},
+		"Notification": {{"permission_prompt", "--permission"}, {"idle_prompt", "--idle"}},
+		"Stop":         {{"", "--stop"}},
 	}
 	for ev, rows := range want {
 		got := f.Hooks[ev]
@@ -143,8 +143,8 @@ func TestCodexHooks(t *testing.T) {
 	readJSON(t, "codex/hooks.json", &f)
 	const script = "/ABSOLUTE/PATH/TO/sock-integrations/claude-code/hooks/notify.sh"
 	want := map[string]string{
-		"PermissionRequest": script + ` "needs permission"`,
-		"Stop":              script + ` --stop "finished a turn"`,
+		"PermissionRequest": script + ` --permission`,
+		"Stop":              script + ` --stop --ask-now`,
 	}
 	if len(f.Hooks) != len(want) {
 		t.Fatalf("unexpected events: %v", f.Hooks)
@@ -212,8 +212,8 @@ func TestCodexPluginHooks(t *testing.T) {
 	readJSON(t, "hooks/hooks.json", &f)
 	const script = `"${PLUGIN_ROOT}/claude-code/hooks/notify.sh"`
 	want := map[string]string{
-		"PermissionRequest": script + ` "needs permission"`,
-		"Stop":              script + ` --stop "finished a turn"`,
+		"PermissionRequest": script + ` --permission`,
+		"Stop":              script + ` --stop --ask-now`,
 	}
 	if len(f.Hooks) != len(want) {
 		t.Fatalf("unexpected events: %v", f.Hooks)

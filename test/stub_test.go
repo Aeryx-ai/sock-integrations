@@ -133,7 +133,11 @@ type hookEnv struct {
 	Stdin     string
 	StdinFile *os.File // used instead of Stdin when set
 	HomeRO    bool     // make the state dir (XDG_STATE_HOME) unwritable
+	State     string   // a state dir shared across runs; fresh per run when empty
 }
+
+// hookPathTail is where jq lives on this machine, after the per-run bin dir.
+const hookPathTail = "/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin"
 
 // runHook runs the real notify.sh with a clean environment. The real sock
 // binary is on PATH unless env.Env["PATH"] overrides it.
@@ -147,9 +151,12 @@ func runHook(t *testing.T, stubURL string, he hookEnv, args ...string) result {
 	if err := os.Symlink(sockBin(t), filepath.Join(binDir, "sock")); err != nil {
 		t.Fatal(err)
 	}
-	state := filepath.Join(tmp, "state")
+	state := he.State
+	if state == "" {
+		state = filepath.Join(tmp, "state")
+	}
 	env := map[string]string{
-		"PATH":              binDir + ":/usr/bin:/bin",
+		"PATH":              binDir + ":" + hookPathTail,
 		"HOME":              filepath.Join(tmp, "home"),
 		"XDG_STATE_HOME":    state,
 		"TMPDIR":            tmp,

@@ -221,7 +221,7 @@ func TestToolSetPinned(t *testing.T) {
 // prefix is stripped first so SDK allowedTools entries are checked too.
 func scanTools(text string) []string {
 	re := regexp.MustCompile(`\bsock_[a-z_]+\b`)
-	skip := regexp.MustCompile(`^sock_(pt|st|ot|token|url)(_|$)`) // token prefixes and userConfig keys
+	skip := regexp.MustCompile(`^sock_(pt|st|ot|mk|rt|ct|token|url|machine_key)(_|$)`) // token prefixes and userConfig keys
 	var out []string
 	for _, name := range re.FindAllString(strings.ReplaceAll(text, "mcp__sock__", ""), -1) {
 		if skip.MatchString(name) || strings.HasSuffix(name, "_") {
@@ -233,7 +233,7 @@ func scanTools(text string) []string {
 }
 
 func TestScanTools(t *testing.T) {
-	got := scanTools("allowed: \"mcp__sock__sock_send\", sock_pt_x, `sock_token`, sock_url, sock_fetch")
+	got := scanTools("allowed: \"mcp__sock__sock_send\", sock_pt_x, `sock_token`, sock_url, sock_fetch, sock_machine_key, sock_mk_y")
 	if strings.Join(got, ",") != "sock_send,sock_fetch" {
 		t.Fatalf("%v", got)
 	}

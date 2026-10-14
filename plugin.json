@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "sock",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Message your human through sock: hooks for permission requests and finished turns, and the sock-mcp send tool.",
   "author": { "name": "Guy Grigsby" },
   "repository": "https://github.com/guygrigsby/sock-integrations",

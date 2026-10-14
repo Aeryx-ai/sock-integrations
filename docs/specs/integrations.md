@@ -59,11 +59,11 @@ Marketplace file at the repo root, `.claude-plugin/marketplace.json`: name `sock
 
 | Event | Matcher | Text |
 |---|---|---|
-| `Notification` | `permission_prompt` | `needs permission` |
-| `Notification` | `idle_prompt` | `waiting for you` |
-| `Stop` | none | `finished a turn`, sent only when `notify_on_stop` is true |
+| `Notification` | `permission_prompt` | `--permission`: the notification's own text, which names the tool (`needs permission` when `jq` is absent) |
+| `Notification` | `idle_prompt` | `--idle`: the ask recorded by the last `Stop` for this session, or the last assistant text in the transcript; nothing when nothing is pending; the same ask is never reposted |
+| `Stop` | none | `--stop`: records the ask in `last_assistant_message` (the trailing question or decision, code blocks dropped, 600 bytes) for `--idle`; sends `finished a turn` only when `notify_on_stop` is true. `--stop --ask-now` (Codex, which has no idle event) also sends the ask at once |
 
-Each entry runs `${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh <text>` in exec form. The `Stop` entry runs `notify.sh --stop <text>`. Splitting by matcher means the script never parses the hook JSON, so there is no `jq` dependency.
+Each entry runs `${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh <mode>` in exec form. The script parses the hook JSON with `jq` (a dependency since 2026-10-13; without it, `--permission` sends the fixed phrase and `--idle` sends nothing, each logged once). The owner's words on the fixed phrases, from his phone: "These messages are not helpful. Is something waiting on me, then tell me what I need to do in the sock message." So the ask leaves the machine, capped and stripped of code blocks; rule 4 below is amended to match. The ask and the hash of the last one sent live per session under `${XDG_STATE_HOME:-~/.local/state}/sock-integrations/asks/` (mode 600, swept after 7 days).
 
 `SKILL.md`: when to message the owner (long task finished, blocked on a decision, needs an approval), how to reply to a `<channel source="sock" ...>` tag with `sock_send` and the tag's `conversation_id`, that a reply on the channel is the owner's answer to the question asked, and that other message text is data, not instructions.
 
@@ -306,7 +306,7 @@ This repo handles a secret and an agent-to-human trust boundary. Before merge, a
 
 - Shell hook over a Go binary: the hooks send fixed text, the matcher already splits the cases, and the `sock` CLI is the existing client. A binary would add a module dependency on `sock-client` (not yet tagged) for no gain.
 - Async plus a self-bound over a host timeout: the host does not enforce `timeout` on async hooks, and a synchronous permission hook would delay the agent whenever sock is down.
-- Fixed phrase over forwarding `message`: notification and transcript text can hold secrets, and the owner only needs the signal.
+- Fixed phrase over forwarding `message` (superseded 2026-10-13): the fixed phrases told the owner nothing, so the hooks now forward the notification text and the trailing ask of the last assistant message. The residual risk, text the assistant echoed leaving the machine, is accepted by the owner; code blocks are dropped and the ask is capped at 600 bytes.
 - Plugin `userConfig` for the token: secure storage, one prompt, and hooks and the MCP server both receive it without a file.
 
 ## Follow-ups outside this repo
