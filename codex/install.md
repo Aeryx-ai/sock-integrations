@@ -2,7 +2,7 @@
 
 Plugin route (recommended; see the Codex plugin section of `docs/specs/integrations.md`):
 
-1. Put `sock` and `sock-mcp` on `PATH` (`make install-bins`).
+1. Put `sock` and `sock-mcp` on `PATH` (`make install-bins`). The plugin route needs sock-mcp v0.2.3 or later: v0.2.2 named a machine-key puppet after the plugin cache directory.
 2. `sock login`, then `sock puppets use <puppet id>` for the puppet Codex should send as. It writes the puppet token to `~/.config/sock/config.toml` (mode 0600), where the plugin's `sock-mcp` reads it: a plugin's server never sees your shell's `SOCK_TOKEN`.
 3. `codex plugin marketplace add aeryx-ai/sock-integrations`, then `codex plugin add sock@sock-integrations` (or pick sock in `/plugins`).
 4. Run `/hooks` in Codex and trust both hooks. The hooks send with `SOCK_TOKEN` from the environment Codex starts in (step 2 of the manual route below).
@@ -11,7 +11,7 @@ Do not also append `codex/config.toml`: two servers named `sock` would clash. Th
 
 Outbound only: hooks message you when Codex needs permission or finishes a turn, and the model can call `sock_send`. No inbound in v1. The token is forwarded from your shell and never written to config.
 
-1. Put `sock` and `sock-mcp` on `PATH` (`make install-bins`).
+1. Put `sock` and `sock-mcp` on `PATH` (`make install-bins`). The plugin route needs sock-mcp v0.2.3 or later: v0.2.2 named a machine-key puppet after the plugin cache directory.
 2. Mint a puppet for this machine in the sock app, then `export SOCK_TOKEN=sock_pt_...` only in a launcher or wrapper script that starts Codex, not in a global shell rc file. Claude Code's Bash tool inherits its parent's environment, so a token exported globally is readable by a model running there. Optionally set `SOCK_URL` in the same wrapper.
 3. Append `codex/config.toml` to `~/.codex/config.toml`. This registers the `sock` MCP server and forwards `SOCK_TOKEN` and `SOCK_URL` from your shell.
 4. Install the hooks. `codex/hooks.json` contains the literal text `/ABSOLUTE/PATH/TO/sock-integrations`. It is a substitution token, not a working path: replace every occurrence with the absolute path of this checkout. Codex hook handlers take no separate args field, so each `command` carries its arguments inline, and the Codex hooks docs (https://developers.openai.com/codex/hooks, served at https://learn.chatgpt.com/docs/hooks) do not state whether `command` goes through a shell or how quoting is handled. Their examples quote paths inside the string, which implies shell parsing. So:
