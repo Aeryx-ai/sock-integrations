@@ -171,12 +171,12 @@ func count(xs []string, x string) int {
 // M4: the stream GET retries 429 and 5xx with Retry-After or backoff, a few times
 func TestBridgeStreamOpenRetries(t *testing.T) {
 	for _, c := range []struct {
-		name   string
-		codes  []int
-		retry  string
-		want   int
-		opens  int
-		sends  int
+		name    string
+		codes   []int
+		retry   string
+		want    int
+		opens   int
+		sends   int
 		atLeast time.Duration
 	}{
 		{"429 with Retry-After", []int{429}, "2", 0, 2, 1, 2 * time.Second},
