@@ -520,7 +520,7 @@ map_put() {
 fits_jq='def fits($a; $e; $v; $b):
 	((.agent | objects | .id) == $a) and .environment_id == $e
 	and ($v == "" or ((.agent | objects | .version | numbers | tostring) == $v))
-	and ($b == "" or ([.budget | objects | .max_list_cost | objects | select(.currency == "USD")
+	and ($b == "" or ([.budget | objects | select(.type == "limit") | .max_list_cost | objects | select(.currency == "USD")
 		| .amount | strings | select(test("\\A[1-9][0-9]{0,11}\\z")) | tonumber <= ($b | tonumber)] == [true]));'
 
 # find_session sets session to the newest live session of the agent made for
@@ -569,14 +569,56 @@ create_session() {
 	api POST "$api/v1/sessions?beta=true" "$body"
 	creating=
 	session=$(jq -r '.id | strings' "$resp" 2>/dev/null)
-	# a session the bridge cannot use, and Find will not adopt: exit 2, since a
-	# retry would only create another one
+	# a session the bridge cannot use, and Find will not adopt: every retry and
+	# every later message would only create another, so trip the breaker
 	if ! session_ok "$session"; then
 		log_line "session id invalid"
-		echo "$cmd_name: the Managed Agents API answered a create with a session id the bridge refuses" >&2
-		exit 2
+		halt_trip
+	fi
+	# a session just made for this configuration must fit it: one that does not
+	# is a response the bridge cannot read, and would be replaced on every reply
+	if ! jq -e --arg a "$agent" --arg e "$environment" --arg v "$agent_version" --arg b "$budget" \
+		"$fits_jq"'fits($a; $e; $v; $b)' "$resp" >/dev/null 2>&1; then
+		log_line "session does not fit"
+		halt_trip
 	fi
 	map_put "$session"
+}
+
+# --- the create breaker: create.halt ------------------------------------------
+# A create the bridge cannot use writes create.halt, "<config hash> <posted>",
+# under the run lock, by tmp and rename, mode 600. While it holds the hash of
+# this configuration (agent, environment, version, budget) the bridge creates
+# and adopts nothing and exits 2; the owner is told once per halt. Another
+# configuration clears it, and so does deleting the file.
+halt_file=$state_dir/create.halt
+halt_hash=$(printf '%s\n' "$agent" "$environment" "$agent_version" "$budget" | hash16)
+halt_put() {
+	{
+		printf '%s %s\n' "$halt_hash" "$1" >"$halt_file.tmp" && chmod 600 "$halt_file.tmp" && mv "$halt_file.tmp" "$halt_file"
+	} 2>/dev/null || log_line "halt not writable"
+}
+# halted: when create.halt holds this configuration's hash, tells the owner
+# once and exits 2; another configuration's halt is cleared
+halted() {
+	[ -f "$halt_file" ] || return 0
+	read -r h_hash h_posted <"$halt_file" 2>/dev/null || h_hash=
+	if [ "$h_hash" != "$halt_hash" ]; then
+		rm -f "$halt_file"
+		return 0
+	fi
+	log_line "create halted"
+	if [ "${h_posted:-}" != posted ]; then
+		post_one "the bridge cannot start a session that fits its configuration; check SOCK_BRIDGE_AGENT, SOCK_BRIDGE_ENVIRONMENT and SOCK_BRIDGE_BUDGET" &&
+			halt_put posted
+	fi
+	echo "$cmd_name: session creation is halted for this configuration: a create answered a session the bridge cannot use. Fix SOCK_BRIDGE_AGENT, SOCK_BRIDGE_ENVIRONMENT or SOCK_BRIDGE_BUDGET, or delete $halt_file" >&2
+	exit 2
+}
+halt_trip() {
+	halt_put pending
+	halted
+	exit 2
 }
 
 # resolve_session sets session to this conversation's: the mapped one while it
@@ -614,6 +656,7 @@ resolve_session() {
 		map_put ""
 		log_line "$outcome"
 	fi
+	halted
 	find_session
 	if [ -n "$session" ]; then
 		map_put "$session"

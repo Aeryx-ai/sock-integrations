@@ -561,10 +561,13 @@ func TestBridgeConversationConfigChangeReplacesTheSession(t *testing.T) {
 		"console-raised":       {env: map[string]string{"SOCK_BRIDGE_BUDGET": "100"}, mod: func(s map[string]any) { s["budget"] = budgetOf("999") }, replace: true},
 		"higher config budget": {env: map[string]string{"SOCK_BRIDGE_BUDGET": "100"}, mod: func(s map[string]any) { s["budget"] = budgetOf("50") }},
 		"odd budget amount":    {env: map[string]string{"SOCK_BRIDGE_BUDGET": "100"}, mod: func(s map[string]any) { s["budget"] = budgetOf("5e1") }, replace: true},
-		"same pinned version":  {env: map[string]string{"SOCK_BRIDGE_AGENT_VERSION": "2"}, mod: func(s map[string]any) { s["agent"].(map[string]any)["version"] = float64(2) }},
-		"same budget":          {env: map[string]string{"SOCK_BRIDGE_BUDGET": "100"}, mod: func(s map[string]any) { s["budget"] = budgetOf("100") }},
-		"unpinned version":     {mod: func(s map[string]any) { s["agent"].(map[string]any)["version"] = float64(7) }},
-		"budget not set":       {mod: func(s map[string]any) { s["budget"] = budgetOf("50") }},
+		"budget not a limit": {env: map[string]string{"SOCK_BRIDGE_BUDGET": "100"}, mod: func(s map[string]any) {
+			s["budget"] = map[string]any{"type": "unlimited", "max_list_cost": map[string]any{"amount": "100", "currency": "USD"}}
+		}, replace: true},
+		"same pinned version": {env: map[string]string{"SOCK_BRIDGE_AGENT_VERSION": "2"}, mod: func(s map[string]any) { s["agent"].(map[string]any)["version"] = float64(2) }},
+		"same budget":         {env: map[string]string{"SOCK_BRIDGE_BUDGET": "100"}, mod: func(s map[string]any) { s["budget"] = budgetOf("100") }},
+		"unpinned version":    {mod: func(s map[string]any) { s["agent"].(map[string]any)["version"] = float64(7) }},
+		"budget not set":      {mod: func(s map[string]any) { s["budget"] = budgetOf("50") }},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newConvHarness(t)
@@ -679,4 +682,123 @@ func TestBridgeConversationFindAdoptsALowerBudget(t *testing.T) {
 	if r.Code != 0 || len(h.api.createBodies()) != 0 || h.sessionsFile() != rnConvID+" sesn_LOW\n" {
 		t.Fatalf("exit %d, %d creates, sessions %q", r.Code, len(h.api.createBodies()), h.sessionsFile())
 	}
+}
+
+const bnHaltMsg = "the bridge cannot start a session that fits its configuration; check SOCK_BRIDGE_AGENT, SOCK_BRIDGE_ENVIRONMENT and SOCK_BRIDGE_BUDGET"
+
+func (h *bnHarness) haltNotices() int {
+	n := 0
+	for _, s := range h.sends() {
+		if s.Text == bnHaltMsg {
+			n++
+		}
+	}
+	return n
+}
+
+// a create the bridge cannot use trips one durable breaker: 6 messages, each
+// delivered twice, make one create, and the owner hears of it once
+func TestBridgeConversationCreateBreaker(t *testing.T) {
+	for name, c := range map[string]struct {
+		env map[string]string
+		set func(*fakeMA)
+	}{
+		"refused id":        {set: func(f *fakeMA) { f.createID = "sesn a" }},
+		"budget not echoed": {env: map[string]string{"SOCK_BRIDGE_BUDGET": "100"}, set: func(f *fakeMA) { f.createNoBudget = true }},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newConvHarness(t)
+			for k, v := range c.env {
+				h.env[k] = v
+			}
+			h.api.set(c.set)
+			for i := range 6 {
+				h.script(agentMsg(bnAnswer), idle("end_turn"))
+				o := h.inConv(i+1, rnConvID)
+				for range 2 {
+					if r := h.run(o); r.Code != 2 {
+						t.Fatalf("message %d: exit %d, log %q", i, r.Code, h.bridgeLog())
+					}
+				}
+			}
+			if n := count(h.api.kinds(), "create"); n != 1 {
+				t.Fatalf("%d creates, want 1", n)
+			}
+			if n := count(h.api.kinds(), "find"); n != 1 {
+				t.Fatalf("%d finds: a halted bridge adopts nothing either", n)
+			}
+			if n := h.haltNotices(); n != 1 || len(h.sends()) != 1 {
+				t.Fatalf("%d halt notices, sends %v", n, h.sends())
+			}
+			if h.sessionsFile() != "" || len(h.api.sentBodies()) != 0 {
+				t.Fatalf("sessions %q, %d user.messages", h.sessionsFile(), len(h.api.sentBodies()))
+			}
+			if lg := h.bridgeLog(); strings.Count(lg, "create halted") < 12 {
+				t.Fatalf("log %q", lg)
+			}
+			st, err := os.Stat(filepath.Join(h.state, "create.halt"))
+			if err != nil || st.Mode().Perm() != 0o600 {
+				t.Fatalf("create.halt %v %v", st, err)
+			}
+			if _, err := os.Stat(filepath.Join(h.state, "create.halt.tmp")); err == nil {
+				t.Fatal("create.halt.tmp left behind")
+			}
+		})
+	}
+}
+
+// a changed configuration clears the breaker by itself, and so does deleting
+// the file; a mapped session that fits still serves while it is tripped
+func TestBridgeConversationCreateBreakerClears(t *testing.T) {
+	t.Run("config change", func(t *testing.T) {
+		h := newConvHarness(t)
+		h.env["SOCK_BRIDGE_BUDGET"] = "100"
+		h.api.set(func(f *fakeMA) { f.createNoBudget = true })
+		if r := h.run(rnOpts{}); r.Code != 2 {
+			t.Fatalf("trip: exit %d", r.Code)
+		}
+		h.api.set(func(f *fakeMA) { f.createNoBudget = false })
+		h.script(agentMsg(bnAnswer), idle("end_turn"))
+		if r := h.run(h.inConv(2, rnConvID)); r.Code != 2 {
+			t.Fatalf("same config: exit %d", r.Code)
+		}
+		h.env["SOCK_BRIDGE_BUDGET"] = "200"
+		r := h.run(h.inConv(3, rnConvID))
+		if r.Code != 0 || count(h.api.kinds(), "create") != 2 {
+			t.Fatalf("new config: exit %d, kinds %v, log %q", r.Code, h.api.kinds(), h.bridgeLog())
+		}
+		if _, err := os.Stat(filepath.Join(h.state, "create.halt")); err == nil {
+			t.Fatal("create.halt kept after the config changed")
+		}
+	})
+	t.Run("file deleted", func(t *testing.T) {
+		h := newConvHarness(t)
+		h.api.set(func(f *fakeMA) { f.createID = "sesn a" })
+		if r := h.run(rnOpts{}); r.Code != 2 {
+			t.Fatalf("trip: exit %d", r.Code)
+		}
+		h.api.set(func(f *fakeMA) { f.createID = "" })
+		if err := os.Remove(filepath.Join(h.state, "create.halt")); err != nil {
+			t.Fatal(err)
+		}
+		h.script(agentMsg(bnAnswer), idle("end_turn"))
+		if r := h.run(h.inConv(2, rnConvID)); r.Code != 0 {
+			t.Fatalf("after delete: exit %d, log %q", r.Code, h.bridgeLog())
+		}
+	})
+	t.Run("mapped session serves", func(t *testing.T) {
+		h := newConvHarness(t)
+		h.writeSessions(bnConv2 + " sesn_KEEP\n")
+		h.api.set(func(f *fakeMA) {
+			f.createID = "sesn a"
+			f.store = []map[string]any{maSession("sesn_KEEP", bnConv2, bnPuppet)}
+		})
+		if r := h.run(rnOpts{}); r.Code != 2 {
+			t.Fatalf("trip: exit %d", r.Code)
+		}
+		h.script(agentMsg(bnAnswer), idle("end_turn"))
+		if r := h.run(h.inConv(2, bnConv2)); r.Code != 0 {
+			t.Fatalf("mapped: exit %d, log %q", r.Code, h.bridgeLog())
+		}
+	})
 }
