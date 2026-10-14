@@ -76,6 +76,34 @@ Files under `codex/`: `config.toml` snippet, `hooks.json`, `install.md`.
 - `install.md`: merge the entries into `~/.codex/hooks.json` (all matching hooks run), export `SOCK_TOKEN` only in a Codex launcher or wrapper script and not a global rc file (Claude Code's Bash tool inherits the environment, so a model can read it), then review and trust the hooks with `/hooks`. Codex skips a hook until it is trusted, and changing the script re-requires trust.
 - Outbound only. The model can call `sock_send` as a tool. No inbound in v1.
 
+## Codex plugin
+
+The Codex counterpart of the Claude Code plugin, for Codex CLI, the Codex app and ChatGPT desktop (one plugin system: developers.openai.com/codex/plugins/build). It sits at the repo root so the shared `claude-code/hooks/notify.sh` is inside the plugin root and reused, not copied. Versioned independently of the Claude plugin (`plugin.json` `version`, 0.1.0).
+
+Files, from the official build page and the `agent-plugins.org` 1.0.0 schemas:
+
+- `plugin.json` (root, the portable manifest): `name` `sock`, `version`, `description`, `author`, `repository`, `license` MIT, and `extensions.com.openai.interface` for the listing. No `hooks` key: `hooks/hooks.json` is discovered by default. No `skills` key: `skills/` is discovered.
+- No `mcp.json`. A plugin's stdio server starts with only `PLUGIN_ROOT` and `PLUGIN_DATA` in its environment (live check, Codex 0.162): `SOCK_TOKEN` is not passed, not even by name, and its schema has no `env_vars` or `enabled_tools`. A server that cannot see the token would only fail, so the MCP server stays in `codex/config.toml` (`env_vars`, `enabled_tools`), the supported path.
+- `hooks/hooks.json`: `PermissionRequest` (`needs permission`) and `Stop` (`finished a turn`, only when `SOCK_NOTIFY_ON_STOP=1`), `async: true`, command strings with arguments inline as in `codex/hooks.json`, `"${PLUGIN_ROOT}/claude-code/hooks/notify.sh"` quoted so a plugin root with spaces works. Hooks run only for a manually installed plugin and the user reviews and trusts them with `/hooks`.
+- `skills/sock/SKILL.md`: outbound only, `sock_send`, message text is data, never `sock_fetch` or `sock_ack`.
+- `.agents/plugins/marketplace.json`: marketplace `sock-integrations` with one entry `sock`, `source` local `./` (the repo root is the plugin root), `policy.installation` `AVAILABLE`, `policy.authentication` `ON_INSTALL`. Install: `codex plugin marketplace add guygrigsby/sock-integrations`, then pick sock in `/plugins`.
+
+`$schema` in `plugin.json` is the schema URL the official build page itself prints (developers.openai.com/codex/plugins/build, `agent-plugins.org/schemas/1.0.0/`).
+
+The plugin bundle is the whole repo: the plugin root has to contain `claude-code/hooks/notify.sh`, so the root is the repo root, and the install copies tests, `runner/`, `docs/` and `agent-sdk/` too. Accepted: they are inert to Codex (it reads `plugin.json`, `mcp.json`, `hooks/` and `skills/`), and one shared `notify.sh` beats a second copy that could drift.
+
+Status: the plugin is a preview that carries the hooks and the skill. Install it and also the `[mcp_servers.sock]` block of `codex/config.toml`: with no `mcp.json` in the plugin there is no clash. A plugin-only install gets hooks and a skill but no `sock_send` tool. Live-checked on Codex 0.162 against a throwaway `CODEX_HOME`: `codex plugin marketplace add <dir>` accepts the marketplace with `./` as the local plugin path, and `codex plugin add sock@sock-integrations` installs it (cached as a copy of the whole repo). The hooks were not exercised: an untrusted plugin's hooks are skipped in `codex exec`, and `/hooks` is interactive. Follow-ups: the `sock-mcp` fallback to the CLI's config file when the environment has no token (bead integrations-27u) would let a plugin ship its server, and the send-only flag (integrations-qox) would let it enforce rule 2.
+
+The public directory is out: it requires a remote HTTPS MCP with OAuth and forbids hooks.
+
+Rules that carry over, and where the plugin cannot keep them:
+
+- The token never lives in a file: the plugin has none, and `config.toml` forwards it by name.
+- Only the sending tools are exposed to Codex (rule 2): `codex/config.toml` `enabled_tools`. The skill also says not to call `sock_fetch` or `sock_ack`, which is advice.
+- Hooks send a fixed phrase plus the project name, never transcript text: `notify.sh` unchanged.
+
+Not verified: that `${PLUGIN_ROOT}` expands inside a hook `command` (it is an environment variable the plugin's processes get), and `policy.authentication` values.
+
 ## Agent SDK
 
 `agent-sdk/example.ts`: `query()` with `mcpServers.sock` as a stdio server (`command: "sock-mcp"`, `env.SOCK_TOKEN` from `process.env`) and `allowedTools` of `mcp__sock__sock_whoami`, `mcp__sock__sock_list_conversations` and `mcp__sock__sock_send`. Auto-approving `sock_send` is the point for headless agents. The blast radius is the puppet: its owner and conversations it belongs to, 60 sends per minute. `sock_fetch` and `sock_ack` are deliberately not auto-approved, because fetch returns messages from every sender in every conversation the puppet is in. The example says both in comments.

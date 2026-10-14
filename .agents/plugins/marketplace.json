@@ -1,0 +1,12 @@
+{
+  "name": "sock-integrations",
+  "interface": { "displayName": "sock integrations" },
+  "plugins": [
+    {
+      "name": "sock",
+      "source": { "source": "local", "path": "./" },
+      "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+      "category": "Productivity"
+    }
+  ]
+}

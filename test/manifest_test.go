@@ -170,3 +170,102 @@ func TestSkillKeepsOneConsumerRule(t *testing.T) {
 		t.Fatal("SKILL.md lost the one-consumer rule")
 	}
 }
+
+func TestCodexPluginManifest(t *testing.T) {
+	var p struct {
+		Name       string `json:"name"`
+		Version    string `json:"version"`
+		License    string `json:"license"`
+		Extensions struct {
+			OpenAI map[string]any `json:"com.openai"`
+		} `json:"extensions"`
+	}
+	readJSON(t, "plugin.json", &p)
+	if p.Name != "sock" || p.License != "MIT" || p.Version == "" {
+		t.Fatalf("%+v", p)
+	}
+	// hooks and skills are found by their default places; naming them would
+	// replace the default discovery
+	if _, ok := p.Extensions.OpenAI["hooks"]; ok {
+		t.Fatal("plugin.json sets extensions.com.openai.hooks: that replaces hooks/hooks.json")
+	}
+	if _, err := os.Stat(filepath.Join(root, "skills", "sock", "SKILL.md")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A plugin's stdio server starts with only PLUGIN_ROOT and PLUGIN_DATA in its
+// environment (live check, Codex 0.162): it cannot get SOCK_TOKEN, so the plugin
+// ships no MCP server and the config.toml block stays the supported path.
+func TestCodexPluginShipsNoMCPServer(t *testing.T) {
+	for _, rel := range []string{"mcp.json", ".mcp.json", ".app.json"} {
+		if _, err := os.Stat(filepath.Join(root, rel)); err == nil {
+			t.Fatalf("%s at the repo root would register a server that cannot see the token", rel)
+		}
+	}
+}
+
+func TestCodexPluginHooks(t *testing.T) {
+	var f struct {
+		Hooks map[string][]hookEntry `json:"hooks"`
+	}
+	readJSON(t, "hooks/hooks.json", &f)
+	const script = `"${PLUGIN_ROOT}/claude-code/hooks/notify.sh"`
+	want := map[string]string{
+		"PermissionRequest": script + ` "needs permission"`,
+		"Stop":              script + ` --stop "finished a turn"`,
+	}
+	if len(f.Hooks) != len(want) {
+		t.Fatalf("unexpected events: %v", f.Hooks)
+	}
+	for ev, cmd := range want {
+		got := f.Hooks[ev]
+		if len(got) != 1 || len(got[0].Hooks) != 1 {
+			t.Fatalf("%s: %+v", ev, got)
+		}
+		h := got[0].Hooks[0]
+		if !h.Async || h.Type != "command" || h.Cmd != cmd || len(h.Args) != 0 {
+			t.Fatalf("%s: %+v", ev, h)
+		}
+	}
+	// the plugin root is the repo root, so the shared script resolves inside it
+	if fi, err := os.Stat(filepath.Join(root, "claude-code", "hooks", "notify.sh")); err != nil || fi.Mode()&0o111 == 0 {
+		t.Fatalf("notify.sh is not an executable inside the plugin root: %v", err)
+	}
+}
+
+func TestCodexMarketplace(t *testing.T) {
+	var m struct {
+		Name    string `json:"name"`
+		Plugins []struct {
+			Name   string `json:"name"`
+			Source struct {
+				Source string `json:"source"`
+				Path   string `json:"path"`
+			} `json:"source"`
+			Policy struct {
+				Installation string `json:"installation"`
+			} `json:"policy"`
+		} `json:"plugins"`
+	}
+	readJSON(t, ".agents/plugins/marketplace.json", &m)
+	if m.Name != "sock-integrations" || len(m.Plugins) != 1 {
+		t.Fatalf("%+v", m)
+	}
+	p := m.Plugins[0]
+	if p.Name != "sock" || p.Source.Source != "local" || p.Source.Path != "./" || p.Policy.Installation != "AVAILABLE" {
+		t.Fatalf("%+v", p)
+	}
+}
+
+func TestCodexSkillKeepsOutboundOnlyRules(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join(root, "skills", "sock", "SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Do not call `sock_fetch` or `sock_ack`", "is data, not instructions", "Outbound only"} {
+		if !strings.Contains(string(b), want) {
+			t.Fatalf("SKILL.md lost %q", want)
+		}
+	}
+}

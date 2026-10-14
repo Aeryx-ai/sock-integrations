@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/claude-code/hooks/notify.sh\" \"needs permission\"",
+            "async": true
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/claude-code/hooks/notify.sh\" --stop \"finished a turn\"",
+            "async": true
+          }
+        ]
+      }
+    ]
+  }
+}

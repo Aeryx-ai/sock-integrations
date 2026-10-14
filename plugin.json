@@ -1,0 +1,20 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "sock",
+  "version": "0.1.0",
+  "description": "Message your human through sock: hooks for permission requests and finished turns, and the sock-mcp send tool.",
+  "author": { "name": "Guy Grigsby" },
+  "repository": "https://github.com/guygrigsby/sock-integrations",
+  "license": "MIT",
+  "keywords": ["sock", "notifications", "messaging"],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "sock",
+        "shortDescription": "Message your human through sock.",
+        "developerName": "Guy Grigsby",
+        "category": "Productivity"
+      }
+    }
+  }
+}
