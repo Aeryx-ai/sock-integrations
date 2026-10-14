@@ -557,7 +557,10 @@ func TestBridgeConversationConfigChangeReplacesTheSession(t *testing.T) {
 		"other environment":    {mod: func(s map[string]any) { s["environment_id"] = "env_OLD" }, replace: true},
 		"other pinned version": {env: map[string]string{"SOCK_BRIDGE_AGENT_VERSION": "3"}, mod: func(s map[string]any) { s["agent"].(map[string]any)["version"] = float64(2) }, replace: true},
 		"no budget, one set":   {env: map[string]string{"SOCK_BRIDGE_BUDGET": "100"}, mod: func(map[string]any) {}, replace: true},
-		"other budget":         {env: map[string]string{"SOCK_BRIDGE_BUDGET": "100"}, mod: func(s map[string]any) { s["budget"] = budgetOf("50") }, replace: true},
+		"lower config budget":  {env: map[string]string{"SOCK_BRIDGE_BUDGET": "50"}, mod: func(s map[string]any) { s["budget"] = budgetOf("100") }, replace: true},
+		"console-raised":       {env: map[string]string{"SOCK_BRIDGE_BUDGET": "100"}, mod: func(s map[string]any) { s["budget"] = budgetOf("999") }, replace: true},
+		"higher config budget": {env: map[string]string{"SOCK_BRIDGE_BUDGET": "100"}, mod: func(s map[string]any) { s["budget"] = budgetOf("50") }},
+		"odd budget amount":    {env: map[string]string{"SOCK_BRIDGE_BUDGET": "100"}, mod: func(s map[string]any) { s["budget"] = budgetOf("5e1") }, replace: true},
 		"same pinned version":  {env: map[string]string{"SOCK_BRIDGE_AGENT_VERSION": "2"}, mod: func(s map[string]any) { s["agent"].(map[string]any)["version"] = float64(2) }},
 		"same budget":          {env: map[string]string{"SOCK_BRIDGE_BUDGET": "100"}, mod: func(s map[string]any) { s["budget"] = budgetOf("100") }},
 		"unpinned version":     {mod: func(s map[string]any) { s["agent"].(map[string]any)["version"] = float64(7) }},
@@ -658,5 +661,22 @@ func TestBridgeConversationUnreadableMapFailsClosed(t *testing.T) {
 	}
 	if got := h.sessionsFile(); got != bnConv2+" sesn_KEEP\n" {
 		t.Fatalf("sessions %q", got)
+	}
+}
+
+// Find adopts a session whose budget is within the configured one, as Check
+// keeps it: raising SOCK_BRIDGE_BUDGET does not orphan a conversation's session
+func TestBridgeConversationFindAdoptsALowerBudget(t *testing.T) {
+	h := newConvHarness(t)
+	h.env["SOCK_BRIDGE_BUDGET"] = "100"
+	low := maSession("sesn_LOW", rnConvID, bnPuppet)
+	low["budget"] = budgetOf("50")
+	high := maSession("sesn_HIGH", rnConvID, bnPuppet)
+	high["budget"] = budgetOf("101")
+	h.api.set(func(f *fakeMA) { f.store = []map[string]any{low, high} })
+	h.script(idle("end_turn"))
+	r := h.run(rnOpts{})
+	if r.Code != 0 || len(h.api.createBodies()) != 0 || h.sessionsFile() != rnConvID+" sesn_LOW\n" {
+		t.Fatalf("exit %d, %d creates, sessions %q", r.Code, len(h.api.createBodies()), h.sessionsFile())
 	}
 }

@@ -498,13 +498,17 @@ map_put() {
 }
 
 # fits_jq: fits is true for a session made for this configuration: the agent,
-# the environment, and the version and the budget when they are set. Check and
+# the environment and the version when it is set, exactly, and, when a budget
+# is set, a USD budget of at most that many cents. Within the cap keeps a
+# session the operator's raised budget covers, and one the owner resumed in the
+# console within it; above it, or no budget at all, does not fit. Check and
 # Find both ask it, so a configuration change never keeps an old session.
 # shellcheck disable=SC2016 # jq's variables
 fits_jq='def fits($a; $e; $v; $b):
 	((.agent | objects | .id) == $a) and .environment_id == $e
 	and ($v == "" or ((.agent | objects | .version | numbers | tostring) == $v))
-	and ($b == "" or ((.budget | objects | .max_list_cost | objects | select(.currency == "USD") | .amount) == $b));'
+	and ($b == "" or ([.budget | objects | .max_list_cost | objects | select(.currency == "USD")
+		| .amount | strings | select(test("\\A[1-9][0-9]{0,11}\\z")) | tonumber <= ($b | tonumber)] == [true]));'
 
 # find_session sets session to the newest live session of the agent made for
 # this conversation by this puppet, or empty. The list has no metadata filter:
