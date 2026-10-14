@@ -278,6 +278,27 @@ func TestCodexMarketplace(t *testing.T) {
 	}
 }
 
+// Background sessions never message the owner and sock-mcp refuses an
+// unsolicited owner message, so no skill may steer a model toward one, or
+// toward posting into the owner's conversation as a fake reply.
+func TestSkillsNeverMessageTheOwnerUnprompted(t *testing.T) {
+	for _, rel := range []string{"claude-code/skills/sock/SKILL.md", "skills/sock/SKILL.md"} {
+		b, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := string(b)
+		for _, bad := range []string{"long task finishes", "find the owner's conversation", "Message the owner when"} {
+			if strings.Contains(s, bad) {
+				t.Errorf("%s still says %q", rel, bad)
+			}
+		}
+		if !strings.Contains(s, "Never message the owner unprompted") {
+			t.Errorf("%s lacks the no-unprompted-message rule", rel)
+		}
+	}
+}
+
 func TestCodexSkillKeepsOutboundOnlyRules(t *testing.T) {
 	b, err := os.ReadFile(filepath.Join(root, "skills", "sock", "SKILL.md"))
 	if err != nil {

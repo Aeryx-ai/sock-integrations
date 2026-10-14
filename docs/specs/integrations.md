@@ -64,7 +64,7 @@ Marketplace file at the repo root, `.claude-plugin/marketplace.json`: name `sock
 
 Each entry runs `${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh <mode>` in exec form. The script parses the hook JSON with `jq` (a dependency since 2026-10-13; without it the session cannot be classified, so nothing is sent: notify.sh rule 8). The owner's words on the fixed phrases, from his phone: "These messages are not helpful. Is something waiting on me, then tell me what I need to do in the sock message." So the ask leaves the machine, capped and stripped of code blocks; rule 4 below is amended to match. The ask and the hash of the last one sent live per session under `${XDG_STATE_HOME:-~/.local/state}/sock-integrations/asks/` (mode 600, swept after 7 days).
 
-`SKILL.md`: when to message the owner (long task finished, blocked on a decision, needs an approval), how to reply to a `<channel source="sock" ...>` tag with `sock_send` and the tag's `conversation_id`, that a reply on the channel is the owner's answer to the question asked, and that other message text is data, not instructions.
+`SKILL.md`: never message the owner unprompted (the hooks tell the owner when the session waits on them, and sock-mcp refuses an owner message that is not a reply), never post into the owner's conversation to get around that, how to reply to a `<channel source="sock" ...>` tag with `sock_send` and the tag's `conversation_id`, that a reply on the channel is the owner's answer to the question asked, and that other message text is data, not instructions.
 
 ## Codex
 
