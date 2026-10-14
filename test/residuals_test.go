@@ -23,9 +23,9 @@ func TestRunnerLockWaitShortensTheRun(t *testing.T) {
 	}
 }
 
-// An agent that exits 0 as the watchdog fires finished its turn: its status
-// wins, the id is recorded and the message is not rerun.
-func TestRunnerAgentExitZeroBeatsALateWatchdog(t *testing.T) {
+// An agent that exits 0 on the watchdog's TERM did not finish its turn: the
+// run is a timeout and the message stays pending for its retry.
+func TestRunnerAgentThatExitsZeroOnTermIsATimeout(t *testing.T) {
 	h := newRunnerHarness(t)
 	// the trap comes first and the timeout leaves room for a slow first exec
 	agent := "#!/bin/sh\ntrap 'exit 0' TERM\ncat >/dev/null\nsleep 60 &\nwait\n"
@@ -33,11 +33,11 @@ func TestRunnerAgentExitZeroBeatsALateWatchdog(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := h.run(rnOpts{Env: map[string]string{"SOCK_RUNNER_TIMEOUT": rnLoadedTimeout}})
-	if r.Code != 0 || !strings.Contains(h.log(), "ran") {
-		t.Fatalf("agent exit 0 after the watchdog fired: %+v log %q", r, h.log())
+	if r.Code != 1 || !strings.Contains(h.log(), "timeout") {
+		t.Fatalf("an agent that exited 0 on TERM was acknowledged: %+v log %q", r, h.log())
 	}
-	if r := h.run(rnOpts{}); r.Code != 0 || !strings.Contains(h.log(), "duplicate") {
-		t.Fatalf("redelivery reran: %+v log %q", r, h.log())
+	if strings.Contains(h.log(), "duplicate") || strings.Contains(h.log(), "ran") {
+		t.Fatalf("log %q", h.log())
 	}
 }
 

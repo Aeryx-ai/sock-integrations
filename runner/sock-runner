@@ -122,6 +122,8 @@ left=$((deadline - $(now)))
 [ "$left" -gt 0 ] || left=1
 (
 	sleep "$left"
+	# an agent whose group is gone finished before the deadline: no timeout
+	kill -0 -- "-$agent_pgid" 2>/dev/null || exit 0
 	: >"$prompt.timeout"
 	kill -TERM -- "-$agent_pgid" 2>/dev/null
 	sleep 5
@@ -137,15 +139,15 @@ kill -KILL -- "-$watchdog_pgid" 2>/dev/null
 watchdog_pgid=
 set +m
 
-# exit 0 wins over a watchdog that fired as the agent finished: the turn ran
+# a timeout first: an agent that exits 0 on the watchdog's TERM did not finish
+if [ -e "$prompt.timeout" ]; then
+	log_line "timeout"
+	exit 1
+fi
 if [ "$code" -eq 0 ]; then
 	record_done
 	log_line "ran"
 	exit 0
-fi
-if [ -e "$prompt.timeout" ]; then
-	log_line "timeout"
-	exit 1
 fi
 # the status only: its stderr can echo the owner's text, its output or a secret
 log_line "agent exit $code"
