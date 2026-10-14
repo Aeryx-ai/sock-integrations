@@ -12,10 +12,10 @@ Caller class: puppet device (`sock_pt_`). Human session tokens are not supported
 
 v1 is bearer-token platforms only.
 
-In: Claude Code plugin, Codex config and hooks, Agent SDK example, and the headless inbound runner (`runner/sock-runner`).
+In: Claude Code plugin, Codex config and hooks, Agent SDK example, the headless inbound runner (`runner/sock-runner`) and the Managed Agents bridge (`runner/sock-bridge`).
 
 Out, tracked in bd:
-- Managed Agents bridge (a daemon, own spec).
+- Managed Agents session creation, owner-brokered tool confirmations and webhook delivery: follow-up beads after the bridge below.
 - Codex app-server live injection (`turn/steer`): a follow-up bead after the runner below.
 - Hosted HTTP surfaces: Responses API hosted MCP, claude.ai, ChatGPT, Managed Agents cloud MCP. sock-mcp is stdio only, and these need a public URL and an OAuth-style credential.
 - Won't do: a `Stop` hook that fetches pending messages. The channel is the inbound path.
@@ -146,7 +146,57 @@ There is no prompt to answer in a headless run, and an MCP tool that is not pre-
 - Message text is untrusted data even from the owner: the permission mode is the control, and the default is the most restrictive.
 - At-least-once: the agent may see a message twice. The prompt carries the message id so the session can recognise a repeat.
 
+### Managed Agents bridge: sock-bridge
+
+A Claude Managed Agents session runs on Anthropic's side and is steered by events: the owner's reply goes in as a `user.message`, and the agent's answer comes back as `agent.message` events. `runner/sock-bridge` is the `sock listen --exec` command that carries one owner reply into one session and the agent's answer back to the owner. Conformist downstream of two upstreams, `sock listen --exec` and Anthropic's Managed Agents API (beta header `managed-agents-2026-04-01`; [events and streaming](https://platform.claude.com/docs/en/managed-agents/events-and-streaming)); it adds no server surface and no domain model, and it is the anti-corruption layer between the two vocabularies: a sock message in, session events out, never a session event vocabulary inside sock.
+
+Not a daemon. A daemon wrapping `sock listen` would duplicate what `listen --exec` already does (reconnect, backoff, at-least-once, ordering, ack on exit 0) and keep a second copy of stream state. A command run once per message, like `sock-runner`, reuses all of it: the turn is synchronous inside the command, and the ack is the exit code. The cost is that one long agent turn holds the stream; the timeout bounds it, and Managed Agents queues events anyway. No service means no rookery scaffold.
+
+### Invocation
+
+```sh
+export SOCK_TOKEN=sock_pt_...             # the bridge's own puppet, no other consumer
+export ANTHROPIC_API_KEY=...              # a key that may use this session
+export SOCK_BRIDGE_SESSION=sesn_...       # an existing session, required
+sock listen --exec /path/to/runner/sock-bridge
+```
+
+Optional: `SOCK_BRIDGE_TIMEOUT` (seconds one turn may take, default 900; not a positive integer falls back), `SOCK_BRIDGE_STATE` (default `${XDG_STATE_HOME:-$HOME/.local/state}/sock-integrations-bridge`; one per bridge). `SOCK_BRIDGE_API` (default `https://api.anthropic.com`) exists for tests and is not for production use. The bridge does not create sessions, set the agent's tools or choose its permission policy: those live in the agent and environment definitions on Anthropic's side, and the owner of the session chooses them.
+
+### Interface
+
+stdin, env and exit codes are `sock-runner`'s (the `sock listen --exec` contract above): exit 0 acknowledges, 1 retries, 2 is a configuration error and runs nothing. The same gate and the same input hygiene apply, shared in one library file `runner/lib.sh` that both commands source: UUID-checked ids, env and stdin senders equal, the sender equal to `account.puppet.ownerId` (cached 60 seconds), a non-owner or malformed message acknowledged and dropped, the state-directory lock so one turn runs at a time, the log of fixed strings and ids only.
+
+### Behavior
+
+1. Configuration: `SOCK_BRIDGE_SESSION` matching `[A-Za-z0-9_-]{1,128}`, `ANTHROPIC_API_KEY` present, `curl`, `jq` and `sock` on `PATH`. Anything else exits 2.
+2. The gate and the lock as in `sock-runner`.
+3. Redelivery state, in `bridge.ids` in the state directory (the last 200 ids, each `sent` or `replied`): a `replied` id is acknowledged without work (`duplicate`). A `sent` id means the `user.message` is already in the session: the bridge does not send it again, it finds the turn in the session's event history (below) and finishes from there.
+4. Open the event stream first (`GET /v1/sessions/$SESSION/events/stream?beta=true`, `accept: text/event-stream`); a stream shows only events after it opens, so it is open before the send. Then send the owner's reply: `POST /v1/sessions/$SESSION/events?beta=true` with `{"events":[{"type":"user.message","content":[{"type":"text","text":"<prompt>"}]}]}`. The prompt is the runner's: a one-line preface and `<sock-message from="owner" conversation=... id=...>` around the text, closing tags broken, so the id is in the session's history and a redelivery can find it. Record `sent` once the POST succeeds.
+5. Follow the stream until the turn ends. Keep the text blocks of `agent.message` events (buffered events, one per model request) in order and ignore everything else, thinking and tool events included: tool inputs and outputs can hold secrets and never reach sock. The turn ends at `session.status_idle` with `stop_reason.type`:
+   - `end_turn`: post the collected text to the owner, exit 0.
+   - `requires_action`: a tool call needs an answer the bridge cannot give. Post the fixed text `the agent is waiting for approval of a tool call` (no tool name, no input) and exit 0; the owner answers in the Managed Agents console. Brokering confirmations through sock replies is a follow-up.
+   - `budget_reached`: post `the agent's budget is used up`, exit 0.
+   - `session.error` or a stream that ends without idle: post `the agent hit an error` for an error event, and exit 1 for a dropped stream, so the message is retried and finishes from history.
+6. Posting: `sock send -- "<text>"` (the puppet's `NotifyOwner`), at most 60000 bytes per message, split on blank lines, then on lines, then bytes; at most 5 parts, the last saying how much was cut. An empty answer posts `the agent finished without a reply`. Record `replied` after the last part, then exit 0. A crash between the post and the record repeats the post on redelivery, which is at-least-once.
+7. Catch-up from history (a `sent` id, or a stream that dropped): list the session's events (`GET /v1/sessions/$SESSION/events?beta=true`, paged), find the `user.message` whose text carries this message's `id="..."`, take the `agent.message` text after it up to the next `session.status_idle`, and continue at step 5's outcomes. No idle yet: wait on a fresh stream, with the history seeding the seen-event ids.
+8. HTTP politeness: `User-Agent: sock-bridge`, a connect timeout and an overall turn timeout, `Retry-After` honored (seconds or HTTP date) with exponential backoff and jitter on 429 and 5xx, a few attempts, then exit 1. 401 and 403 exit 2 (the key or session is wrong; retrying cannot help), 404 on the session exits 2. The key goes to curl on a private config file (`--config`), never in argv, the environment of any child or the log.
+9. Log one line per message to `bridge.log` (mode 600, truncated above 100 KB): time, id, outcome (`ran`, `dropped: sender <uuid>`, `dropped: malformed`, `dropped: not a puppet token`, `duplicate`, `waiting for approval`, `budget`, `agent error`, `stream dropped`, `http <status>`, `timeout`, `locked`). Never the text, the answer, the key or the token.
+
+### Rules that follow
+
+- The bridge's puppet is its own and its one consumer is `sock listen`. Nothing calls `sock_fetch` or `sock_ack` for it.
+- One session per bridge, and the session is not driven by anything else at the same moment: two writers interleave turns, and the bridge cannot tell whose answer a `session.status_idle` ends.
+- The owner's reply is data to the agent, in a tag, like everywhere in this repo. What the agent may do is the session's own configuration.
+- The agent's answer goes only to the owner, over the bridge's puppet, as ordinary messages.
+
 ### Tests
+
+Under `test/`, with a fake Managed Agents server (Go `httptest`, speaking the stream and events endpoints) and stub `sock` and `curl` where the harness needs them: the stream is open before the send; the request has the headers `x-api-key`, `anthropic-version` and `anthropic-beta: managed-agents-2026-04-01` and the `user.message` body; text blocks of `agent.message` are posted once at `end_turn` and thinking and tool events never are; `requires_action`, `budget_reached` and `session.error` post only their fixed texts; a dropped stream exits 1 and the retry finishes from history without a second `user.message`; a `replied` id is a duplicate; a long answer is split and bounded; 429 with `Retry-After` is honored and 5xx retried then exit 1; 401, 403 and 404 exit 2; the key is in no argv, child environment, log or file other than the private curl config, which is removed; the owner gate, the lock and the input hygiene hold as in the runner's tests (shared cases run against both commands).
+
+Security review before merge, as the review gate below: sender spoofing and the gate, injection through the text into the tag or the API body, the key's exposure (argv, environment, logs, files, `curl` config), the lock and ledger races, and a hostile or malformed event stream (very large events, a flood of `agent.message`, events that never reach idle).
+
+## Tests
 
 Under `test/`, against stubs of `sock` (whoami output, listen environment) and of `claude` and `codex` that record argv, environment and stdin: the owner's message runs the agent exactly once with the text on stdin and in neither argv nor environment; a non-owner sender, a mismatch between env and stdin sender, malformed JSON and a missing field are dropped with exit 0 and no agent run; a failing whoami exits 1 with no agent run; an owner id is cached for a minute and a non-owner costs no call; a human token is dropped with a stderr line; the allowed tools equal the plugin-derived names; a redelivered id does not rerun; a stale lock whose pid was reused is replaced; a bad configuration exits 2; a second runner waits on the lock, a stale lock is replaced by exactly one of two racing runners, and a lock whose pid file is still being written is never taken (the lock is one symlink, so there is no such window); a non-UUID `id` or `conversationId` is dropped with exit 0 and never reaches the agent; the timeout kills grandchildren of the agent too (a stub agent that spawns a long `sleep` leaves none); the agent's environment holds no `SOCK_TOKEN` or `SOCK_URL` for `claude` and does for `codex`; a log directory that cannot be written still exits with the agent's status; the timeout kills the agent and exits 1; the log never contains the text or the token; `</sock-message>` in the text cannot close the tag; `bypassPermissions` and `danger-full-access` are refused without `SOCK_RUNNER_ALLOW_BYPASS=1`.
 
