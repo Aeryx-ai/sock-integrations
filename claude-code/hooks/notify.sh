@@ -63,11 +63,33 @@ fi
 # machine key in particular must reach only `sock puppets ensure`.
 unset SOCK_TOKEN CLAUDE_PLUGIN_OPTION_SOCK_TOKEN
 
+# strip_c1 drops C1 controls from stdin, raw (0x80-0x9F) and UTF-8 encoded
+# (C2 80-9F), and every byte not part of a well-formed UTF-8 sequence, keeping
+# other characters whole: an 8-bit CSI drives a terminal as ESC [ does.
+strip_c1() {
+	LC_ALL=C awk '
+		BEGIN { for (i = 1; i < 256; i++) ord[sprintf("%c", i)] = i }
+		{
+			n = length($0); o = ""; i = 1
+			while (i <= n) {
+				b = ord[substr($0, i, 1)]
+				if (b < 128) { o = o substr($0, i, 1); i++; continue }
+				need = (b >= 240 && b <= 244 ? 4 : b >= 224 && b < 240 ? 3 : b >= 194 && b < 224 ? 2 : 0)
+				ok = (need > 0 && i + need - 1 <= n)
+				for (j = 1; ok && j < need; j++) { c = ord[substr($0, i + j, 1)]; if (c < 128 || c >= 192) ok = 0 }
+				nx = ord[substr($0, i + 1, 1)]
+				if (b == 194 && nx >= 128 && nx < 160) { i += 2; continue }
+				if (ok) { o = o substr($0, i, need); i += need } else i++
+			}
+			printf "%s", o
+		}'
+}
+
 log_line() {
-	# Strip every control character (escape sequences, CR, tab, newline) so
-	# tool output cannot drive the terminal of whoever reads the log.
+	# Strip every control character (escape sequences, CR, tab, newline, C1)
+	# so tool output cannot drive the terminal of whoever reads the log.
 	local msg
-	msg=$(printf '%s' "$1" | LC_ALL=C tr -d '[:cntrl:]')
+	msg=$(printf '%s' "$1" | LC_ALL=C tr -d '[:cntrl:]' | strip_c1)
 	if [ -n "$token" ]; then
 		msg=${msg//"$token"/[redacted]}
 	fi

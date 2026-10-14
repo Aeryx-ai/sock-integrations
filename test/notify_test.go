@@ -1220,3 +1220,18 @@ func TestLoggedStderrRedactsUnknownTokens(t *testing.T) {
 		})
 	}
 }
+
+// The log drops C1 controls, raw and UTF-8 encoded, and keeps other characters whole.
+func TestLogStripsC1Controls(t *testing.T) {
+	s := newStub(t)
+	bin := fakeSock(t, `cat >/dev/null; printf 'c1:\302\2332J raw:\2332J keep:\303\251\342\202\254\360\237\230\200' >&2; exit 1`)
+	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": bin + ":" + hookPathTail, "SOCK_HOOK_TIMEOUT": fakeSockTimeout}}, "x")
+	if !strings.Contains(r.Log, "c1:2J raw:2J keep:é€😀") || !utf8.ValidString(r.Log) {
+		t.Fatalf("log %q", r.Log)
+	}
+	for _, c := range r.Log {
+		if c >= 0x80 && c <= 0x9f {
+			t.Fatalf("C1 control %U in log %q", c, r.Log)
+		}
+	}
+}
