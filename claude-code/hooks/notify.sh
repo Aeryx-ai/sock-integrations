@@ -136,13 +136,15 @@ extract_ask() {
 		{
 			t = $0
 			sub(/^[[:space:]]*/, "", t)
+			ind = substr($0, 1, length($0) - length(t))
 			c = substr(t, 1, 1)
 			run = 0
 			if (c == "`" || c == "~") while (substr(t, run + 1, 1) == c) run++
 			rest = substr(t, run + 1)
 		}
 		fence {
-			if (run >= 3 && c == fc && run >= fl && rest ~ /^[[:space:]]*$/) fence = 0
+			# A closer takes at most 3 spaces of indent.
+			if (run >= 3 && c == fc && run >= fl && rest ~ /^[[:space:]]*$/ && length(ind) <= 3 && ind !~ /\t/) fence = 0
 			next
 		}
 		# CommonMark makes a backtick run with a backtick after it inline code;

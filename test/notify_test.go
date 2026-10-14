@@ -1160,3 +1160,19 @@ func TestBacktickInfoStringStillOpensAFence(t *testing.T) {
 		t.Fatalf("%+v", g)
 	}
 }
+
+// A closing fence takes at most 3 spaces of indent.
+func TestAFenceIndentedFourSpacesDoesNotClose(t *testing.T) {
+	s := newStub(t)
+	msg := "Retry the deploy?\n\n```\nfoo\n    ```\nDB_PASS hunter2 why?\n```\n"
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PROJECT_DIR": "/x/proj"}, Stdin: stopInput("f2", msg)}, "--stop", "--ask-now")
+	if g := s.Requests(); len(g) != 1 || g[0].Text != "proj: Retry the deploy?" {
+		t.Fatalf("%+v", g)
+	}
+	s2 := newStub(t)
+	msg = "Retry the deploy?\n\n```\nfoo\n   ```\nShip it?"
+	runHook(t, s2.URL, hookEnv{Env: map[string]string{"CLAUDE_PROJECT_DIR": "/x/proj"}, Stdin: stopInput("f3", msg)}, "--stop", "--ask-now")
+	if g := s2.Requests(); len(g) != 1 || g[0].Text != "proj: Ship it?" {
+		t.Fatalf("a 3-space closer must close: %+v", g)
+	}
+}
