@@ -1,9 +1,9 @@
 package test
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -88,9 +88,12 @@ func TestMCPSendFailsOnBadResponses(t *testing.T) {
 			fake := filepath.Join(t.TempDir(), "fake-mcp")
 			script := "#!/bin/sh\nread l\necho '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"serverInfo\":{\"name\":\"fake\",\"version\":\"0\"}}}'\nread l\nread l\necho '" + c.resp + "'\nexec sleep 600\n"
 			writeFakeExec(t, fake, script)
-			cmd := exec.Command(os.Args[0], "-test.run=^TestMCPSend$")
+			cmd := testCmd(t, os.Args[0], "-test.run=^TestMCPSend$")
 			cmd.Env = append(os.Environ(), "SOCK_MCP_BIN="+fake, "SOCK_SMOKE=")
-			out, err := cmd.CombinedOutput()
+			var buf bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &buf, &buf
+			err := runCmd(cmd)
+			out := buf.Bytes()
 			if err == nil {
 				t.Fatalf("TestMCPSend passed against a failing server:\n%s", out)
 			}

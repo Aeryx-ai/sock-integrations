@@ -2,7 +2,6 @@ package test
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -24,7 +23,7 @@ var trampoline struct {
 	err  error
 }
 
-func trampolinePath() (string, error) {
+func trampolinePath(t testing.TB) (string, error) {
 	trampoline.once.Do(func() {
 		dir, err := os.MkdirTemp("", "fake-exec-")
 		if err != nil {
@@ -47,7 +46,7 @@ func trampolinePath() (string, error) {
 			trampoline.err = err
 			return
 		}
-		trampoline.err = exec.Command(warm).Run()
+		trampoline.err = runCmd(testCmd(t, warm))
 		trampoline.path = p
 	})
 	return trampoline.path, trampoline.err
@@ -56,7 +55,7 @@ func trampolinePath() (string, error) {
 // writeFakeExec makes path an executable that runs script, a /bin/sh script.
 func writeFakeExec(t testing.TB, path, script string) {
 	t.Helper()
-	p, err := trampolinePath()
+	p, err := trampolinePath(t)
 	if err != nil {
 		t.Fatalf("fake exec trampoline: %v", err)
 	}

@@ -204,11 +204,7 @@ func runHook(t *testing.T, stubURL string, he hookEnv, args ...string) result {
 		_ = os.Chmod(state, 0o500)
 		t.Cleanup(func() { _ = os.Chmod(state, 0o700) })
 	}
-	// A hook that hangs fails its test instead of the whole run.
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, filepath.Join(root, "claude-code", "hooks", "notify.sh"), args...)
-	cmd.WaitDelay = 2 * time.Second
+	cmd := testCmd(t, filepath.Join(root, "claude-code", "hooks", "notify.sh"), args...)
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
@@ -220,7 +216,7 @@ func runHook(t *testing.T, stubURL string, he hookEnv, args ...string) result {
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	start := time.Now()
-	err := cmd.Run()
+	err := runCmd(cmd)
 	r := result{Elapsed: time.Since(start), Stderr: stderr.String()}
 	if ee := (*exec.ExitError)(nil); errors.As(err, &ee) {
 		r.Code = ee.ExitCode()

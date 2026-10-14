@@ -3,7 +3,6 @@ package test
 import (
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -16,8 +15,8 @@ import (
 
 func rnDeadPid(t *testing.T) int {
 	t.Helper()
-	c := exec.Command("true")
-	if err := c.Run(); err != nil {
+	c := testCmd(t, "true")
+	if err := runCmd(c); err != nil {
 		t.Fatal(err)
 	}
 	return c.ProcessState.Pid()
@@ -25,11 +24,11 @@ func rnDeadPid(t *testing.T) int {
 
 func rnLivePid(t *testing.T) int {
 	t.Helper()
-	c := exec.Command("sleep", "120")
+	c := testCmd(t, "sleep", "120")
 	if err := c.Start(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = c.Process.Kill(); _ = c.Wait() })
+	t.Cleanup(func() { _ = c.Process.Kill(); _ = waitCmd(c) })
 	return c.Process.Pid
 }
 
@@ -570,7 +569,7 @@ func TestRunnerTermStopsAgent(t *testing.T) {
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatal(err)
 	}
-	_ = cmd.Wait()
+	_ = waitCmd(cmd)
 	runs := h.runs()
 	if len(runs) != 1 {
 		t.Fatalf("%d runs", len(runs))

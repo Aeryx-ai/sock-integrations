@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -55,7 +54,7 @@ type mcpClient struct {
 func startMCP(t *testing.T, url, tok string, env ...string) *mcpClient {
 	t.Helper()
 	c := &mcpClient{t: t, stderr: &bytes.Buffer{}, redact: []string{tok}}
-	cmd := exec.Command(mcpBin(t))
+	cmd := testCmd(t, mcpBin(t))
 	cmd.Env = append([]string{"PATH=/usr/bin:/bin", "SOCK_TOKEN=" + tok, "SOCK_URL=" + url}, env...)
 	cmd.Stderr = c.stderr
 	in, err := cmd.StdinPipe()
@@ -79,7 +78,7 @@ func startMCP(t *testing.T, url, tok string, env ...string) *mcpClient {
 		_ = cmd.Process.Kill()
 		if !waited {
 			waited = true
-			_ = cmd.Wait()
+			_ = waitCmd(cmd)
 		}
 	}
 	t.Cleanup(c.stop)
@@ -174,12 +173,14 @@ func TestListToolsBoundsSilentServer(t *testing.T) {
 	}
 	fake := filepath.Join(t.TempDir(), "silent")
 	writeFakeExec(t, fake, "#!/bin/sh\necho booting >&2\nexec sleep 600\n")
-	cmd := exec.Command(os.Args[0], "-test.run=^TestListToolsBoundsSilentServer$", "-test.v")
+	cmd := testCmd(t, os.Args[0], "-test.run=^TestListToolsBoundsSilentServer$", "-test.v")
 	const childTimeout = time.Second
 	cmd.Env = append(os.Environ(), "DRIFT_SILENT_CHILD=1", "SOCK_MCP_BIN="+fake, "MCP_TEST_TIMEOUT="+childTimeout.String())
 	start := time.Now()
-	out, err := cmd.CombinedOutput()
-	el := time.Since(start)
+	var buf bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &buf, &buf
+	err := runCmd(cmd)
+	out, el := buf.Bytes(), time.Since(start)
 	if err == nil {
 		t.Fatalf("silent server did not fail the test:\n%s", out)
 	}

@@ -70,7 +70,7 @@ func TestMoreSecretShapesAreRedacted(t *testing.T) {
 		"pass param":    {"Connect with ?x=1 pass=PassBody7 or pwd=PwdBody8 now?", "PassBody7"},
 		"pwd param":     {"Connect with pwd=PwdBody8 now?", "PwdBody8"},
 	}
-	for sedName, sed := range sedPaths() {
+	for sedName, sed := range sedPaths(t) {
 		for name, c := range cases {
 			t.Run(sedName+" "+name, func(t *testing.T) {
 				s := newStub(t)
@@ -154,7 +154,7 @@ func TestAnEncryptedKeyBodyBeforeATrailingListIsRedacted(t *testing.T) {
 // Redaction stays linear: GNU sed in a UTF-8 locale backtracks the env-style
 // rule quadratically, so the seds run in the C locale on capped input.
 func TestRedactionOfALongNameRunIsFast(t *testing.T) {
-	seds := sedPaths()
+	seds := sedPaths(t)
 	msg := strings.Repeat("KEY_", 8192) + "?"
 	for name, sed := range seds {
 		t.Run(name, func(t *testing.T) {
@@ -171,15 +171,23 @@ func TestRedactionOfALongNameRunIsFast(t *testing.T) {
 
 // sedPaths is the system sed ("") and GNU sed when this machine has it: GNU
 // sed comes first on the owner's PATH, the hook tests' PATH has the system one.
-func sedPaths() map[string]string {
+func sedPaths(t testing.TB) map[string]string {
 	seds := map[string]string{"system": ""}
 	if p, err := exec.LookPath("gsed"); err == nil {
 		seds["gnu"] = p
-	} else if out, err := exec.Command("sed", "--version").Output(); err == nil && strings.Contains(string(out), "GNU") {
+	} else if out, err := sedVersion(t); err == nil && strings.Contains(out, "GNU") {
 		p, _ := exec.LookPath("sed")
 		seds["gnu"] = p
 	}
 	return seds
+}
+
+func sedVersion(t testing.TB) (string, error) {
+	var out strings.Builder
+	cmd := testCmd(t, "sed", "--version")
+	cmd.Stdout = &out
+	err := runCmd(cmd)
+	return out.String(), err
 }
 
 // withSed puts sed (and the real sock) first on the hook's PATH.

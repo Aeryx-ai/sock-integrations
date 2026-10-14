@@ -201,7 +201,7 @@ func (h *rnHarness) command(o rnOpts) *exec.Cmd {
 	if in == "" {
 		in = rnMessage(h.fields())
 	}
-	cmd := exec.Command(h.bin)
+	cmd := testCmd(h.t, h.bin)
 	cmd.Dir = h.dir
 	cmd.Env = make([]string, 0, len(env))
 	for k, v := range env {
@@ -216,7 +216,7 @@ func (h *rnHarness) run(o rnOpts) rnRes {
 	h.t.Helper()
 	cmd := h.command(o)
 	start := time.Now()
-	err := cmd.Run()
+	err := runCmd(cmd)
 	so, se := cmd.Stdout.(*bytes.Buffer), cmd.Stderr.(*bytes.Buffer)
 	r := rnRes{Elapsed: time.Since(start), Stdout: so.String(), Stderr: se.String()}
 	if ee := (*exec.ExitError)(nil); errors.As(err, &ee) {

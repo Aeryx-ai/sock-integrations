@@ -390,7 +390,7 @@ func TestRunnerRelativeStateDirWithNoStartDirExits2(t *testing.T) {
 			cmd := h.command(rnOpts{Env: map[string]string{"SOCK_RUNNER_STATE": name, "SOCK_BRIDGE_STATE": name}})
 			cmd.Path = "/bin/sh"
 			cmd.Args = []string{"/bin/sh", "-c", `cd "$1" && rmdir "$1" && exec "$2"`, "sh", gone, h.bin}
-			err := cmd.Run()
+			err := runCmd(cmd)
 			code := 0
 			if ee := (*exec.ExitError)(nil); errors.As(err, &ee) {
 				code = ee.ExitCode()
@@ -471,7 +471,7 @@ func TestBridgeTermDuringARetryWaitExitsAtOnceAndCleansUp(t *testing.T) {
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatal(err)
 	}
-	err := cmd.Wait()
+	err := waitCmd(cmd)
 	if took := time.Since(sent); took > 3*time.Second {
 		t.Fatalf("TERM took %v to end the run (%v)", took, err)
 	}
