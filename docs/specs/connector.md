@@ -235,6 +235,12 @@ Observability (sock-contract ADR 14). Logs, metrics and traces go over OTLP/HTTP
 - Labels from a fixed set only, enforced by a view on every instrument: the RPC and HTTP keys whose values are closed (`http.route` is the mux pattern, never the path), `outcome`, `reason`, `tool` (a registered tool or `unknown`) and `peer.service` (`sock-hub` or `webhook`). Never a grant, puppet, subscription, message or event id, a webhook host or URL, a peer address or a user agent. Exemplars are off, since they keep what the view drops.
 - Traces: a server span per request named by route pattern and JSON-RPC method (`POST /mcp tools/call`, never params); client spans for hub RPCs (trace context goes to the hub) and webhook POSTs (none goes to a platform; a caller's `traceparent` is ignored too). A filter before the exporter keeps an allow-list of span attributes: no URL, query, host, client address or user agent, no error text, no message text, token or secret.
 
+Log leaks the redactor cannot catch (free text with no secret shape):
+
+- Webhook transport errors are logged as a closed class only (`error_class`: `timeout`, `tls`, `refused`, `dns`, `reset`, `other`), never the error text. The text carries the platform's host (a certificate name check) and the resolved IP (a dial error). The verification error carries the class too.
+- The `http.Server` error log and the `log` package go to stderr through the redactor, never the OTLP exporter: a panic's value, stack and the peer address are free text. `slog.SetDefault` points the `log` package at the bridge, so startup sets its output back to stderr. `/mcp` recovers a handler panic and logs the method, the route and `handler panic`.
+- Configured secrets (`SOCK_ACCESS_GATE` when set, the service token) are literal redactions, registered at startup, since an upstream error can echo a header in a shape no pattern matches.
+
 ## Testing
 
 Go, in this repository's `test/` module to start, moving with the service into its own repository when it is scaffolded:
