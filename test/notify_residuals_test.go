@@ -2,6 +2,7 @@ package test
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -116,5 +117,51 @@ func TestAStaleThrottleLockIsClearedForTheNextHook(t *testing.T) {
 	runHook(t, s.URL, hookEnv{Env: env, Stdin: permissionInput("s24", nil), State: state}, "--permission")
 	if g := s.Requests(); len(g) != 1 {
 		t.Fatalf("%+v", g)
+	}
+}
+
+// An encrypted PEM has a blank line after its headers; with a trailing list the
+// ask starts at the body paragraph, so redaction must see the whole message.
+func TestAnEncryptedKeyBodyBeforeATrailingListIsRedacted(t *testing.T) {
+	s := newStub(t)
+	msg := "-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,ABCD\n\nMIIEsecretBODYline1\nMIIEsecretBODYline2\n-----END RSA PRIVATE KEY-----\n\n1. use it\n2. rotate it"
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PROJECT_DIR": "/x/proj"}, Stdin: stopInput("s25", msg)}, "--stop", "--ask-now")
+	for _, r := range s.Requests() {
+		if strings.Contains(r.Text, "MIIEsecretBODY") {
+			t.Fatalf("key body reached the owner: %q", r.Text)
+		}
+	}
+}
+
+// Redaction stays linear: GNU sed in a UTF-8 locale backtracks the env-style
+// rule quadratically, so the seds run in the C locale on capped input.
+func TestRedactionOfALongNameRunIsFast(t *testing.T) {
+	seds := map[string]string{"system": ""}
+	if p, err := exec.LookPath("gsed"); err == nil {
+		seds["gnu"] = p
+	} else if out, err := exec.Command("sed", "--version").Output(); err == nil && strings.Contains(string(out), "GNU") {
+		p, _ := exec.LookPath("sed")
+		seds["gnu"] = p
+	}
+	msg := strings.Repeat("KEY_", 8192) + "?"
+	for name, sed := range seds {
+		t.Run(name, func(t *testing.T) {
+			s := newStub(t)
+			env := map[string]string{"CLAUDE_PROJECT_DIR": "/x/proj", "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8"}
+			if sed != "" {
+				bin := t.TempDir()
+				if err := os.Symlink(sed, filepath.Join(bin, "sed")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(sockBin(t), filepath.Join(bin, "sock")); err != nil {
+					t.Fatal(err)
+				}
+				env["PATH"] = bin + ":" + hookPathTail
+			}
+			r := runHook(t, s.URL, hookEnv{Env: env, Stdin: stopInput("s26", msg)}, "--stop", "--ask-now")
+			if r.Elapsed > 8*time.Second {
+				t.Fatalf("hook took %v on 32 KB of KEY_", r.Elapsed)
+			}
+		})
 	}
 }

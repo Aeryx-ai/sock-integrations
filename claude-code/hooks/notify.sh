@@ -159,7 +159,11 @@ utf8_cap() {
 # from the paragraph before a trailing numbered list to the end. No question
 # and no list: nothing. Capped at 600 bytes.
 extract_ask() {
-	printf '%s\n' "$1" | LC_ALL=C tr -d '\000-\010\013\014\016-\037\177' | awk '
+	# Redacted whole before any cut, so a secret a paragraph split (an encrypted
+	# key's blank line) cannot lose its marker; the last 64 KiB, where the ask
+	# is, less a UTF-8 sequence the cut left incomplete at the start.
+	printf '%s\n' "$1" | LC_ALL=C tail -c 65536 | LC_ALL=C awk 'NR == 1 { sub(/^[\200-\277]+/, "") } { print }' | redact_stream |
+		LC_ALL=C tr -d '\000-\010\013\014\016-\037\177' | awk '
 		BEGIN { prevblank = 1 }
 		{
 			t = $0
@@ -206,7 +210,7 @@ extract_ask() {
 			}
 			if (!from) exit
 			for (i = start[from]; i <= n; i++) print lines[i]
-		}' | awk 'NF { blank = 0 } !NF { if (blank) next; blank = 1 } { print }' | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' | redact_stream | utf8_cap 600
+		}' | awk 'NF { blank = 0 } !NF { if (blank) next; blank = 1 } { print }' | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' | utf8_cap 600
 }
 
 # redact replaces the plugin token and common secret shapes with [redacted]:
@@ -219,7 +223,9 @@ extract_ask() {
 redact() {
 	local s=$1
 	if [ -n "$token" ]; then s=${s//"$token"/[redacted]}; fi
-	printf '%s' "$s" | sed -E \
+	# The C locale and a 64 KiB cap keep it linear: GNU sed in a UTF-8 locale
+	# backtracks the NAME value rule quadratically.
+	printf '%s' "$s" | head -c 65536 | LC_ALL=C sed -E \
 		-e 's/-----BEGIN[A-Z ]*PRIVATE KEY-----.*-----END[A-Z ]*PRIVATE KEY-----/[redacted]/g' \
 		-e '/-----BEGIN[A-Z ]*PRIVATE KEY-----/,/-----END[A-Z ]*PRIVATE KEY-----/s/.*/[redacted]/' \
 		-e 's#(://)[^/@[:space:]]+@#\1[redacted]@#g' \
@@ -234,8 +240,9 @@ redact() {
 		-e 's#(https?://[^[:space:]?]*)\?[^[:space:]]*#\1?[redacted]#g'
 }
 
-# redact_stream is redact on stdin. Every byte cap runs after it, so a secret
-# straddling the cut is redacted whole rather than sent in part.
+# redact_stream is redact on stdin. Every byte cap but the 64 KiB input bound
+# runs after it, so a secret straddling the cut is redacted whole rather than
+# sent in part.
 redact_stream() {
 	local s
 	s=$(cat)
