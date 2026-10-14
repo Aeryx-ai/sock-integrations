@@ -2,6 +2,7 @@ package test
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -699,13 +700,50 @@ func TestAQuestionMarkInAFenceIsNotTheAsk(t *testing.T) {
 	}
 }
 
+// cutCases are texts whose byte cap lands inside a 2, 3 or 4 byte character
+// for some prefix length.
+func cutCases(limit int) map[string]string {
+	cases := map[string]string{}
+	for _, r := range []string{"é", "€", "😀"} {
+		for _, prefix := range []string{"Ok?", "Ok? ", "Ok?  "} {
+			if (limit-len(prefix))%len(r) != 0 {
+				cases[fmt.Sprintf("%d byte after %d", len(r), len(prefix))] = prefix + strings.Repeat(r, limit)
+			}
+		}
+	}
+	return cases
+}
+
 func TestCapKeepsValidUTF8(t *testing.T) {
-	s := newStub(t)
-	msg := "Ok? " + strings.Repeat("é", 400)
-	runHook(t, s.URL, hookEnv{Stdin: stopInput("s14", msg)}, "--stop", "--ask-now")
-	g := s.Requests()
-	if len(g) != 1 || !utf8.ValidString(g[0].Text) || len(g[0].Text) > 606 {
-		t.Fatalf("len %d valid %v", len(g[0].Text), utf8.ValidString(g[0].Text))
+	for name, msg := range cutCases(600) {
+		t.Run(name, func(t *testing.T) {
+			s := newStub(t)
+			runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PROJECT_DIR": "/x/proj"}, Stdin: stopInput("s14", msg)}, "--stop", "--ask-now")
+			g := s.Requests()
+			if len(g) != 1 {
+				t.Fatalf("nothing sent: %+v", g)
+			}
+			if n := len(g[0].Text) - len("proj: "); !utf8.ValidString(g[0].Text) || n > 600 || n < 597 {
+				t.Fatalf("len %d valid %v", n, utf8.ValidString(g[0].Text))
+			}
+		})
+	}
+}
+
+func TestPermissionCapKeepsValidUTF8(t *testing.T) {
+	for name, msg := range cutCases(300) {
+		t.Run(name, func(t *testing.T) {
+			s := newStub(t)
+			in := hookJSON(map[string]any{"hook_event_name": "Notification", "notification_type": "permission_prompt", "message": msg})
+			runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PROJECT_DIR": "/x/proj"}, Stdin: in}, "--permission")
+			g := s.Requests()
+			if len(g) != 1 {
+				t.Fatalf("nothing sent: %+v", g)
+			}
+			if n := len(g[0].Text) - len("proj: "); !utf8.ValidString(g[0].Text) || n > 300 || n < 297 {
+				t.Fatalf("len %d valid %v", n, utf8.ValidString(g[0].Text))
+			}
+		})
 	}
 }
 

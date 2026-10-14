@@ -96,6 +96,23 @@ session=$(field session_id | LC_ALL=C tr -cd 'A-Za-z0-9_-' | LC_ALL=C cut -c1-64
 [ -n "$session" ] || session=$(printf '%s' "${CLAUDE_PROJECT_DIR:-$PWD}" | LC_ALL=C tr -cd 'A-Za-z0-9_-' | LC_ALL=C cut -c1-64)
 [ -n "$session" ] || session=project
 
+# utf8_cap prints stdin cut to $1 bytes, less a UTF-8 sequence the cut left
+# incomplete: the CLI refuses text that is not valid UTF-8.
+utf8_cap() {
+	LC_ALL=C head -c "$1" | LC_ALL=C awk '
+		BEGIN { for (i = 128; i < 256; i++) ord[sprintf("%c", i)] = i }
+		{ s = s (NR > 1 ? "\n" : "") $0 }
+		END {
+			n = length(s)
+			k = 0
+			while (k < 3 && k < n && ord[substr(s, n - k, 1)] >= 128 && ord[substr(s, n - k, 1)] < 192) k++
+			b = ord[substr(s, n - k, 1)]
+			need = (b >= 240 ? 4 : b >= 224 ? 3 : b >= 192 ? 2 : 1)
+			if (b >= 192 && k + 1 < need) n -= k + 1
+			printf "%s", substr(s, 1, n)
+		}'
+}
+
 # extract_ask prints the ask in an assistant message: fenced code blocks
 # (CommonMark: 3 or more backticks or tildes, closed only by a run of the same
 # character at least as long with nothing after it) are dropped, then the text
@@ -142,7 +159,7 @@ extract_ask() {
 			}
 			if (!from) exit
 			for (i = start[from]; i <= n; i++) print lines[i]
-		}' | awk 'NF { blank = 0 } !NF { if (blank) next; blank = 1 } { print }' | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' | LC_ALL=C head -c 600
+		}' | awk 'NF { blank = 0 } !NF { if (blank) next; blank = 1 } { print }' | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' | utf8_cap 600
 }
 
 # redact replaces the plugin token and common secret shapes with [redacted]:
@@ -332,7 +349,7 @@ case $mode in
 permission)
 	msg=
 	if [ "$have_jq" = 1 ]; then
-		msg=$(field message | LC_ALL=C tr -d '\000-\037\177' | LC_ALL=C head -c 300)
+		msg=$(field message | LC_ALL=C tr -d '\000-\037\177' | utf8_cap 300)
 	else
 		log_line "jq not found: sending the fixed phrase"
 	fi
