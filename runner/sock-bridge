@@ -66,6 +66,7 @@ sent_file=$state_dir/sent.ids
 # --- temp files, named <prefix>.<pid> so a SIGKILLed run's are swept by the next
 # (lib.sh sweep_dead), and the stream: removed on exit --------------------------
 cfg=$state_dir/curl.$$
+codef=$state_dir/code.$$
 hdr=$state_dir/hdr.$$
 resp=$state_dir/resp.$$
 stream_file=$state_dir/stream.$$
@@ -81,10 +82,12 @@ hist=$state_dir/hist.$$
 histp=$state_dir/histp.$$
 parts=$state_dir/parts.$$
 stream_pid=
+curl_pid=
 # shellcheck disable=SC2329 # run by the library's EXIT trap
 extra_cleanup() {
 	[ -n "$stream_pid" ] && kill "$stream_pid" 2>/dev/null
-	rm -rf "$cfg" "$hdr" "$resp" "$stream_file" "$stream_hdr" "$body" "$answer" "$new" "$newc" "$batch" "$ids_file" "$page" "$hist" "$histp" "$parts"
+	[ -n "$curl_pid" ] && kill "$curl_pid" 2>/dev/null
+	rm -rf "$cfg" "$codef" "$hdr" "$resp" "$stream_file" "$stream_hdr" "$body" "$answer" "$new" "$newc" "$batch" "$ids_file" "$page" "$hist" "$histp" "$parts"
 }
 install_traps
 
@@ -135,7 +138,7 @@ retry_wait() {
 	[ "$wait" -lt 0 ] && wait=0
 	left=$((deadline - $(now)))
 	[ "$wait" -gt "$left" ] && wait=$left
-	[ "$wait" -gt 0 ] && sleep "$wait"
+	[ "$wait" -gt 0 ] && nap "$wait"
 	return 0
 }
 
@@ -185,7 +188,11 @@ api() {
 		fi
 		set -- -q -sS --proto "$proto" --proto-redir "$proto" --max-redirs 0 --config "$cfg" -X "$method" -o "$resp" -D "$hdr" -w '%{http_code}' --connect-timeout 10 --max-time "$left"
 		[ -n "$data" ] && set -- "$@" --data-binary "@$data"
-		code=$(curl "$@" "$url" 2>/dev/null) || code=000
+		# a job waited on, as nap is, so a TERM need not wait out the request
+		curl "$@" "$url" >"$codef" 2>/dev/null &
+		curl_pid=$!
+		if wait "$curl_pid"; then code=$(cat "$codef"); else code=000; fi
+		curl_pid=
 		case $code in
 		2??) return 0 ;;
 		esac
@@ -380,7 +387,7 @@ if [ -f "$sent_file" ] && grep -qxF "$stdin_id" "$sent_file" 2>/dev/null; then
 			log_line "timeout"
 			exit 1
 		fi
-		sleep 2
+		nap 2
 	done
 fi
 
@@ -402,7 +409,7 @@ while :; do
 	for _ in $(seq 100); do
 		grep -q '^HTTP/' "$stream_hdr" 2>/dev/null && break
 		kill -0 "$stream_pid" 2>/dev/null || break
-		sleep 0.1
+		nap 0.1
 	done
 	status=$(sed -n 's/^HTTP\/[0-9.]* \([0-9]*\).*/\1/p' "$stream_hdr" 2>/dev/null | tail -n 1)
 	case ${status:-} in
@@ -476,6 +483,6 @@ while [ -z "$reason" ]; do
 		log_line "stream dropped"
 		exit 1
 	fi
-	sleep 0.2
+	nap 0.2
 done
 finish "$reason" "$(cat "$answer")"

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -452,5 +453,39 @@ func TestBridgeSweepsOldTempFilesWhateverTheirPid(t *testing.T) {
 	}
 	if _, err := os.Stat(legacy); err == nil {
 		t.Fatal("a dead run's hist.<pid>.pages was kept")
+	}
+}
+
+// sec 4: TERM during a Retry-After wait ends the run at once, and the exit
+// removes the curl config with the key and every other temp file
+func TestBridgeTermDuringARetryWaitExitsAtOnceAndCleansUp(t *testing.T) {
+	h := newBridgeHarness(t)
+	h.api.set(func(f *fakeMA) { f.status["send"] = []int{429}; f.retryAft = "15" })
+	h.script(agentMsg(bnAnswer), idle("end_turn"))
+	cmd := h.command(rnOpts{Env: map[string]string{"SOCK_BRIDGE_TIMEOUT": "30"}})
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	for range 100 {
+		if count(h.api.kinds(), "send") > 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	time.Sleep(time.Second)
+	sent := time.Now()
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	err := cmd.Wait()
+	if took := time.Since(sent); took > 3*time.Second {
+		t.Fatalf("TERM took %v to end the run (%v)", took, err)
+	}
+	ents, _ := os.ReadDir(h.state)
+	for _, e := range ents {
+		n := e.Name()
+		if !strings.HasSuffix(n, ".log") && !strings.HasSuffix(n, ".ids") && !strings.HasPrefix(n, "owner.") {
+			t.Fatalf("left behind: %s", n)
+		}
 	}
 }

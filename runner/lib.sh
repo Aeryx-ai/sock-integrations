@@ -39,7 +39,7 @@ hash16() {
 }
 
 # The prefixes of the temp files, named <prefix>.<pid> in the state directory.
-tmp_prefixes='curl hdr resp stream streamh body answer parts prompt new newc batch ids page hist histp'
+tmp_prefixes='curl code hdr resp stream streamh body answer parts prompt new newc batch ids page hist histp'
 
 # sweep_dead removes the temp files a run killed with SIGKILL (or a lost power)
 # left, the bridge's curl config with its API key among them: those of pids that
@@ -110,9 +110,18 @@ log_line() {
 # --- cleanup: the caller's own (extra_cleanup), the prompt file, our lock ----
 # shellcheck disable=SC2329 # run by the EXIT trap
 lib_cleanup() {
+	[ -n "${nap_pid:-}" ] && kill "$nap_pid" 2>/dev/null
 	if command -v extra_cleanup >/dev/null 2>&1; then extra_cleanup; fi
 	[ -n "$prompt" ] && rm -f "$prompt" "$prompt.timeout"
 	if [ -n "$mytoken" ] && [ "$(readlink "$lock" 2>/dev/null)" = "$mytoken" ]; then rm -f "$lock"; fi
+}
+# nap sleeps as a job waited on, so a TERM ends the run at once: a trap waits
+# for a foreground command to finish, a sleep of the whole turn among them
+nap() {
+	sleep "$1" &
+	nap_pid=$!
+	wait "$nap_pid"
+	nap_pid=
 }
 install_traps() {
 	trap lib_cleanup EXIT
@@ -254,7 +263,7 @@ take_lock() {
 			log_line "locked"
 			exit 1
 		fi
-		sleep 0.2
+		nap 0.2
 	done
 }
 
