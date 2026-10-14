@@ -96,14 +96,28 @@ session=$(field session_id | LC_ALL=C tr -cd 'A-Za-z0-9_-' | LC_ALL=C cut -c1-64
 [ -n "$session" ] || session=$(printf '%s' "${CLAUDE_PROJECT_DIR:-$PWD}" | LC_ALL=C tr -cd 'A-Za-z0-9_-' | LC_ALL=C cut -c1-64)
 [ -n "$session" ] || session=project
 
-# extract_ask prints the ask in an assistant message: fenced code blocks are
-# dropped, then the text from the last paragraph holding a question mark to
-# the end, or, without one, from the paragraph before a trailing numbered list
-# to the end. No question and no list: nothing. Capped at 600 bytes.
+# extract_ask prints the ask in an assistant message: fenced code blocks
+# (CommonMark: 3 or more backticks or tildes, closed only by a run of the same
+# character at least as long with nothing after it) are dropped, then the text
+# from the last paragraph holding a question mark to the end, or, without one,
+# from the paragraph before a trailing numbered list to the end. No question
+# and no list: nothing. Capped at 600 bytes.
 extract_ask() {
 	printf '%s\n' "$1" | LC_ALL=C tr -d '\000-\010\013\014\016-\037\177' | awk '
-		/^[[:space:]]*```/ { fence = !fence; next }
-		fence { next }
+		{
+			t = $0
+			sub(/^[[:space:]]*/, "", t)
+			c = substr(t, 1, 1)
+			run = 0
+			if (c == "`" || c == "~") while (substr(t, run + 1, 1) == c) run++
+			rest = substr(t, run + 1)
+		}
+		fence {
+			if (run >= 3 && c == fc && run >= fl && rest ~ /^[[:space:]]*$/) fence = 0
+			next
+		}
+		# A backtick run with a backtick after it is inline code, not a fence.
+		run >= 3 && !(c == "`" && index(rest, "`")) { fence = 1; fc = c; fl = run; next }
 		{ lines[++n] = $0 }
 		END {
 			# paragraph starts
@@ -119,11 +133,12 @@ extract_ask() {
 				for (i = start[k]; i <= end[k]; i++) if (index(lines[i], "?")) { from = k; break }
 				if (from) break
 			}
-			if (!from) {
-				for (k = p; k >= 1; k--) {
-					if (lines[start[k]] ~ /^[[:space:]]*[0-9]+[.)]/) { from = (k > 1 ? k - 1 : k); break }
-					if (k < p) break
-				}
+			# A trailing list ends the message; blank lines between its items make
+			# each item a paragraph, so walk back to the first.
+			if (!from && lines[start[p]] ~ /^[[:space:]]*[0-9]+[.)]/) {
+				k = p
+				while (k > 1 && lines[start[k-1]] ~ /^[[:space:]]*[0-9]+[.)]/) k--
+				from = (k > 1 ? k - 1 : k)
 			}
 			if (!from) exit
 			for (i = start[from]; i <= n; i++) print lines[i]

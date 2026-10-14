@@ -661,13 +661,41 @@ func TestSecretsAreRedactedBeforeSending(t *testing.T) {
 	}
 }
 
+// The fenced blocks sit after the question, inside the paragraphs the ask
+// takes, so only fence handling can keep them out.
 func TestOtherFenceShapesAreDropped(t *testing.T) {
-	s := newStub(t)
-	msg := "Logs:\n\n~~~\nTILDE_SECRET=1\n~~~\n\n````md\n```\nNESTED_SECRET=2\n```\n````\n\nRetry the deploy?"
-	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PROJECT_DIR": "/x/proj"}, Stdin: stopInput("s13", msg)}, "--stop", "--ask-now")
-	g := s.Requests()
-	if len(g) != 1 || strings.Contains(g[0].Text, "TILDE_SECRET") || strings.Contains(g[0].Text, "NESTED_SECRET") || !strings.HasSuffix(g[0].Text, "Retry the deploy?") {
-		t.Fatalf("%+v", g)
+	cases := map[string]string{
+		"tilde":            "Retry the deploy?\n\n~~~\nTILDE_SECRET=1\n~~~",
+		"long tilde":       "Retry the deploy?\n\n~~~~\n~~~\nTILDE_SECRET=1\n~~~~",
+		"four backticks":   "Retry the deploy?\n\n````md\n```\nNESTED_SECRET=2\n```\n````",
+		"closer with text": "Retry the deploy?\n\n```\n``` not a closer\nNESTED_SECRET=2\n```",
+		"tilde after text": "Retry the deploy?\n\n~~~\n```\nTILDE_SECRET=1\n```\n~~~",
+	}
+	for name, msg := range cases {
+		t.Run(name, func(t *testing.T) {
+			s := newStub(t)
+			runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PROJECT_DIR": "/x/proj"}, Stdin: stopInput("s13", msg)}, "--stop", "--ask-now")
+			if g := s.Requests(); len(g) != 1 || g[0].Text != "proj: Retry the deploy?" {
+				t.Fatalf("%+v", g)
+			}
+		})
+	}
+}
+
+// A question mark inside a fence is code, not the ask.
+func TestAQuestionMarkInAFenceIsNotTheAsk(t *testing.T) {
+	cases := map[string]string{
+		"tilde":          "Retry the deploy?\n\nDone.\n\n~~~\nwhy?=SECRETQ\n~~~",
+		"four backticks": "Retry the deploy?\n\nDone.\n\n````\n```\nwhy?=SECRETQ\n```\nmore?\n````",
+	}
+	for name, msg := range cases {
+		t.Run(name, func(t *testing.T) {
+			s := newStub(t)
+			runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PROJECT_DIR": "/x/proj"}, Stdin: stopInput("s13q", msg)}, "--stop", "--ask-now")
+			if g := s.Requests(); len(g) != 1 || g[0].Text != "proj: Retry the deploy?\n\nDone." {
+				t.Fatalf("%+v", g)
+			}
+		})
 	}
 }
 
@@ -678,6 +706,26 @@ func TestCapKeepsValidUTF8(t *testing.T) {
 	g := s.Requests()
 	if len(g) != 1 || !utf8.ValidString(g[0].Text) || len(g[0].Text) > 606 {
 		t.Fatalf("len %d valid %v", len(g[0].Text), utf8.ValidString(g[0].Text))
+	}
+}
+
+// Blank-line separated items each make a paragraph; the ask still starts at
+// the paragraph before the list.
+func TestALooseListStartsAtTheParagraphBeforeIt(t *testing.T) {
+	s := newStub(t)
+	msg := "Done.\n\nOptions:\n\n1. alpha\n\n2. beta\n\n3. gamma"
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PROJECT_DIR": "/x/proj"}, Stdin: stopInput("s16", msg)}, "--stop", "--ask-now")
+	if g := s.Requests(); len(g) != 1 || g[0].Text != "proj: Options:\n\n1. alpha\n\n2. beta\n\n3. gamma" {
+		t.Fatalf("%+v", g)
+	}
+}
+
+func TestAListFollowedByTextIsNotTrailing(t *testing.T) {
+	s := newStub(t)
+	msg := "Steps taken:\n\n1. built\n\nAll green."
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PROJECT_DIR": "/x/proj"}, Stdin: stopInput("s17", msg)}, "--stop", "--ask-now")
+	if g := s.Requests(); len(g) != 0 {
+		t.Fatalf("no trailing list, yet %+v", g)
 	}
 }
 
