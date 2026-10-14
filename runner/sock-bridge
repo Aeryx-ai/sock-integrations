@@ -205,10 +205,10 @@ c1=$(printf '\302[\200-\237]')
 clean_text() { LC_ALL=C tr -d '\000-\010\013-\037\177' | LC_ALL=C sed "s/$c1//g"; }
 post_text() {
 	mkdir -p "$parts" || exit 1
+	# Paragraphs (lines up to a blank one) go into a part whole; one too long for
+	# a part is packed by lines, and a line too long for one is cut by bytes.
 	printf '%s\n' "$1" | LC_ALL=C awk -v max=60000 -v dir="$parts" "$awk_cut"'
-		BEGIN { ord_init(); n = 1; size = 0 }
-		{
-			line = $0
+		function put(line,   c) {
 			while (length(line) + 1 > max) {
 				if (size > 0) { n++; size = 0 }
 				c = cut_at(line, max - 1)
@@ -219,7 +219,16 @@ post_text() {
 			if (size + length(line) + 1 > max && size > 0) { n++; size = 0 }
 			print line >> (dir "/part." n); size += length(line) + 1
 			close(dir "/part." n)
-		}'
+		}
+		function flush(   i) {
+			if (size > 0 && size + psize > max && psize <= max) { n++; size = 0 }
+			for (i = 1; i <= pn; i++) put(para[i])
+			pn = 0; psize = 0
+		}
+		BEGIN { ord_init(); n = 1; size = 0; pn = 0; psize = 0 }
+		{ para[++pn] = $0; psize += length($0) + 1 }
+		/^[ \t]*$/ { flush() }
+		END { flush() }'
 	count=$(find "$parts" -name 'part.*' | wc -l | tr -d ' ')
 	[ "$count" -gt 0 ] || { printf '%s\n' "$1" >"$parts/part.1"; count=1; }
 	# parts of this message already posted by an earlier run stay posted

@@ -1,6 +1,7 @@
 package test
 
 import (
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -258,5 +259,30 @@ func TestBridgeCleansCarriageReturnsAndC1Controls(t *testing.T) {
 	got := s[0].Text
 	if want := "saferm -rf ~ next 31m csi  日本語  nbsp é Ā"; got != want {
 		t.Fatalf("posted %q, want %q", got, want)
+	}
+}
+
+// L3: a split falls on a blank line before it falls between lines
+func TestBridgeSplitsOnBlankLinesFirst(t *testing.T) {
+	h := newBridgeHarness(t)
+	para := func(name string) []string {
+		var ls []string
+		for i := range 700 {
+			ls = append(ls, fmt.Sprintf("%s line %04d %s", name, i, strings.Repeat("x", 45)))
+		}
+		return ls
+	}
+	p1, p2 := para("first"), para("second")
+	h.script(agentMsg(strings.Join(p1, "\n")+"\n\n"+strings.Join(p2, "\n")), idle("end_turn"))
+	r := h.run(rnOpts{})
+	s := h.sends()
+	if r.Code != 0 || len(s) != 2 {
+		t.Fatalf("exit %d, %d sends", r.Code, len(s))
+	}
+	if a := strings.TrimRight(s[0].Text, "\n"); !strings.HasSuffix(a, p1[len(p1)-1]) {
+		t.Fatalf("part 1 ends %q", a[max(0, len(a)-80):])
+	}
+	if b := strings.TrimLeft(s[1].Text, "\n"); !strings.HasPrefix(b, p2[0]) {
+		t.Fatalf("part 2 starts %q", b[:min(80, len(b))])
 	}
 }
