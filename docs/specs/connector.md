@@ -43,7 +43,7 @@ Closure is not a field. A connection whose puppet token the hub refuses is delet
 
 ### Behaviors
 
-- `Open(accessToken)` (factory): verifies the JWT, calls `IssueConnectorPuppetToken` with the service token and the JWT, calls `whoami` with the result, stores the ciphertext, puppet id and owner id. On `ALREADY_ISSUED` (a previous instance of this service held it and lost the database) it calls `RevokeConnectorDevice` with the same JWT and issues again, logging the recovery for the operator. It runs for a grant's first request and for its first request after a refusal, which is the dormancy probe: a new token resumes the grant's dormant subscriptions in the same transaction that stores it (their cursors kept) and starts the stream; `ACCOUNT_SUSPENDED` leaves them dormant; `NOT_FOUND` (grant revoked, or kept by a revocation) deletes the grant with every subscription, which ends them `grantRevoked`. Concurrent first requests for a grant share one issue
+- `Open(accessToken)` (factory): verifies the JWT, calls `IssueConnectorPuppetToken` with the service token and the JWT, calls `whoami` with the result, stores the ciphertext, puppet id and owner id. On `ALREADY_ISSUED` (a previous instance of this service held it and lost the database) it calls `RevokeConnectorDevice` with the same JWT and issues again, logging the recovery for the operator. It runs for a grant's first request and for its first request after a refusal, which is the dormancy probe: a new token resumes the grant's dormant subscriptions in the same transaction that stores it (their cursors kept) and starts the stream (that stream check runs in the background and retries with backoff until it succeeds); `ACCOUNT_SUSPENDED` leaves them dormant and marks an `unknown` dormancy `suspended`; `NOT_FOUND` (grant revoked, or kept by a revocation) deletes the grant with every subscription, which ends them `grantRevoked`. Concurrent first requests for a grant share one issue
 - `Call(tool, input)`: `sock_whoami`, `sock_list_conversations`, `sock_send` with the puppet token, through the `sock-mcp` tool implementations
 - `Stream()`: one `Subscribe` on the puppet token, reconnecting with the CLI's backoff, held open while the connection has at least one live `EventSubscription`; otherwise not opened (nothing to deliver to), so deliveries wait in the hub's queue. A delivery that fails to be handled (the store unavailable, an ack refused) ends the stream attempt, which backs off and reconnects: the hub then redelivers from its queue in order, so nothing behind the failed delivery is handled before it. A hub message this service cannot read (an id that is not a UUID) is logged, left unacked and skipped while the stream goes on: it can never pass the sender gate, so it never becomes an event, holding the stream for it would stop the grant's deliveries until the hub is fixed and it comes back with every new stream, so the log keeps naming it. One stream per connection with a live subscription, and no cap: the number of streams is bounded by the number of grants and nothing else. Stopping a stream rechecks the subscriptions once it has ended, so a fresh connection that subscribed while the old stream was still running gets its stream
 - `Deliver(delivery)`: the sender gate, then one `OwnerReplyEvent` per live subscription; `Ack` after every subscription accepted it (2xx) or was closed trying
@@ -91,7 +91,8 @@ Closure is not a field. A closed subscription has a `SubscriptionClosure` row.
 
 - The secret decrypts only to sign a delivery and is never returned, logged or echoed.
 - Deliveries to one subscription follow the hub stream order, including across a failed handling (the stream attempt ends and the hub redelivers in order); `cursor` increases by one per accepted event and never decreases. `seq` is per conversation and travels in `data`, never as the cursor.
-- A subscription outlives its connection: it hangs off the grant, goes dormant when the connection is refused and ends only by its own closure or the grant's deletion (`NOT_FOUND` on the probe, or dormant 30 days with no request).
+- A subscription outlives its connection: it hangs off the grant, goes dormant when the connection is refused and ends only by its own closure or the grant's deletion (`NOT_FOUND` on the probe, or dormant past its cause's bound with no request: 30 days `unknown`, 365 `suspended`).
+- No subscription is live without a connection: a subscribe for a grant whose connection is gone inserts it dormant, with the grant's cause and `since`.
 
 ### States
 
@@ -107,11 +108,11 @@ stateDiagram-v2
     dormant --> dormant: Subscribe() (secret refreshed)
     dormant --> live: probe issued a new token (cursor kept)
     dormant --> closed: Unsubscribe()
-    dormant --> [*]: probe got NOT_FOUND, or dormant 30 days (grantRevoked, deleted)
+    dormant --> [*]: probe got NOT_FOUND, or dormant 30 days unknown or 365 days suspended (grantRevoked, deleted)
     closed --> [*]
 ```
 
-Anything not drawn is refused. Dormant is not live: no stream delivers to it, the hub queues its events, and the live gauge, the boot and the fan-out leave it out. It is not closed either, so subscribe and unsubscribe still find it. A request only reaches them after its `Open` probed the grant, which resumes a dormant subscription before the call runs; a dormant one is met only when a refusal lands between that `Open` and the call. Then `Subscribe()` on its grant, event and URL is a refresh as for a live one (same id and cursor, new secret) and it stays dormant, because the token the request loaded is the refused one and only the next probe can tell; it counts toward the 10, since it resumes. `Unsubscribe()` closes it `unsubscribed`, as it would a live one, since the platform asked to stop.
+Anything not drawn is refused. Dormant is not live: no stream delivers to it, the hub queues its events, and the live gauge, the boot and the fan-out leave it out. It is not closed either, so subscribe and unsubscribe still find it. A request only reaches them after its `Open` probed the grant, which resumes a dormant subscription before the call runs; a dormant one is met only when a refusal lands between that `Open` and the call. Then `Subscribe()` on its grant, event and URL is a refresh as for a live one (same id and cursor, new secret) and it stays dormant, because the token the request loaded is the refused one and only the next probe can tell; it counts toward the 10, since it resumes. `Unsubscribe()` closes it `unsubscribed`, as it would a live one, since the platform asked to stop. A new subscription in that window, for a callback the grant has none for, is inserted dormant with the grant's cause and first `since`, never live with no connection: the subscribe holds the grant row shared, so a refusal waits for it and makes it dormant with the rest, and one that committed first is seen. A grant deleted in that window (revoked, or swept) refuses the subscribe as an internal error; the platform's next request probes.
 
 ### Relationships
 
@@ -134,14 +135,19 @@ When a subscription closes for `gone`, `tooLarge` or `deliveryFailed`, the conne
 
 ## SubscriptionDormancy
 
-Value object, owned by `EventSubscription`, 0 or 1. The grant's puppet token was refused and the hub has not yet said why.
+Value object, owned by `EventSubscription`, 0 or 1. The grant's puppet token was refused and no new one has been issued.
 
 | Field | Type | Meaning |
 |---|---|---|
 | `subscriptionId` | UUID | |
-| `since` | Timestamp | When the connection was refused |
+| `since` | Timestamp | When the connection was first refused. Never moved: a later refusal or probe keeps it |
+| `cause` | `DormancyCause` | `suspended`: the hub said so, as a stream ended `ACCOUNT_SUSPENDED` or a probe's issue answered it. `unknown`: a `TOKEN_INVALID`, which a suspension, a removed device and a revocation all give |
 
-Written by `Connection.Dormant()` for every live subscription of the grant, deleted by the probe's new token. The sweep deletes every grant that has no connection and a subscription dormant over 30 days, as a `NOT_FOUND` would: a revoked grant's platform never calls again, so no probe ever settles it. The sweep runs at startup and whenever a grant's stream ends, never on a clock tick; a grant goes dormant only as its stream ends or on a tool call, so the next stream end or restart finds it.
+Written by `Connection.Dormant()` for every live subscription of the grant, with `suspended` when the stream ended `ACCOUNT_SUSPENDED` and `unknown` otherwise, and deleted by the probe's new token. A probe answering `ACCOUNT_SUSPENDED` updates `unknown` to `suspended` and keeps `since`. Nothing probes on its own: the hub is asked only on a request from the platform, so a suspended grant sits untouched until its platform calls.
+
+The sweep deletes every grant that has no connection and a subscription dormant past its cause's bound, as a `NOT_FOUND` would: 30 days `unknown`, since a revoked grant's platform never calls again and no probe ever settles it, and 365 days `suspended`, since the owner may be reinstated and the platform cannot refresh, so cannot probe, while suspended. Both count from `since`, the first refusal, so an `unknown` row turned `suspended` on day 20 still goes on day 365 and a grant stays dormant 365 days at most. An owner erased while suspended never comes back, and the 365-day bound is what deletes their grant's subscriptions, webhook URLs and sealed secrets. A reinstatement after day 365 needs the platform to subscribe again. The sweep also deletes a grant with no connection and no subscriptions once its row is 30 days old: it holds nothing.
+
+It runs at startup and whenever a grant's stream ends, in the background beside the streams (one at a time; one asked for meanwhile follows once), never in a stream's restart path. Each run deletes at most 100 grants a transaction until none is left, under a 1 min deadline, and rechecks age and connection in the delete itself, after locking the grant rows, so a grant that resumed or went dormant anew since the read is kept. The daily closure sweep also runs it, as a backstop to the event triggers: a deployment where no stream ends for weeks still enforces the bounds.
 
 ## OwnerReplyEvent
 
@@ -165,6 +171,8 @@ The event schema (`payloadSchema` in `events/list`) is this object's `data`, whi
 `EventName`: `owner.reply`.
 
 `ClosureCause`: `unsubscribed`, `gone`, `tooLarge`, `deliveryFailed`, `grantRevoked`.
+
+`DormancyCause`: `suspended`, `unknown`.
 
 ## Everything at once
 
@@ -276,7 +284,19 @@ CREATE TABLE connector.subscription_dormancy (
         -- written when the connection is refused, deleted by the next stored connection
 );
 CREATE INDEX subscription_dormancy_since_idx ON connector.subscription_dormancy (since);
-    -- serves the sweep of grants dormant past 30 days
+    -- serves the sweep of grants dormant past their bound
+
+-- migration 00005
+ALTER TABLE connector.grants ADD COLUMN created_at timestamptz NOT NULL DEFAULT now();
+CREATE INDEX grants_created_at_idx ON connector.grants (created_at);
+    -- serves the sweep of grants holding nothing, 30 days after created_at; rows from before count from the migration
+
+-- migration 00006
+CREATE TABLE connector.dormancy_causes (name text PRIMARY KEY);
+INSERT INTO connector.dormancy_causes VALUES ('suspended'), ('unknown');
+ALTER TABLE connector.subscription_dormancy
+    ADD COLUMN cause text NOT NULL REFERENCES connector.dormancy_causes (name) ON DELETE RESTRICT;
+    -- rows from before the migration are unknown; the sweep keeps suspended 365 days, unknown 30, from since
 ```
 
 Unclosed is derived: no closure row. Live is derived: unclosed and no dormancy row. Stream open is replica memory, never stored.
@@ -306,7 +326,7 @@ Go, in this repository's `test/` module to start, moving with the service into i
 
 - A fake hub (`httptest`): JWKS, `IssueConnectorPuppetToken`, `whoami`, `Subscribe` stream, `Ack`, `NotifyOwner`, `Send`, with scripted deliveries and failures.
 - A fake platform: a webhook receiver that answers the verification challenge, 2xx, 410, 413, 5xx and timeouts, and checks signatures.
-- Cases: every auth refusal above; a connection opened once per grant; tool calls as the puppet; subscribe with a failing callback is refused; a delivery from the owner reaches every live subscription in order, signed, and is acked after the last 2xx; a non-owner delivery is acked and produces no event; 410 and 413 close the subscription and the owner is told once; a failure leaves the delivery pending and the redelivery skips the subscriptions that accepted it; 24 h and 10 failed handlings close it `deliveryFailed`; the platform's wait is capped at 5 min and a subscribe or unsubscribe ends it; `Retry-After` in both forms, garbage, a past date and one over 30 s; the stream opens with the first subscription and closes with the last; a revoked grant closes the connection; cursors resume; a stream ended `ACCOUNT_SUSPENDED` or `TOKEN_INVALID`, and a tool call's `TOKEN_INVALID`, leave the subscriptions dormant, not closed; suspend then reinstate resumes them with the cursor kept, while a kept suspended refusal answers the same JWT without a hub call and a later JWT issues; suspend then revoke deletes them; `TOKEN_INVALID` on the first `Subscribe` (a deleted token at boot) goes dormant and the next request resumes it; concurrent requests during reinstatement share one issue and one stream; the sweep at boot and at a stream end deletes a grant dormant 31 days and keeps a recent one; subscribe and unsubscribe match a dormant subscription; migration 00004 keeps rows from before it; the request limit; secrets never appear in logs; the drift test pins the three tools.
+- Cases: every auth refusal above; a connection opened once per grant; tool calls as the puppet; subscribe with a failing callback is refused; a delivery from the owner reaches every live subscription in order, signed, and is acked after the last 2xx; a non-owner delivery is acked and produces no event; 410 and 413 close the subscription and the owner is told once; a failure leaves the delivery pending and the redelivery skips the subscriptions that accepted it; 24 h and 10 failed handlings close it `deliveryFailed`; the platform's wait is capped at 5 min and a subscribe or unsubscribe ends it; `Retry-After` in both forms, garbage, a past date and one over 30 s; the stream opens with the first subscription and closes with the last; a revoked grant closes the connection; cursors resume; a stream ended `ACCOUNT_SUSPENDED` or `TOKEN_INVALID`, and a tool call's `TOKEN_INVALID`, leave the subscriptions dormant, not closed; suspend then reinstate resumes them with the cursor kept, while a kept suspended refusal answers the same JWT without a hub call and a later JWT issues; suspend then revoke deletes them; `TOKEN_INVALID` on the first `Subscribe` (a deleted token at boot) goes dormant and the next request resumes it; concurrent requests during reinstatement share one issue and one stream; the sweep at boot, at a stream end and on the daily tick deletes a grant past its bound and keeps a recent one; unknown dormancy goes after 30 days and suspended after 365, both from the first refusal, and a suspended probe marks unknown suspended with `since` kept; nothing probes the hub without a platform request; the sweep runs in batches, rechecks the age in its delete, keeps a grant a new connection races (which fails without the lock before the recheck), deletes a bare grant past 30 days and never delays a stream's restart; a subscribe with no connection, or racing a refusal, is dormant, never a live orphan; a failed stream check after a new connection is retried; migration 00006 backfills unknown and refuses a cause outside the vocabulary; subscribe and unsubscribe match a dormant subscription; migration 00004 keeps rows from before it; the request limit; secrets never appear in logs; the drift test pins the three tools.
 - Contract tests against staging `sockd` for `IssueConnectorPuppetToken`, the JWKS and the stream, with a staging grant.
 - Live, in order, as [integrations](integrations.md) says: tool discovery over the Secure MCP Tunnel with the stdio server, the staging endpoint as a custom MCP server in ChatGPT and as a claude.ai connector, an owner reply arriving at a dot, then the directory submission.
 
