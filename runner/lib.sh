@@ -38,19 +38,28 @@ hash16() {
 	if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi | cut -c1-16
 }
 
-# sweep_dead removes the temp files of runs that no longer exist. They are named
-# <prefix>.<pid>, and a run killed with SIGKILL (or a lost power) leaves them,
-# the bridge's curl config with its API key among them.
+# The prefixes of the temp files, named <prefix>.<pid> in the state directory.
+tmp_prefixes='curl hdr resp stream streamh body answer parts prompt new newc batch ids page hist histp'
+
+# sweep_dead removes the temp files a run killed with SIGKILL (or a lost power)
+# left, the bridge's curl config with its API key among them: those of pids that
+# no longer exist, and any older than a run can last whatever its pid, since a
+# pid can be reused. Legacy names (hist.<pid>.pages, new.<pid>.cut) count by
+# their pid.
 sweep_dead() {
-	for f in "$state_dir"/curl.* "$state_dir"/hdr.* "$state_dir"/resp.* "$state_dir"/stream.* "$state_dir"/streamh.* \
-		"$state_dir"/body.* "$state_dir"/answer.* "$state_dir"/parts.* "$state_dir"/prompt.* "$state_dir"/new.* \
-		"$state_dir"/batch.* "$state_dir"/ids.* "$state_dir"/page.* "$state_dir"/hist.* "$state_dir"/histp.* "$state_dir"/newc.*; do
-		[ -e "$f" ] || continue
-		pid=${f##*.}
-		case $pid in
-		'' | *[!0-9]*) continue ;;
-		esac
-		kill -0 "$pid" 2>/dev/null || rm -rf "$f"
+	for p in $tmp_prefixes; do
+		for f in "$state_dir/$p".*; do
+			[ -e "$f" ] || continue
+			pid=${f#"$state_dir/$p."}
+			pid=${pid%.pages}
+			pid=${pid%.cut}
+			pid=${pid%.timeout}
+			case $pid in
+			'' | *[!0-9]*) continue ;;
+			esac
+			kill -0 "$pid" 2>/dev/null || rm -rf "$f"
+		done
+		find "$state_dir" -maxdepth 1 -name "$p.*" -mmin "+$((timeout / 60 + 2))" -exec rm -rf {} + 2>/dev/null || true
 	done
 }
 
@@ -84,10 +93,6 @@ lib_init() {
 	done_file=$state_dir/$ledger_name
 	mkdir -p "$state_dir" 2>/dev/null && chmod 700 "$state_dir" 2>/dev/null
 	require_state_dir
-	# prompt files older than any run can last
-	find "$state_dir" -maxdepth 1 -name 'prompt.*' -mmin "+$((timeout / 60 + 2))" -exec rm -f {} + 2>/dev/null || true
-	# the bridge's curl config holds the API key: an old one goes whatever its pid
-	find "$state_dir" -maxdepth 1 -name 'curl.*' -mmin "+$((timeout / 60 + 2))" -exec rm -f {} + 2>/dev/null || true
 	sweep_dead
 	msg_id=-
 	prompt=

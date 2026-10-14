@@ -409,3 +409,48 @@ func TestRunnerRelativeStateDirWithNoStartDirExits2(t *testing.T) {
 		})
 	}
 }
+
+// sec 5: a temp file older than any run can last goes whatever its pid, since
+// a pid can be reused; a legacy hist.<pid>.pages of a dead run goes too
+func TestBridgeSweepsOldTempFilesWhateverTheirPid(t *testing.T) {
+	h := newBridgeHarness(t)
+	if err := os.MkdirAll(h.state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	live, dead := strconv.Itoa(rnLivePid(t)), strconv.Itoa(rnDeadPid(t))
+	old := time.Now().Add(-time.Hour)
+	prefixes := []string{"hdr", "resp", "stream", "streamh", "body", "answer", "new", "newc", "batch", "ids", "page", "hist", "histp"}
+	for _, p := range prefixes {
+		for _, age := range []string{"old", "fresh"} {
+			f := filepath.Join(h.state, p+"."+live)
+			if age == "fresh" {
+				f = filepath.Join(h.state, p+"."+live+"0fresh")
+			}
+			if err := os.WriteFile(f, []byte(bnToolInput), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if age == "old" {
+				if err := os.Chtimes(f, old, old); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+	legacy := filepath.Join(h.state, "hist."+dead+".pages")
+	if err := os.WriteFile(legacy, []byte(bnToolInput), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.script(agentMsg(bnAnswer), idle("end_turn"))
+	h.run(rnOpts{})
+	for _, p := range prefixes {
+		if _, err := os.Stat(filepath.Join(h.state, p+"."+live)); err == nil {
+			t.Fatalf("an hour-old %s.%s was kept", p, live)
+		}
+		if _, err := os.Stat(filepath.Join(h.state, p+"."+live+"0fresh")); err != nil {
+			t.Fatalf("a fresh %s file was swept", p)
+		}
+	}
+	if _, err := os.Stat(legacy); err == nil {
+		t.Fatal("a dead run's hist.<pid>.pages was kept")
+	}
+}
