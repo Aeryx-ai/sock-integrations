@@ -36,7 +36,9 @@ asks=$state_dir/asks
 # server chosen by a different source. The plugin option wins: .mcp.json gives
 # sock-mcp the plugin token, and an ambient SOCK_TOKEN exported for another
 # platform (Codex) must not make these hooks post as that puppet.
+from_plugin=0
 if [ -n "${CLAUDE_PLUGIN_OPTION_SOCK_TOKEN:-}" ]; then
+	from_plugin=1
 	token=$CLAUDE_PLUGIN_OPTION_SOCK_TOKEN
 	url=${CLAUDE_PLUGIN_OPTION_SOCK_URL:-}
 	# An ambient access gate belongs to the env-token deployment, not this URL.
@@ -45,6 +47,9 @@ else
 	token=${SOCK_TOKEN:-}
 	url=${SOCK_URL:-}
 fi
+# No child inherits the credential: each sock call gets the one it needs. A
+# machine key in particular must reach only `sock puppets ensure`.
+unset SOCK_TOKEN CLAUDE_PLUGIN_OPTION_SOCK_TOKEN
 
 log_line() {
 	# Strip every control character (escape sequences, CR, tab, newline) so
@@ -79,7 +84,9 @@ field() {
 }
 
 # Allowlist, in the C locale so multibyte input is dropped bytewise instead of cut mid-character.
-project=$(basename "${CLAUDE_PROJECT_DIR:-$PWD}" | LC_ALL=C tr -cd 'A-Za-z0-9._ -' | LC_ALL=C cut -c1-100)
+project_dir=${CLAUDE_PROJECT_DIR:-$PWD}
+project_dir=${project_dir%/}
+project=$(printf '%s' "${project_dir##*/}" | LC_ALL=C tr -cd 'A-Za-z0-9._ -' | LC_ALL=C cut -c1-100)
 [ -n "$project" ] || project=project
 
 # The session the ask belongs to: the hook's session_id, else the project.
@@ -139,6 +146,51 @@ redact() {
 		-e 's#(https?://[^[:space:]?]*)\?[^[:space:]]*#\1?[redacted]#g'
 }
 
+# hook_timeout is SOCK_HOOK_TIMEOUT seconds, 10 when unset or not a positive integer.
+hook_timeout() {
+	local t=${SOCK_HOOK_TIMEOUT:-10}
+	case $t in
+	'' | *[!0-9]*) t=10 ;;
+	*) [ "$t" -gt 0 ] || t=10 ;;
+	esac
+	printf '%s' "$t"
+}
+
+# bounded runs a command with stdin from $1, stdout to $2 and stderr to $3,
+# killed after hook_timeout seconds: async hooks are not timed out by the host.
+# It returns the command's status.
+bounded() {
+	local in=$1 out=$2 err=$3
+	shift 3
+	"$@" <"$in" >"$out" 2>"$err" &
+	local pid=$!
+	(
+		sleep "$(hook_timeout)"
+		kill "$pid" 2>/dev/null
+	) >/dev/null 2>&1 &
+	local watchdog=$!
+	disown "$watchdog" 2>/dev/null # no "Terminated" job notice on stderr when we reap it below
+	wait "$pid"
+	local rc=$?
+	kill "$watchdog" 2>/dev/null
+	pkill -P "$watchdog" 2>/dev/null
+	return "$rc"
+}
+
+# scrubbed prints a captured stderr file fit for the log: control bytes
+# stripped, then every credential in $2... redacted, then cut to 300 bytes, so
+# a token split by a control byte or straddling the cut cannot leak a prefix.
+scrubbed() {
+	local detail
+	detail=$(head -c 65536 "$1" | LC_ALL=C tr -d '[:cntrl:]')
+	shift
+	local s
+	for s in "$@"; do
+		if [ -n "$s" ]; then detail=${detail//"$s"/[redacted]}; fi
+	done
+	printf '%s' "$detail" | head -c 300
+}
+
 send_text() {
 	# $1 is the message body; the project name is prefixed here.
 	local text
@@ -159,68 +211,59 @@ send_text() {
 		url_args=(--url "$url")
 		# The config file's access_gate belongs to the config's own URL. When the
 		# plugin names the URL, point the CLI at a config path that does not exist.
-		if [ -n "${CLAUDE_PLUGIN_OPTION_SOCK_TOKEN:-}" ]; then
+		if [ "$from_plugin" = 1 ]; then
 			export XDG_CONFIG_HOME=${TMPDIR:-/tmp}/sock-hook-noconfig.$$
 		fi
 	fi
-	local send_token=$token
-	# A machine key (ADR 10) sends as this project's own puppet: the CLI makes or
-	# reuses it and prints the path of its token file; the key itself only ever
-	# reaches the hub to make puppets.
-	case $token in
-	sock_mk_*)
-		local tokfile
-		tokfile=$(SOCK_TOKEN=$token sock ${url_args[@]+"${url_args[@]}"} puppets ensure -- "${CLAUDE_PROJECT_DIR:-$PWD}" 2>/dev/null </dev/null | head -n 1)
-		if [ -z "$tokfile" ] || [ ! -f "$tokfile" ]; then
-			log_line "sock puppets ensure failed: no project puppet, nothing sent"
-			return 1
-		fi
-		IFS= read -r send_token <"$tokfile" || true
-		if [ -z "$send_token" ]; then
-			log_line "sock puppets ensure: the token file is empty, nothing sent"
-			return 1
-		fi
-		;;
-	esac
-	export SOCK_TOKEN=$send_token
-	local errf
-	errf=$(mktemp "${TMPDIR:-/tmp}/sock-hook.XXXXXX") || {
+	local work
+	work=$(mktemp -d "${TMPDIR:-/tmp}/sock-hook.XXXXXX") || {
 		log_line "mktemp failed"
 		return 1
 	}
-	local timeout=${SOCK_HOOK_TIMEOUT:-10}
-	case $timeout in
-	'' | *[!0-9]*) timeout=10 ;;
-	*) [ "$timeout" -gt 0 ] || timeout=10 ;;
+	local send_token=$token rc
+	# A machine key (ADR 10) sends as this project's own puppet: the CLI makes or
+	# reuses it and prints the path of its token file under the state dir's
+	# puppets cache. Only a regular file there holding a puppet token is used.
+	case $token in
+	sock_mk_*)
+		SOCK_TOKEN=$token bounded /dev/null "$work/ensure.out" "$work/ensure.err" \
+			sock ${url_args[@]+"${url_args[@]}"} puppets ensure -- "$project_dir"
+		rc=$?
+		if [ "$rc" -ne 0 ]; then
+			log_line "sock puppets ensure exit $rc: $(scrubbed "$work/ensure.err" "$token")"
+			rm -rf "$work"
+			return 1
+		fi
+		local tokfile=
+		IFS= read -r tokfile <"$work/ensure.out" || true
+		case $tokfile in
+		"$state_dir/puppets/"*/../* | "$state_dir/puppets/"../*) tokfile= ;;
+		"$state_dir/puppets/"?*) ;;
+		*) tokfile= ;;
+		esac
+		send_token=
+		if [ -n "$tokfile" ] && [ -f "$tokfile" ] && [ ! -L "$tokfile" ]; then
+			IFS= read -r send_token <"$tokfile" || true
+		fi
+		case $send_token in
+		sock_pt_?*) ;;
+		*)
+			log_line "sock puppets ensure: no puppet token in the cache, nothing sent"
+			rm -rf "$work"
+			return 1
+			;;
+		esac
+		;;
 	esac
 	# The text goes on stdin, not argv, so another user's `ps` cannot read it.
-	printf '%s' "$text" | sock ${url_args[@]+"${url_args[@]}"} send >/dev/null 2>"$errf" &
-	local pid=$!
-	(
-		sleep "$timeout"
-		kill "$pid" 2>/dev/null
-	) >/dev/null 2>&1 &
-	local watchdog=$!
-	disown "$watchdog" 2>/dev/null # no "Terminated" job notice on stderr when we reap it below
-	wait "$pid"
-	local rc=$?
-	kill "$watchdog" 2>/dev/null
-	pkill -P "$watchdog" 2>/dev/null
+	printf '%s' "$text" >"$work/text"
+	SOCK_TOKEN=$send_token bounded "$work/text" /dev/null "$work/send.err" \
+		sock ${url_args[@]+"${url_args[@]}"} send
+	rc=$?
 	if [ "$rc" -ne 0 ]; then
-		# Strip control bytes, then redact the whole captured stderr, then cut, so a
-		# token split by a control byte or straddling the cut cannot leak a prefix.
-		local detail
-		detail=$(head -c 65536 "$errf" | LC_ALL=C tr -d '[:cntrl:]')
-		if [ -n "$token" ]; then
-			detail=${detail//"$token"/[redacted]}
-		fi
-		if [ -n "$send_token" ] && [ "$send_token" != "$token" ]; then
-			detail=${detail//"$send_token"/[redacted]}
-		fi
-		detail=$(printf '%s' "$detail" | head -c 300)
-		log_line "sock send exit $rc: $detail"
+		log_line "sock send exit $rc: $(scrubbed "$work/send.err" "$token" "$send_token")"
 	fi
-	rm -f "$errf"
+	rm -rf "$work"
 	[ "$rc" -eq 0 ]
 }
 
