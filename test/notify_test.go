@@ -809,6 +809,13 @@ case "$*" in
 	fail) echo "ensure failed for $SOCK_TOKEN" >&2; exit 3 ;;
 	slow) sleep 5 ;;
 	outside) echo "printed outside for $SOCK_TOKEN" >&2; printf '%s\n' "` + outside + `"; exit 0 ;;
+	linkdir)
+		cache=$(printf '%s' "${XDG_STATE_HOME:-$HOME/.local/state}/sock-integrations/puppets" | tr -s /)
+		mkdir -p "$cache" "` + dir + `/elsewhere"
+		printf 'sock_pt_OUTSIDE\n' > "` + dir + `/elsewhere/tok"
+		ln -s "` + dir + `/elsewhere" "$cache/link"
+		printf '%s\n' "$cache/link/tok"
+		exit 0 ;;
 	esac
 	# The CLI prints a cleaned path (filepath.Join).
 	cache=$(printf '%s' "${XDG_STATE_HOME:-$HOME/.local/state}/sock-integrations/puppets" | tr -s /)
@@ -1233,5 +1240,15 @@ func TestLogStripsC1Controls(t *testing.T) {
 		if c >= 0x80 && c <= 0x9f {
 			t.Fatalf("C1 control %U in log %q", c, r.Log)
 		}
+	}
+}
+
+// A token file reached through a symlinked directory resolves outside the cache.
+func TestMachineKeyTokenFileThroughASymlinkedDirIsRefused(t *testing.T) {
+	s := newStub(t)
+	bin, rec := fakeSockForKeys(t, "linkdir")
+	runHook(t, s.URL, hookEnv{Env: machineKeyEnv(bin), Stdin: stopInput("k12", "Ship it?")}, "--stop", "--ask-now")
+	if sent(rec) {
+		t.Fatalf("sent %q from a token file outside the cache", readRec(t, rec, "send-token"))
 	}
 }

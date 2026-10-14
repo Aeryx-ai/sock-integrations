@@ -355,6 +355,18 @@ send_text() {
 		"$state_dir/puppets/"?*) ;;
 		*) tokfile= ;;
 		esac
+		# A symlinked directory on the way can still lead outside the cache, so
+		# the physical path must sit under the physical cache too.
+		if [ -n "$tokfile" ]; then
+			local real_dir real_cache
+			real_dir=$(cd -P -- "${tokfile%/*}" 2>/dev/null && pwd -P) || real_dir=
+			real_cache=$(cd -P -- "$state_dir/puppets" 2>/dev/null && pwd -P) || real_cache=
+			case $real_dir/ in
+			"$real_cache"/*) [ -n "$real_cache" ] || tokfile= ;;
+			*) tokfile= ;;
+			esac
+			[ -z "$tokfile" ] || tokfile=$real_dir/${tokfile##*/}
+		fi
 		send_token=
 		if [ -n "$tokfile" ] && [ -f "$tokfile" ] && [ ! -L "$tokfile" ]; then
 			IFS= read -r send_token <"$tokfile" || true
