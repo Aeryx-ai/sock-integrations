@@ -1176,3 +1176,23 @@ func TestAFenceIndentedFourSpacesDoesNotClose(t *testing.T) {
 		t.Fatalf("a 3-space closer must close: %+v", g)
 	}
 }
+
+// A key straddling a byte cap is redacted before the cut, not sent in part.
+func TestSecretStraddlingTheCapIsRedacted(t *testing.T) {
+	key := " sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	t.Run("ask", func(t *testing.T) {
+		s := newStub(t)
+		runHook(t, s.URL, hookEnv{Stdin: stopInput("c1", "Use it? "+strings.Repeat("a", 580)+key)}, "--stop", "--ask-now")
+		if g := s.Requests(); len(g) != 1 || strings.Contains(g[0].Text, "sk-A") {
+			t.Fatalf("%+v", g)
+		}
+	})
+	t.Run("permission", func(t *testing.T) {
+		s := newStub(t)
+		in := hookJSON(map[string]any{"message": strings.Repeat("a", 280) + key})
+		runHook(t, s.URL, hookEnv{Stdin: in}, "--permission")
+		if g := s.Requests(); len(g) != 1 || strings.Contains(g[0].Text, "sk-A") {
+			t.Fatalf("%+v", g)
+		}
+	})
+}

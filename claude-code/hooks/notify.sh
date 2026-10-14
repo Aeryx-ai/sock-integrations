@@ -174,7 +174,7 @@ extract_ask() {
 			}
 			if (!from) exit
 			for (i = start[from]; i <= n; i++) print lines[i]
-		}' | awk 'NF { blank = 0 } !NF { if (blank) next; blank = 1 } { print }' | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' | utf8_cap 600
+		}' | awk 'NF { blank = 0 } !NF { if (blank) next; blank = 1 } { print }' | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' | redact_stream | utf8_cap 600
 }
 
 # redact replaces the plugin token and common secret shapes with [redacted]:
@@ -193,6 +193,14 @@ redact() {
 		-e 's/[Bb]earer [A-Za-z0-9._~+\/=-]+/Bearer [redacted]/g' \
 		-e 's/([A-Za-z0-9_]*([Kk][Ee][Yy]|[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd])[A-Za-z0-9_]*)=[^[:space:]]+/\1=[redacted]/g' \
 		-e 's#(https?://[^[:space:]?]*)\?[^[:space:]]*#\1?[redacted]#g'
+}
+
+# redact_stream is redact on stdin. Every byte cap runs after it, so a secret
+# straddling the cut is redacted whole rather than sent in part.
+redact_stream() {
+	local s
+	s=$(cat)
+	redact "$s"
 }
 
 # hook_timeout is SOCK_HOOK_TIMEOUT seconds, 10 when unset or not a positive integer.
@@ -393,7 +401,7 @@ case $mode in
 permission)
 	msg=
 	if [ "$have_jq" = 1 ]; then
-		msg=$(field message | LC_ALL=C tr -d '\000-\037\177' | utf8_cap 300)
+		msg=$(field message | LC_ALL=C tr -d '\000-\037\177' | redact_stream | utf8_cap 300)
 	else
 		log_line "jq not found: sending the fixed phrase"
 	fi
