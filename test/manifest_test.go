@@ -170,7 +170,7 @@ func TestSkillKeepsOneConsumerRule(t *testing.T) {
 	}
 	// sock-mcp --channel acks only when the model acts (integrations-bn5), so
 	// the skill must tell it how to clear a message that needs no reply
-	for _, want := range []string{"Replying acks", "Call `sock_ack` for a message that needs no reply", "Do not call `sock_fetch`"} {
+	for _, want := range []string{"pass the `message_ids` you are answering; that acks them", "Call `sock_ack` for a message that needs no reply", "Do not call `sock_fetch`"} {
 		if !strings.Contains(string(b), want) {
 			t.Fatalf("SKILL.md lacks %q", want)
 		}
