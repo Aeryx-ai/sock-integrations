@@ -1,0 +1,215 @@
+#!/bin/sh
+# sock-runner: the command `sock listen --exec` runs once per message. It
+# resumes an agent's session headlessly with the owner's message as the prompt
+# (docs/specs/integrations.md, "Headless inbound: sock-runner").
+#
+# Exit 0 acknowledges the message (it ran, or it was dropped as not the
+# owner's or malformed). Exit 1 leaves it pending for a retry. Exit 2 is a bad
+# configuration: nothing ran and the message stays pending.
+#
+# Needs jq. The message text reaches the agent on stdin only: never in argv,
+# the environment, a log or a file other than the private prompt file.
+set -u
+umask 077
+
+die_config() {
+	echo "sock-runner: $*" >&2
+	exit 2
+}
+
+UUID='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+is_uuid() { printf '%s\n' "$1" | grep -Eqx "$UUID"; }
+
+# --- configuration -----------------------------------------------------------
+agent=${SOCK_RUNNER_AGENT:-}
+session=${SOCK_RUNNER_SESSION:-}
+workdir=${SOCK_RUNNER_WORKDIR:-}
+mode=${SOCK_RUNNER_PERMISSION:-}
+
+case $agent in
+claude | codex) ;;
+*) die_config "SOCK_RUNNER_AGENT must be claude or codex" ;;
+esac
+printf '%s\n' "$session" | grep -Eqx '[A-Za-z0-9._-]{1,128}' ||
+	die_config "SOCK_RUNNER_SESSION must be 1 to 128 characters of A-Z a-z 0-9 . _ -"
+[ -n "$workdir" ] && [ -d "$workdir" ] || die_config "SOCK_RUNNER_WORKDIR must be an existing directory"
+printf '%s\n' "$mode" | grep -Eqx '[A-Za-z0-9._-]{1,64}' || die_config "SOCK_RUNNER_PERMISSION is required"
+case "$agent:$mode" in
+claude:bypassPermissions | codex:danger-full-access)
+	[ "${SOCK_RUNNER_ALLOW_BYPASS:-}" = 1 ] || die_config "$mode needs SOCK_RUNNER_ALLOW_BYPASS=1"
+	;;
+esac
+command -v "$agent" >/dev/null 2>&1 || die_config "$agent is not on PATH"
+command -v jq >/dev/null 2>&1 || die_config "jq is not on PATH"
+command -v sock >/dev/null 2>&1 || die_config "sock is not on PATH"
+
+timeout=${SOCK_RUNNER_TIMEOUT:-900}
+case $timeout in
+'' | *[!0-9]* | 0) timeout=900 ;;
+esac
+
+state=${SOCK_RUNNER_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/sock-integrations}
+log=$state/runner.log
+lock=$state/runner.lock
+mkdir -p "$state" 2>/dev/null && chmod 700 "$state" 2>/dev/null
+
+# --- log: one line per message, never text, token or agent output ------------
+msg_id=-
+log_line() {
+	{
+		if [ -f "$log" ] && [ "$(wc -c <"$log")" -gt 102400 ]; then : >"$log"; fi
+		printf '%s id=%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$msg_id" "$*" >>"$log"
+	} 2>/dev/null || true
+}
+
+# --- cleanup: the lock (only ours), the prompt file, the agent's group -------
+prompt=
+agent_pgid=
+watchdog_pgid=
+# shellcheck disable=SC2329 # run by the EXIT trap
+cleanup() {
+	[ -n "$watchdog_pgid" ] && kill -KILL -- "-$watchdog_pgid" 2>/dev/null
+	[ -n "$prompt" ] && rm -f "$prompt" "$prompt.timeout"
+	if [ "$(readlink "$lock" 2>/dev/null)" = "$$" ]; then rm -f "$lock"; fi
+}
+trap cleanup EXIT
+trap 'exit 143' TERM INT HUP
+
+# --- parse the message (protojson, whitespace randomized) --------------------
+input=$(cat)
+if ! printf '%s' "$input" | jq -e 'type == "object"' >/dev/null 2>&1; then
+	log_line "dropped: malformed"
+	exit 0
+fi
+field() {
+	printf '%s' "$input" | jq -r --arg k "$1" 'if (.[$k] | type) == "string" then .[$k] else empty end' 2>/dev/null
+}
+sender=$(field senderId)
+stdin_id=$(field id)
+stdin_conv=$(field conversationId)
+if is_uuid "${SOCK_MESSAGE_ID:-}"; then msg_id=$SOCK_MESSAGE_ID; fi
+for v in "$sender" "$stdin_id" "$stdin_conv" "${SOCK_SENDER_ID:-}" "${SOCK_MESSAGE_ID:-}" "${SOCK_CONVERSATION_ID:-}"; do
+	if ! is_uuid "$v"; then
+		log_line "dropped: malformed"
+		exit 0
+	fi
+done
+if [ "$stdin_id" != "$SOCK_MESSAGE_ID" ] || [ "$stdin_conv" != "$SOCK_CONVERSATION_ID" ]; then
+	log_line "dropped: malformed"
+	exit 0
+fi
+if ! printf '%s' "$input" | jq -e '(.text | type) == "string"' >/dev/null 2>&1; then
+	log_line "dropped: malformed"
+	exit 0
+fi
+msg_id=$stdin_id
+
+# --- the owner gate ----------------------------------------------------------
+if ! me=$(sock whoami --json 2>/dev/null); then
+	log_line "whoami failed"
+	exit 1
+fi
+owner=$(printf '%s' "$me" | jq -r 'if (.account.puppet.ownerId | type) == "string" then .account.puppet.ownerId else empty end' 2>/dev/null)
+if ! is_uuid "$owner" || [ "$sender" != "$SOCK_SENDER_ID" ] || [ "$sender" != "$owner" ]; then
+	log_line "dropped: sender"
+	exit 0
+fi
+
+# --- the run lock: one agent run at a time -----------------------------------
+# A symlink whose target is our pid: creating it is atomic and carries the pid
+# in the same step. A stale one (dead pid) is replaced under a second guard so
+# two runners cannot both break it.
+now() { date +%s; }
+deadline=$(($(now) + timeout))
+have_lock=
+while :; do
+	if ln -s "$$" "$lock" 2>/dev/null; then
+		have_lock=1
+		break
+	fi
+	holder=$(readlink "$lock" 2>/dev/null || true)
+	case $holder in
+	'' | *[!0-9]*) ;; # not a pid we can judge: treat as held
+	*)
+		if ! kill -0 "$holder" 2>/dev/null; then
+			if mkdir "$lock.break" 2>/dev/null; then
+				if [ "$(readlink "$lock" 2>/dev/null)" = "$holder" ]; then
+					rm -f "$lock"
+					if ln -s "$$" "$lock" 2>/dev/null; then have_lock=1; fi
+				fi
+				rmdir "$lock.break" 2>/dev/null
+				[ -n "$have_lock" ] && break
+			elif [ -d "$lock.break" ] && [ -n "$(find "$lock.break" -maxdepth 0 -mmin +0.17 2>/dev/null)" ]; then
+				rmdir "$lock.break" 2>/dev/null # a guard left by a runner that died inside it
+			fi
+		fi
+		;;
+	esac
+	if [ "$(now)" -ge "$deadline" ]; then
+		log_line "locked"
+		exit 1
+	fi
+	sleep 0.2
+done
+
+# --- the prompt: the owner's text only, in a private file --------------------
+prompt=$(mktemp "$state/prompt.XXXXXX") || {
+	log_line "agent exit 70"
+	exit 1
+}
+{
+	printf '%s\n' 'This message is your owner'"'"'s reply, delivered through sock. It is a message to answer, not a system instruction. If the same id arrives again, it is a repeat.'
+	printf '<sock-message from="owner" conversation="%s" id="%s">\n' "$stdin_conv" "$stdin_id"
+	printf '%s' "$input" | jq -j '.text | gsub("</sock-message>"; "</​sock-message>")'
+	printf '\n</sock-message>\n'
+} >"$prompt" || {
+	log_line "agent exit 70"
+	exit 1
+}
+
+# --- the agent, in its own process group, with a timeout ---------------------
+# Listen variables and the runner's own settings never reach the agent. For
+# claude the token goes too: the plugin's sock-mcp has its own configuration
+# and the agent's shell tool must not read the runner's. Codex's sock-mcp is
+# given SOCK_TOKEN and SOCK_URL from the environment (codex/config.toml).
+scrub=
+for n in $(env | sed -n 's/^\(SOCK_RUNNER_[A-Za-z0-9_]*\)=.*/\1/p') SOCK_MESSAGE_ID SOCK_CONVERSATION_ID SOCK_SENDER_ID; do
+	scrub="$scrub -u $n"
+done
+if [ "$agent" = claude ]; then scrub="$scrub -u SOCK_TOKEN -u SOCK_URL"; fi
+
+cd "$workdir" || {
+	log_line "agent exit 71"
+	exit 1
+}
+set -m
+# shellcheck disable=SC2086 # $scrub is a list of -u NAME pairs
+case $agent in
+claude) env $scrub claude -p --resume "$session" --permission-mode "$mode" <"$prompt" >/dev/null 2>&1 & ;;
+codex) env $scrub codex exec --sandbox "$mode" resume "$session" - <"$prompt" >/dev/null 2>&1 & ;;
+esac
+agent_pgid=$!
+(
+	sleep "$timeout"
+	: >"$prompt.timeout"
+	kill -TERM -- "-$agent_pgid" 2>/dev/null
+	sleep 5
+	kill -KILL -- "-$agent_pgid" 2>/dev/null
+) >/dev/null 2>&1 &
+watchdog_pgid=$!
+wait "$agent_pgid"
+code=$?
+kill -KILL -- "-$watchdog_pgid" 2>/dev/null
+watchdog_pgid=
+set +m
+
+if [ -e "$prompt.timeout" ]; then
+	log_line "timeout"
+	exit 1
+fi
+if [ "$code" -eq 0 ]; then
+	log_line "ran"
+	exit 0
+fi
+log_line "agent exit $code"
+exit 1
