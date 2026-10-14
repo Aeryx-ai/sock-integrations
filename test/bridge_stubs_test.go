@@ -63,12 +63,13 @@ type fakeMA struct {
 	pre      []any              // events played as soon as the stream opens, before the send: another turn's
 	noEcho   bool               // the stream does not echo the posted user.message
 
-	store      []map[string]any // sessions the session endpoints know, oldest first
-	creates    []string         // session create bodies
-	paths      []string         // path and query of each request, in order
-	dropCreate int              // creates to record and then answer by closing the connection
-	createID   string           // when set, the id a create answers with
-	findPage   int              // when set, the page size of the session list
+	store         []map[string]any // sessions the session endpoints know, oldest first
+	creates       []string         // session create bodies
+	paths         []string         // path and query of each request, in order
+	dropCreate    int              // creates to record and then answer by closing the connection
+	createID      string           // when set, the id a create answers with
+	findPage      int              // when set, the page size of the session list
+	noAgentFilter bool             // the session list ignores agent_id
 }
 
 func newFakeMA(t *testing.T) *fakeMA {
@@ -220,13 +221,19 @@ func hangUp(w http.ResponseWriter) {
 func (f *fakeMA) create(w http.ResponseWriter, r *http.Request) {
 	b, _ := io.ReadAll(r.Body)
 	var body struct {
-		Agent    any               `json:"agent"`
-		Metadata map[string]string `json:"metadata"`
+		Agent       any               `json:"agent"`
+		Environment string            `json:"environment_id"`
+		Metadata    map[string]string `json:"metadata"`
+		Budget      any               `json:"budget"`
 	}
 	_ = json.Unmarshal(b, &body)
 	agent, _ := body.Agent.(string)
+	version := any(float64(1)) // the latest, in the fake
 	if m, ok := body.Agent.(map[string]any); ok {
 		agent, _ = m["id"].(string)
+		if v, ok := m["version"]; ok {
+			version = v
+		}
 	}
 	f.mu.Lock()
 	f.creates = append(f.creates, string(b))
@@ -238,7 +245,8 @@ func (f *fakeMA) create(w http.ResponseWriter, r *http.Request) {
 	for k, v := range body.Metadata {
 		meta[k] = v
 	}
-	s := map[string]any{"type": "session", "id": id, "status": "idle", "archived_at": nil, "metadata": meta, "agent": map[string]any{"type": "agent", "id": agent}}
+	s := map[string]any{"type": "session", "id": id, "status": "idle", "archived_at": nil, "metadata": meta,
+		"agent": map[string]any{"type": "agent", "id": agent, "version": version}, "environment_id": body.Environment, "budget": body.Budget}
 	f.store = append(f.store, s)
 	drop := f.dropCreate > 0
 	if drop {
@@ -263,7 +271,7 @@ func (f *fakeMA) find(w http.ResponseWriter, r *http.Request) {
 	for i := len(f.store) - 1; i >= 0; i-- {
 		s := f.store[i]
 		a, _ := s["agent"].(map[string]any)
-		if q.Get("agent_id") != "" && (a == nil || a["id"] != q.Get("agent_id")) {
+		if !f.noAgentFilter && q.Get("agent_id") != "" && (a == nil || a["id"] != q.Get("agent_id")) {
 			continue
 		}
 		if s["archived_at"] != nil && q.Get("include_archived") != "true" {

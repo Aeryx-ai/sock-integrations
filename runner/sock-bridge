@@ -477,16 +477,34 @@ from_history() {
 # map_put SESSION rewrites the map with this conversation's line set to SESSION,
 # or dropped when it is empty: under the run lock, by tmp and rename, mode 600
 map_put() {
+	# the other conversations' lines first: a map awk cannot read fails closed
+	# here, before a rename could replace it with this conversation's line alone
+	if [ -f "$sessions_file" ]; then
+		awk -v c="$stdin_conv" '$1 != c' "$sessions_file" >"$sessions_file.tmp" 2>/dev/null || {
+			rm -f "$sessions_file.tmp"
+			log_line "sessions not readable"
+			exit 1
+		}
+	else
+		: >"$sessions_file.tmp" 2>/dev/null
+	fi
 	{
-		{
-			[ ! -f "$sessions_file" ] || awk -v c="$stdin_conv" '$1 != c' "$sessions_file"
-			if [ -n "$1" ]; then printf '%s %s\n' "$stdin_conv" "$1"; fi
-		} >"$sessions_file.tmp" && chmod 600 "$sessions_file.tmp" && mv "$sessions_file.tmp" "$sessions_file"
+		if [ -n "$1" ]; then printf '%s %s\n' "$stdin_conv" "$1" >>"$sessions_file.tmp"; fi &&
+			chmod 600 "$sessions_file.tmp" && mv "$sessions_file.tmp" "$sessions_file"
 	} 2>/dev/null || {
 		log_line "sessions not writable"
 		exit 1
 	}
 }
+
+# fits_jq: fits is true for a session made for this configuration: the agent,
+# the environment, and the version and the budget when they are set. Check and
+# Find both ask it, so a configuration change never keeps an old session.
+# shellcheck disable=SC2016 # jq's variables
+fits_jq='def fits($a; $e; $v; $b):
+	((.agent | objects | .id) == $a) and .environment_id == $e
+	and ($v == "" or ((.agent | objects | .version | numbers | tostring) == $v))
+	and ($b == "" or ((.budget | objects | .max_list_cost | objects | select(.currency == "USD") | .amount) == $b));'
 
 # find_session sets session to the newest live session of the agent made for
 # this conversation by this puppet, or empty. The list has no metadata filter:
@@ -498,9 +516,11 @@ find_session() {
 	while :; do
 		api GET "$url"
 		# shellcheck disable=SC2016 # jq's variables
-		session=$(jq -r --arg c "$stdin_conv" --arg p "$puppet_id" --arg g "$gone" '
+		session=$(jq -r --arg c "$stdin_conv" --arg p "$puppet_id" --arg g "$gone" \
+			--arg a "$agent" --arg e "$environment" --arg v "$agent_version" --arg b "$budget" "$fits_jq"'
 			[.data[]? | select(type == "object" and (.metadata | type) == "object"
 				and .metadata.bridge_conversation == $c and .metadata.bridge_puppet == $p
+				and fits($a; $e; $v; $b)
 				and .archived_at == null and .status != "terminated"
 				and (.id | type) == "string" and .id != $g
 				and (.id | test("\\A[A-Za-z0-9_][A-Za-z0-9_-]{0,127}\\z")))
@@ -532,30 +552,50 @@ create_session() {
 	api POST "$api/v1/sessions?beta=true" "$body"
 	creating=
 	session=$(jq -r '.id | strings' "$resp" 2>/dev/null)
+	# a session the bridge cannot use, and Find will not adopt: exit 2, since a
+	# retry would only create another one
 	if ! session_ok "$session"; then
 		log_line "session id invalid"
-		exit 1
+		echo "$cmd_name: the Managed Agents API answered a create with a session id the bridge refuses" >&2
+		exit 2
 	fi
 	map_put "$session"
 }
 
 # resolve_session sets session to this conversation's: the mapped one while it
-# lives, else one Find adopts, else a new one. A mapped session that is gone
-# (404, terminated or archived) is replaced and the owner is told.
+# lives and fits the configuration, else one Find adopts, else a new one. A
+# mapped session that is gone (404, terminated or archived), or was made for
+# another configuration, is replaced and the owner is told.
 resolve_session() {
 	gone=
+	notice=
+	if [ -e "$sessions_file" ] && [ ! -r "$sessions_file" ]; then
+		log_line "sessions not readable"
+		exit 1
+	fi
 	session=$(awk -v c="$stdin_conv" '$1 == c { print $2; exit }' "$sessions_file" 2>/dev/null)
 	if [ -n "$session" ] && session_ok "$session"; then
 		pass=404
 		if api GET "$api/v1/sessions/$session?beta=true"; then
-			jq -e '.status == "terminated" or .archived_at != null' "$resp" >/dev/null 2>&1 && gone=$session
+			if jq -e '.status == "terminated" or .archived_at != null' "$resp" >/dev/null 2>&1; then
+				gone=$session
+				notice="the agent's earlier session ended; this reply started a new one"
+				outcome="session gone"
+			elif ! jq -e --arg a "$agent" --arg e "$environment" --arg v "$agent_version" --arg b "$budget" \
+				"$fits_jq"'fits($a; $e; $v; $b)' "$resp" >/dev/null 2>&1; then
+				gone=$session
+				notice="the bridge configuration changed; this reply started a new session"
+				outcome="session config changed"
+			fi
 		else
 			gone=$session
+			notice="the agent's earlier session ended; this reply started a new one"
+			outcome="session gone"
 		fi
 		pass=
 		[ -n "$gone" ] || return 0
 		map_put ""
-		log_line "session gone"
+		log_line "$outcome"
 	fi
 	find_session
 	if [ -n "$session" ]; then
@@ -565,8 +605,8 @@ resolve_session() {
 		create_session
 		log_line "session created"
 	fi
-	if [ -n "$gone" ]; then
-		post_one "the agent's earlier session ended; this reply started a new one" || {
+	if [ -n "$notice" ]; then
+		post_one "$notice" || {
 			log_line "send failed"
 			exit 1
 		}

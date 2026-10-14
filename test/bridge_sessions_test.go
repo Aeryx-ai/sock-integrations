@@ -35,8 +35,9 @@ func newConvHarness(t *testing.T) *bnHarness {
 // and puppet.
 func maSession(id, conv, puppet string) map[string]any {
 	return map[string]any{"type": "session", "id": id, "status": "idle", "archived_at": nil,
-		"metadata": map[string]any{"bridge_conversation": conv, "bridge_puppet": puppet},
-		"agent":    map[string]any{"type": "agent", "id": bnAgent}}
+		"metadata":       map[string]any{"bridge_conversation": conv, "bridge_puppet": puppet},
+		"agent":          map[string]any{"type": "agent", "id": bnAgent, "version": float64(1)},
+		"environment_id": bnEnv, "budget": nil}
 }
 
 func (h *bnHarness) sessionsFile() string {
@@ -400,14 +401,16 @@ func TestBridgeConversationCreateMayHaveLanded(t *testing.T) {
 	})
 }
 
-// the session id of a create response is checked before it is recorded or used
+// the session id of a create response is checked before it is recorded or
+// used, and one refused is a configuration error: a retry would only create
+// another session the bridge cannot adopt
 func TestBridgeConversationCreatedIDIsValidated(t *testing.T) {
 	for _, id := range []string{"sesn_a/../b", "-sesn", "sesn a", "sesn_a\nb", strings.Repeat("s", 129)} {
 		t.Run(id, func(t *testing.T) {
 			h := newConvHarness(t)
 			h.api.set(func(f *fakeMA) { f.createID = id })
 			r := h.run(rnOpts{})
-			if r.Code != 1 || h.sessionsFile() != "" || len(h.api.eventSessions()) != 0 || !strings.Contains(h.bridgeLog(), "session id invalid") {
+			if r.Code != 2 || h.sessionsFile() != "" || len(h.api.eventSessions()) != 0 || !strings.Contains(h.bridgeLog(), "session id invalid") {
 				t.Fatalf("exit %d, sessions %q, events %v, log %q", r.Code, h.sessionsFile(), h.api.eventSessions(), h.bridgeLog())
 			}
 		})
@@ -533,5 +536,127 @@ func TestBridgeConversationPuppetIDIsCached(t *testing.T) {
 	mustJSON(t, []byte(h.api.createBodies()[1]), &body)
 	if m := body["metadata"].(map[string]any); m["bridge_puppet"] != bnPuppet {
 		t.Fatalf("metadata %v", m)
+	}
+}
+
+const bnConfigMsg = "the bridge configuration changed; this reply started a new session"
+
+func budgetOf(cents string) map[string]any {
+	return map[string]any{"type": "limit", "max_list_cost": map[string]any{"amount": cents, "currency": "USD"}}
+}
+
+// a mapped session made for another agent, environment, pinned version or
+// budget is not this configuration's: it is replaced and the owner is told
+func TestBridgeConversationConfigChangeReplacesTheSession(t *testing.T) {
+	for name, c := range map[string]struct {
+		env     map[string]string
+		mod     func(map[string]any)
+		replace bool
+	}{
+		"other agent":          {mod: func(s map[string]any) { s["agent"].(map[string]any)["id"] = "agent_OLDPERMISSIVE" }, replace: true},
+		"other environment":    {mod: func(s map[string]any) { s["environment_id"] = "env_OLD" }, replace: true},
+		"other pinned version": {env: map[string]string{"SOCK_BRIDGE_AGENT_VERSION": "3"}, mod: func(s map[string]any) { s["agent"].(map[string]any)["version"] = float64(2) }, replace: true},
+		"no budget, one set":   {env: map[string]string{"SOCK_BRIDGE_BUDGET": "100"}, mod: func(map[string]any) {}, replace: true},
+		"other budget":         {env: map[string]string{"SOCK_BRIDGE_BUDGET": "100"}, mod: func(s map[string]any) { s["budget"] = budgetOf("50") }, replace: true},
+		"same pinned version":  {env: map[string]string{"SOCK_BRIDGE_AGENT_VERSION": "2"}, mod: func(s map[string]any) { s["agent"].(map[string]any)["version"] = float64(2) }},
+		"same budget":          {env: map[string]string{"SOCK_BRIDGE_BUDGET": "100"}, mod: func(s map[string]any) { s["budget"] = budgetOf("100") }},
+		"unpinned version":     {mod: func(s map[string]any) { s["agent"].(map[string]any)["version"] = float64(7) }},
+		"budget not set":       {mod: func(s map[string]any) { s["budget"] = budgetOf("50") }},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newConvHarness(t)
+			h.writeSessions(rnConvID + " sesn_OLD\n")
+			old := maSession("sesn_OLD", rnConvID, bnPuppet)
+			c.mod(old)
+			h.api.set(func(f *fakeMA) { f.store = []map[string]any{old} })
+			h.script(agentMsg(bnAnswer), idle("end_turn"))
+			r := h.run(rnOpts{Env: c.env})
+			if r.Code != 0 {
+				t.Fatalf("exit %d, log %q", r.Code, h.bridgeLog())
+			}
+			s := h.sends()
+			if !c.replace {
+				if n := len(h.api.createBodies()); n != 0 || len(s) != 1 || h.sessionsFile() != rnConvID+" sesn_OLD\n" {
+					t.Fatalf("%d creates, sends %v, sessions %q", n, s, h.sessionsFile())
+				}
+				return
+			}
+			if n := len(h.api.createBodies()); n != 1 || h.sessionsFile() != rnConvID+" sesn_NEW1\n" {
+				t.Fatalf("%d creates, sessions %q", n, h.sessionsFile())
+			}
+			if len(s) != 2 || s[0].Text != bnConfigMsg || !strings.Contains(s[1].Text, bnAnswer) {
+				t.Fatalf("sends %v", s)
+			}
+			if ev := h.api.eventSessions(); !slices.Equal(ev, []string{"sesn_NEW1", "sesn_NEW1"}) {
+				t.Fatalf("events went to %v", ev)
+			}
+			if !strings.Contains(h.bridgeLog(), "session config changed") {
+				t.Fatalf("log %q", h.bridgeLog())
+			}
+		})
+	}
+}
+
+// Find adopts only a session that fits the configuration: agent, environment,
+// the pinned version and the budget when set
+func TestBridgeConversationFindAdoptsOnlyWhatFitsTheConfig(t *testing.T) {
+	h := newConvHarness(t)
+	h.env["SOCK_BRIDGE_AGENT_VERSION"] = "3"
+	h.env["SOCK_BRIDGE_BUDGET"] = "100"
+	good := maSession("sesn_GOOD", rnConvID, bnPuppet)
+	good["agent"].(map[string]any)["version"] = float64(3)
+	good["budget"] = budgetOf("100")
+	clone := func(id string, mod func(map[string]any)) map[string]any {
+		s := maSession(id, rnConvID, bnPuppet)
+		s["agent"].(map[string]any)["version"] = float64(3)
+		s["budget"] = budgetOf("100")
+		mod(s)
+		return s
+	}
+	h.api.set(func(f *fakeMA) {
+		f.store = []map[string]any{good,
+			clone("sesn_ENV", func(s map[string]any) { s["environment_id"] = "env_ATTACKER" }),
+			clone("sesn_VERSION", func(s map[string]any) { s["agent"].(map[string]any)["version"] = float64(1) }),
+			clone("sesn_NOBUDGET", func(s map[string]any) { s["budget"] = nil }),
+			clone("sesn_BUDGET", func(s map[string]any) { s["budget"] = budgetOf("999") }),
+		}
+	})
+	h.script(idle("end_turn"))
+	r := h.run(rnOpts{})
+	if r.Code != 0 || len(h.api.createBodies()) != 0 || h.sessionsFile() != rnConvID+" sesn_GOOD\n" {
+		t.Fatalf("exit %d, %d creates, sessions %q, log %q", r.Code, len(h.api.createBodies()), h.sessionsFile(), h.bridgeLog())
+	}
+}
+
+// a session of another agent that the list returns anyway is not adopted: the
+// bridge does not rely on the server's agent_id filter alone
+func TestBridgeConversationFindChecksTheAgentItself(t *testing.T) {
+	h2 := newConvHarness(t)
+	other := maSession("sesn_OTHERAGENT", rnConvID, bnPuppet)
+	other["agent"].(map[string]any)["id"] = "agent_OTHER"
+	h2.api.set(func(f *fakeMA) { f.store = []map[string]any{other}; f.noAgentFilter = true })
+	h2.script(idle("end_turn"))
+	if r := h2.run(rnOpts{}); r.Code != 0 || len(h2.api.createBodies()) != 1 || h2.sessionsFile() != rnConvID+" sesn_NEW1\n" {
+		t.Fatalf("exit %d, %d creates, sessions %q", r.Code, len(h2.api.createBodies()), h2.sessionsFile())
+	}
+}
+
+// a sessions file the bridge cannot read fails closed: no request, and the
+// other conversations' lines are kept
+func TestBridgeConversationUnreadableMapFailsClosed(t *testing.T) {
+	h := newConvHarness(t)
+	h.writeSessions(bnConv2 + " sesn_KEEP\n")
+	p := filepath.Join(h.state, "sessions")
+	if err := os.Chmod(p, 0o200); err != nil {
+		t.Fatal(err)
+	}
+	h.script(idle("end_turn"))
+	r := h.run(rnOpts{})
+	_ = os.Chmod(p, 0o600)
+	if r.Code != 1 || len(h.api.kinds()) != 0 || !strings.Contains(h.bridgeLog(), "sessions not readable") {
+		t.Fatalf("exit %d, requests %v, log %q", r.Code, h.api.kinds(), h.bridgeLog())
+	}
+	if got := h.sessionsFile(); got != bnConv2+" sesn_KEEP\n" {
+		t.Fatalf("sessions %q", got)
 	}
 }
