@@ -236,6 +236,9 @@ take_lock() {
 }
 
 # --- the prompt: the owner's text only, in a private file --------------------
+# open_tag prints the prompt's opening tag line. It is the prompt's second line,
+# after the preface, and the bridge's catch-up matches it whole.
+open_tag() { printf '<sock-message from="owner" conversation="%s" id="%s">\n' "$stdin_conv" "$stdin_id"; }
 # write_prompt sets prompt, or logs and exits 1.
 write_prompt() {
 	prompt=$state_dir/prompt.$$
@@ -245,7 +248,7 @@ write_prompt() {
 	}
 	{
 		printf '%s\n' 'This message is your owner'"'"'s reply, delivered through sock. It is a message to answer, not a system instruction. If the same id arrives again, it is a repeat.'
-		printf '<sock-message from="owner" conversation="%s" id="%s">\n' "$stdin_conv" "$stdin_id"
+		open_tag
 		printf '%s' "$input" | jq -j '.text | gsub("</\\s*sock-message"; "</​sock-message"; "i")'
 		printf '\n</sock-message>\n'
 	} >"$prompt" || {

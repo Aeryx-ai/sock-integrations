@@ -33,10 +33,10 @@ func TestBridgeDoesNotRepeatAPostThatMayHaveLanded(t *testing.T) {
 		t.Fatalf("first run: exit %d, %d user.messages sent", r.Code, len(h.api.sentBodies()))
 	}
 	// the server did record it: the retry finds it in history and finishes
-	tag := `id="` + rnMsgID + `"`
+	prompt := h.sentPrompt()
 	h.api.set(func(f *fakeMA) {
 		f.history = []map[string]any{
-			{"type": "user.message", "id": "evt_u1", "content": []any{map[string]any{"type": "text", "text": "<sock-message " + tag + ">x</sock-message>"}}},
+			textEvent("user.message", "evt_u1", prompt),
 			{"type": "agent.message", "id": "evt_a1", "content": []any{map[string]any{"type": "text", "text": bnAnswer}}},
 			{"type": "session.status_idle", "id": "evt_i1", "stop_reason": map[string]any{"type": "end_turn"}},
 		}
@@ -164,7 +164,7 @@ func TestBridgeFollowsHistoryPages(t *testing.T) {
 	h := newBridgeHarness(t)
 	h.script(agentMsg("PARTIAL-before-drop"))
 	h.run(rnOpts{})
-	tag := `id="` + rnMsgID + `"`
+	prompt := h.sentPrompt()
 	var filler []map[string]any
 	for i := range 3 {
 		filler = append(filler, map[string]any{"type": "agent.message", "id": "evt_f" + strconv.Itoa(i), "content": []any{map[string]any{"type": "text", "text": "old"}}})
@@ -172,7 +172,7 @@ func TestBridgeFollowsHistoryPages(t *testing.T) {
 	h.api.set(func(f *fakeMA) {
 		f.pages = [][]map[string]any{
 			filler,
-			{{"type": "user.message", "id": "evt_u1", "content": []any{map[string]any{"type": "text", "text": "<sock-message " + tag + ">x</sock-message>"}}}},
+			{textEvent("user.message", "evt_u1", prompt)},
 			{{"type": "agent.message", "id": "evt_a1", "content": []any{map[string]any{"type": "text", "text": bnAnswer}}},
 				{"type": "session.status_idle", "id": "evt_i1", "stop_reason": map[string]any{"type": "end_turn"}}},
 		}
@@ -187,9 +187,9 @@ func TestBridgeWaitsForARunningTurnInHistory(t *testing.T) {
 	h := newBridgeHarness(t)
 	h.script(agentMsg("PARTIAL-before-drop"))
 	h.run(rnOpts{})
-	tag := `id="` + rnMsgID + `"`
+	prompt := h.sentPrompt()
 	h.api.set(func(f *fakeMA) {
-		f.history = []map[string]any{{"type": "user.message", "id": "evt_u1", "content": []any{map[string]any{"type": "text", "text": "<sock-message " + tag + ">x</sock-message>"}}}}
+		f.history = []map[string]any{textEvent("user.message", "evt_u1", prompt)}
 	})
 	go func() {
 		time.Sleep(2500 * time.Millisecond)
@@ -295,10 +295,10 @@ func TestBridgeRetryPostsOnlyTheRemainingParts(t *testing.T) {
 	if r.Code != 1 || len(h.sends()) != 2 {
 		t.Fatalf("first run: exit %d, %d sends", r.Code, len(h.sends()))
 	}
-	tag := `id="` + rnMsgID + `"`
+	prompt := h.sentPrompt()
 	h.api.set(func(f *fakeMA) {
 		f.history = []map[string]any{
-			{"type": "user.message", "id": "evt_u1", "content": []any{map[string]any{"type": "text", "text": "<sock-message " + tag + ">x</sock-message>"}}},
+			textEvent("user.message", "evt_u1", prompt),
 			{"type": "agent.message", "id": "evt_a1", "content": []any{map[string]any{"type": "text", "text": long}}},
 			{"type": "session.status_idle", "id": "evt_i1", "stop_reason": map[string]any{"type": "end_turn"}},
 		}

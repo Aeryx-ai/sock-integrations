@@ -309,9 +309,11 @@ fetch_history() {
 # and, when done, reason and text.
 catch_up() {
 	fetch_history
-	verdict=$(jq -c --arg tag "id=\"$stdin_id\"" "
+	# this message's own prompt: its second line is the tag, whole. A tag quoted
+	# inside some message's text is on a later line and does not count.
+	verdict=$(jq -c --arg tag "$(open_tag | tr -d '\n')" "
 		.data as \$d
-		| ([range(0; \$d | length) | select(\$d[.].type == \"user.message\" and ((\$d[.].content // []) | map(.text // \"\") | join(\"\") | contains(\$tag)))] | last) as \$i
+		| ([range(0; \$d | length) | select(\$d[.].type == \"user.message\" and (((\$d[.].content // []) | map(.text // \"\") | join(\"\") | split(\"\n\"))[1] == \$tag))] | last) as \$i
 		| if \$i == null then {found: false}
 		  else (\$d[\$i + 1:]) as \$after
 		  | ([range(0; \$after | length) | select(\$after[.].type == \"session.status_idle\" or \$after[.].type == \"session.error\")] | first) as \$j

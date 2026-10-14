@@ -153,13 +153,13 @@ func TestBridgeDroppedStreamRetriesFromHistory(t *testing.T) {
 	if r.Code != 1 || len(h.sends()) != 0 {
 		t.Fatalf("first run: exit %d sends %v", r.Code, h.sends())
 	}
-	tag := `id="` + rnMsgID + `"`
+	prompt := h.sentPrompt()
 	h.api.set(func(f *fakeMA) {
 		f.history = []map[string]any{
 			{"type": "user.message", "id": "evt_u0", "content": []any{map[string]any{"type": "text", "text": "an earlier message"}}},
 			{"type": "agent.message", "id": "evt_a0", "content": []any{map[string]any{"type": "text", "text": "EARLIER-answer"}}},
 			{"type": "session.status_idle", "id": "evt_i0", "stop_reason": map[string]any{"type": "end_turn"}},
-			{"type": "user.message", "id": "evt_u1", "content": []any{map[string]any{"type": "text", "text": "<sock-message from=\"owner\" conversation=\"" + rnConvID + "\" " + tag + ">\nhi\n</sock-message>"}}},
+			textEvent("user.message", "evt_u1", prompt),
 			{"type": "agent.message", "id": "evt_a1", "content": []any{map[string]any{"type": "text", "text": bnAnswer}}},
 			{"type": "session.status_idle", "id": "evt_i1", "stop_reason": map[string]any{"type": "end_turn"}},
 		}

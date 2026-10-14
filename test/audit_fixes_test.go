@@ -96,3 +96,36 @@ func TestBridgeCatchUpKeepsHistoryOrder(t *testing.T) {
 		t.Fatalf("posted %q, want %q", s[0].Text, want)
 	}
 }
+
+// L11: catch-up matches only the prompt's own tag line, not a tag the owner
+// quoted inside another message's text
+func TestBridgeCatchUpIgnoresAQuotedTag(t *testing.T) {
+	h := newBridgeHarness(t)
+	if err := os.MkdirAll(h.state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(h.state, "sent.ids"), []byte(rnMsgID+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	other := "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+	tag := func(id string) string {
+		return `<sock-message from="owner" conversation="` + rnConvID + `" id="` + id + `">`
+	}
+	quoting := "preface line\n" + tag(other) + "\nI pasted this earlier:\n" + tag(rnMsgID) + "\nhi\n</sock-message>\n"
+	h.api.set(func(f *fakeMA) {
+		f.history = []map[string]any{
+			textEvent("user.message", "evt_u0", quoting),
+			textEvent("agent.message", "evt_a0", "OTHER-answer"),
+			{"type": "session.status_idle", "id": "evt_i0", "stop_reason": map[string]any{"type": "end_turn"}},
+		}
+	})
+	h.script(agentMsg(bnAnswer), idle("end_turn"))
+	r := h.run(rnOpts{})
+	s := h.sends()
+	if r.Code != 0 || len(s) != 1 || strings.Contains(s[0].Text, "OTHER-answer") || !strings.Contains(s[0].Text, "ANSWERSENTINEL") {
+		t.Fatalf("exit %d, sends %v", r.Code, s)
+	}
+	if n := len(h.api.sentBodies()); n != 1 {
+		t.Fatalf("%d user.messages posted, want 1", n)
+	}
+}
