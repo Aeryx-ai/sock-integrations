@@ -394,7 +394,8 @@ mark_sent() {
 # id is kept. Of a tool call only its type, name, server and evaluated
 # permission are kept, by id, never its input. The end is the first
 # session.status_idle, with its stop reason (end_turn when it gives none) and
-# the ids it waits on, each once, or session.error. An end seen before the turn started
+# the ids it waits on, each once, session.error, session.status_terminated or
+# session.deleted. An end seen before the turn started
 # sets unanchored: on the stream, that is an end the bridge cannot place.
 # shellcheck disable=SC2016 # jq's variables, not the shell's
 turn_jq='
@@ -404,10 +405,12 @@ def str: if type == "string" then . else null end;
 def anchor($tag; $tuid):
 	if $tuid != "" then .type == "user.tool_confirmation" and .tool_use_id == $tuid
 	else .type == "user.message" and ((texts | join("") | split("\n"))[1] == $tag) end;
+# a session ended by an unrecoverable error or deleted never goes idle
+def gone: .type == "session.status_terminated" or .type == "session.deleted";
 def tooluse: .type == "agent.tool_use" or .type == "agent.mcp_tool_use" or .type == "agent.custom_tool_use";
 def step($e; $tag; $tuid):
 	if ($e | anchor($tag; $tuid)) then {started: true, ids: {}, texts: [], tools: {}, reason: null}
-	elif (.started | not) then (if $e.type == "session.status_idle" or $e.type == "session.error" then .unanchored = true else . end)
+	elif (.started | not) then (if $e.type == "session.status_idle" or $e.type == "session.error" or ($e | gone) then .unanchored = true else . end)
 	elif .reason != null then .
 	elif $e.type == "agent.message" then
 		($e | okid) as $k
@@ -422,6 +425,7 @@ def step($e; $tag; $tuid):
 		| .blockers = ([$e.stop_reason | objects | .event_ids | arrays | .[] | strings]
 			| reduce .[] as $x ([]; if any(.[]; . == $x) then . else . + [$x] end))
 	elif $e.type == "session.error" then .reason = "error"
+	elif ($e | gone) then .reason = ($e.type | ltrimstr("session.") | ltrimstr("status_"))
 	else . end;
 '
 # tuid is the call a confirmation answers: set, a turn starts at its

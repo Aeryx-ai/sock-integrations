@@ -89,6 +89,10 @@ func TestBridgeFixedTextsForOutcomesItCannotAnswer(t *testing.T) {
 		{"requires_action", []any{agentMsg("PARTIAL-text"), idle("requires_action")}, "the agent is waiting for approval of a tool call", 0},
 		{"budget", []any{idle("budget_reached")}, "the agent's budget is used up", 0},
 		{"error", []any{map[string]any{"type": "session.error", "id": "evt_err", "error": map[string]any{"message": "SECRETERROR-5d"}}}, "the agent hit an error", 0},
+		// platform.claude.com/docs/en/managed-agents/reference, "Session events":
+		// a session ended by an unrecoverable error, or deleted, never goes idle
+		{"terminated", []any{map[string]any{"type": "session.status_terminated", "id": "evt_term"}}, "the agent hit an error", 0},
+		{"deleted", []any{map[string]any{"type": "session.deleted", "id": "evt_del"}}, "the agent hit an error", 0},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
