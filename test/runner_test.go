@@ -578,11 +578,18 @@ func TestRunnerTermStopsAgent(t *testing.T) {
 	}
 }
 
+// rnLoadedTimeout is the runner timeout for tests that need the agent to have
+// started before it fires: 2 s raced the stub's startup when the machine was
+// busy (integrations-3rf).
+const rnLoadedTimeout = "5"
+
 func TestRunnerTimeoutKillsProcessGroup(t *testing.T) {
 	h := newRunnerHarness(t)
 	marker := filepath.Join(h.dir, "marker")
-	r := h.run(rnOpts{Env: map[string]string{"SOCK_RUNNER_TIMEOUT": "2", "STUB_SLEEP": "60", "STUB_MARKER": marker, "STUB_CHILD_SLEEP": "4"}})
-	if r.Code != 1 || r.Elapsed > 15*time.Second {
+	// The timeout leaves the stub agent room to start and record its run on a
+	// loaded machine; its child would write the marker 2 s after the timeout.
+	r := h.run(rnOpts{Env: map[string]string{"SOCK_RUNNER_TIMEOUT": rnLoadedTimeout, "STUB_SLEEP": "60", "STUB_MARKER": marker, "STUB_CHILD_SLEEP": "7"}})
+	if r.Code != 1 || r.Elapsed > 20*time.Second {
 		t.Fatalf("%+v", r)
 	}
 	runs := h.runs()
@@ -595,7 +602,7 @@ func TestRunnerTimeoutKillsProcessGroup(t *testing.T) {
 	if !rnGone(rnPidFile(t, filepath.Join(runs[0].Dir, "childpid")), 3*time.Second) {
 		t.Fatal("agent child still alive")
 	}
-	time.Sleep(4500 * time.Millisecond)
+	time.Sleep(3 * time.Second) // past the child's 7 s, counted from its start
 	if _, err := os.Stat(marker); err == nil {
 		t.Fatal("background child outlived the timeout and wrote its marker")
 	}
@@ -609,8 +616,8 @@ func TestRunnerTimeoutKillsProcessGroup(t *testing.T) {
 
 func TestRunnerTimeoutEscalatesToKill(t *testing.T) {
 	h := newRunnerHarness(t)
-	r := h.run(rnOpts{Env: map[string]string{"SOCK_RUNNER_TIMEOUT": "2", "STUB_SLEEP": "60", "STUB_IGNORE_TERM": "1"}})
-	if r.Code != 1 || r.Elapsed > 20*time.Second {
+	r := h.run(rnOpts{Env: map[string]string{"SOCK_RUNNER_TIMEOUT": rnLoadedTimeout, "STUB_SLEEP": "60", "STUB_IGNORE_TERM": "1"}})
+	if r.Code != 1 || r.Elapsed > 25*time.Second {
 		t.Fatalf("%+v", r)
 	}
 	runs := h.runs()
