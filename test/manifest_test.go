@@ -194,13 +194,31 @@ func TestCodexPluginManifest(t *testing.T) {
 	}
 }
 
-// A plugin's stdio server starts with only PLUGIN_ROOT and PLUGIN_DATA in its
-// environment (live check, Codex 0.162): it cannot get SOCK_TOKEN, so the plugin
-// ships no MCP server and the config.toml block stays the supported path.
-func TestCodexPluginShipsNoMCPServer(t *testing.T) {
-	for _, rel := range []string{"mcp.json", ".mcp.json", ".app.json"} {
+// A plugin's stdio server gets HOME, PATH and the like but never SOCK_TOKEN
+// (live check, Codex 0.162.1), and its command is not expanded, so the plugin's
+// server is sock-mcp from PATH reading the CLI config's puppet_token, serving
+// only the sending tools (rule 2).
+func TestCodexPluginMCPServer(t *testing.T) {
+	var m struct {
+		Schema  string `json:"$schema"`
+		Servers map[string]struct {
+			Type    string            `json:"type"`
+			Command string            `json:"command"`
+			Args    []string          `json:"args"`
+			Env     map[string]string `json:"env"`
+		} `json:"mcpServers"`
+	}
+	readJSON(t, "mcp.json", &m)
+	if m.Schema != "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json" || len(m.Servers) != 1 {
+		t.Fatalf("%+v", m)
+	}
+	s, ok := m.Servers["sock"]
+	if !ok || s.Type != "stdio" || s.Command != "sock-mcp" || strings.Join(s.Args, " ") != "--outbound-only" || len(s.Env) != 0 {
+		t.Fatalf("sock server %+v: want stdio sock-mcp --outbound-only with no env (no token in a file)", s)
+	}
+	for _, rel := range []string{".mcp.json", ".app.json"} {
 		if _, err := os.Stat(filepath.Join(root, rel)); err == nil {
-			t.Fatalf("%s at the repo root would register a server that cannot see the token", rel)
+			t.Fatalf("%s at the repo root would register a second server", rel)
 		}
 	}
 }
