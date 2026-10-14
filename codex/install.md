@@ -7,7 +7,7 @@ Plugin route (recommended; see the Codex plugin section of `docs/specs/integrati
 3. `codex plugin marketplace add aeryx-ai/sock-integrations`, then `codex plugin add sock@sock-integrations` (or pick sock in `/plugins`).
 4. Run `/hooks` in Codex and trust both hooks. The hooks send with `SOCK_TOKEN` from the environment Codex starts in (step 2 of the manual route below).
 
-Do not also append `codex/config.toml`: two servers named `sock` would clash. The manual route below stays for anyone who wants no token in a file.
+Do not also append `codex/config.toml`: two servers named `sock` would clash. The plugin's server starts in the plugin's own directory, not your project, so it sends as one puppet for every project. For a puppet per project (`<repo> on <host>`), use the manual route below with a machine key as `SOCK_TOKEN` (`sock machine-key create --label "$(hostname -s)"`): a server registered in `config.toml` starts in the session's project directory. The manual route is also for anyone who wants no token in a file.
 
 Outbound only: hooks message you when Codex needs permission or finishes a turn, and the model can call `sock_send`. No inbound in v1. The token is forwarded from your shell and never written to config.
 
