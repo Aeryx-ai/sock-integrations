@@ -272,7 +272,8 @@ take_lock() {
 				rmdir "$lock.break" 2>/dev/null # a guard left by a runner that died inside it
 			fi
 		fi
-		if [ "$(now)" -ge "$deadline" ]; then
+		# whole seconds: -gt waits at least the timeout, at most a second over
+		if [ "$(now)" -gt "$deadline" ]; then
 			log_line "locked"
 			exit 1
 		fi
