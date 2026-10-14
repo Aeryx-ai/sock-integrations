@@ -194,25 +194,14 @@ func TestCodexPluginManifest(t *testing.T) {
 	}
 }
 
-func TestCodexPluginMCPHoldsNoToken(t *testing.T) {
-	var m struct {
-		MCPServers map[string]map[string]any `json:"mcpServers"`
-	}
-	readJSON(t, "mcp.json", &m)
-	s := m.MCPServers["sock"]
-	if len(m.MCPServers) != 1 || s["type"] != "stdio" || s["command"] != "sock-mcp" {
-		t.Fatalf("%+v", m)
-	}
-	// the stdio schema allows only type, command, args, env and cwd, and the
-	// token is never written to a file
-	for k := range s {
-		if k != "type" && k != "command" && k != "args" {
-			t.Fatalf("mcp.json sock server sets %q", k)
+// A plugin's stdio server starts with only PLUGIN_ROOT and PLUGIN_DATA in its
+// environment (live check, Codex 0.162): it cannot get SOCK_TOKEN, so the plugin
+// ships no MCP server and the config.toml block stays the supported path.
+func TestCodexPluginShipsNoMCPServer(t *testing.T) {
+	for _, rel := range []string{"mcp.json", ".mcp.json", ".app.json"} {
+		if _, err := os.Stat(filepath.Join(root, rel)); err == nil {
+			t.Fatalf("%s at the repo root would register a server that cannot see the token", rel)
 		}
-	}
-	b, _ := os.ReadFile(filepath.Join(root, "mcp.json"))
-	if strings.Contains(string(b), "SOCK_TOKEN") || strings.Contains(string(b), "sock_pt_") {
-		t.Fatal("mcp.json mentions the token")
 	}
 }
 

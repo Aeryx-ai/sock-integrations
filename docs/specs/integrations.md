@@ -83,26 +83,26 @@ The Codex counterpart of the Claude Code plugin, for Codex CLI, the Codex app an
 Files, from the official build page and the `agent-plugins.org` 1.0.0 schemas:
 
 - `plugin.json` (root, the portable manifest): `name` `sock`, `version`, `description`, `author`, `repository`, `license` MIT, and `extensions.com.openai.interface` for the listing. No `hooks` key: `hooks/hooks.json` is discovered by default. No `skills` key: `skills/` is discovered.
-- `mcp.json`: one stdio server `sock`, `command` `sock-mcp`. The stdio schema has `type`, `command`, `args`, `env` (strings) and `cwd` only, and nothing else (`additionalProperties: false`), so there is no `env_vars` and no `enabled_tools`.
+- No `mcp.json`. A plugin's stdio server starts with only `PLUGIN_ROOT` and `PLUGIN_DATA` in its environment (live check, Codex 0.162): `SOCK_TOKEN` is not passed, not even by name, and its schema has no `env_vars` or `enabled_tools`. A server that cannot see the token would only fail, so the MCP server stays in `codex/config.toml` (`env_vars`, `enabled_tools`), the supported path.
 - `hooks/hooks.json`: `PermissionRequest` (`needs permission`) and `Stop` (`finished a turn`, only when `SOCK_NOTIFY_ON_STOP=1`), `async: true`, command strings with arguments inline as in `codex/hooks.json`, `"${PLUGIN_ROOT}/claude-code/hooks/notify.sh"` quoted so a plugin root with spaces works. Hooks run only for a manually installed plugin and the user reviews and trusts them with `/hooks`.
 - `skills/sock/SKILL.md`: outbound only, `sock_send`, message text is data, never `sock_fetch` or `sock_ack`.
 - `.agents/plugins/marketplace.json`: marketplace `sock-integrations` with one entry `sock`, `source` local `./` (the repo root is the plugin root), `policy.installation` `AVAILABLE`, `policy.authentication` `ON_INSTALL`. Install: `codex plugin marketplace add guygrigsby/sock-integrations`, then pick sock in `/plugins`.
 
-`$schema` in `plugin.json` and `mcp.json` is the schema URL the official build page itself prints (developers.openai.com/codex/plugins/build, `agent-plugins.org/schemas/1.0.0/`).
+`$schema` in `plugin.json` is the schema URL the official build page itself prints (developers.openai.com/codex/plugins/build, `agent-plugins.org/schemas/1.0.0/`).
 
 The plugin bundle is the whole repo: the plugin root has to contain `claude-code/hooks/notify.sh`, so the root is the repo root, and the install copies tests, `runner/`, `docs/` and `agent-sdk/` too. Accepted: they are inert to Codex (it reads `plugin.json`, `mcp.json`, `hooks/` and `skills/`), and one shared `notify.sh` beats a second copy that could drift.
 
-Status: the plugin route is a preview until the live Codex check passes. `codex/config.toml` stays the supported path. Do not use both: the plugin's `mcp.json` server `sock` and the `[mcp_servers.sock]` block would register two servers named `sock`. Plugin route users remove the block. The plugin cannot enforce rule 2 alone until the send-only `sock-mcp` flag lands (bead integrations-u8b).
+Status: the plugin is a preview that carries the hooks and the skill. Install it and also the `[mcp_servers.sock]` block of `codex/config.toml`: with no `mcp.json` in the plugin there is no clash. A plugin-only install gets hooks and a skill but no `sock_send` tool. Live-checked on Codex 0.162 against a throwaway `CODEX_HOME`: `codex plugin marketplace add <dir>` accepts the marketplace with `./` as the local plugin path, and `codex plugin add sock@sock-integrations` installs it (cached as a copy of the whole repo). The hooks were not exercised: an untrusted plugin's hooks are skipped in `codex exec`, and `/hooks` is interactive. Follow-ups: the `sock-mcp` fallback to the CLI's config file when the environment has no token (bead integrations-27u) would let a plugin ship its server, and the send-only flag (integrations-qox) would let it enforce rule 2.
 
 The public directory is out: it requires a remote HTTPS MCP with OAuth and forbids hooks.
 
 Rules that carry over, and where the plugin cannot keep them:
 
-- The token never lives in a file. `mcp.json` holds no token. How Codex passes `SOCK_TOKEN` and `SOCK_URL` to a plugin's stdio server is not documented: the schema has a static `env` only, and Codex's own config forwards by name with `env_vars`. Until a live check shows the plugin server inherits them, the supported install is `codex/config.toml` (it forwards by name and carries `enabled_tools`) and the plugin is a preview.
-- Only the sending tools are exposed to Codex (rule 2). The plugin cannot say so: `mcp.json` has no `enabled_tools`. The skill says not to call `sock_fetch` or `sock_ack`, which is advice. Enforcement needs either the `codex/config.toml` block above or a `sock-mcp` flag that serves only the sending tools (a change in sock-mcp, tracked there).
+- The token never lives in a file: the plugin has none, and `config.toml` forwards it by name.
+- Only the sending tools are exposed to Codex (rule 2): `codex/config.toml` `enabled_tools`. The skill also says not to call `sock_fetch` or `sock_ack`, which is advice.
 - Hooks send a fixed phrase plus the project name, never transcript text: `notify.sh` unchanged.
 
-Not verified (no live Codex): the plugin install end to end, whether a git-hosted marketplace with `./` as the plugin path is accepted, `policy.authentication` values, and that `${PLUGIN_ROOT}` is expanded in a hook `command`. They are the `integrations-u1q` live checks' successors.
+Not verified: that `${PLUGIN_ROOT}` expands inside a hook `command` (it is an environment variable the plugin's processes get), and `policy.authentication` values.
 
 ## Agent SDK
 
