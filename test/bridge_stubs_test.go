@@ -60,6 +60,7 @@ type fakeMA struct {
 	split    bool               // write the first scripted event in two halves with a pause
 	dropSend int                // POSTs to record and then answer by closing the connection
 	flood    int                // inert events played before the script
+	pre      []any              // events played as soon as the stream opens, before the send: another turn's
 }
 
 func newFakeMA(t *testing.T) *fakeMA {
@@ -155,11 +156,18 @@ func (f *fakeMA) handle(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// play waits for the send, then writes that send's scripted events.
+// play writes any pre events, waits for the send, echoes its user.message as
+// the API does, then writes that send's scripted events.
 func (f *fakeMA) play(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	idx := len(f.sent) // this stream plays the script of the next send
+	pre := f.pre
 	f.mu.Unlock()
+	for _, e := range pre {
+		b, _ := json.Marshal(e)
+		_, _ = fmt.Fprintf(w, "event: message\ndata: %s\n\n", b)
+	}
+	w.(http.Flusher).Flush()
 	deadline := time.After(15 * time.Second)
 	for {
 		f.mu.Lock()
@@ -182,7 +190,16 @@ func (f *fakeMA) play(w http.ResponseWriter, r *http.Request) {
 		evs = f.events[idx]
 	}
 	hold, split, flood := f.hold, f.split, f.flood
+	var body struct {
+		Events []map[string]any `json:"events"`
+	}
+	_ = json.Unmarshal([]byte(f.sent[idx]), &body)
 	f.mu.Unlock()
+	for _, e := range body.Events {
+		e["id"] = fmt.Sprintf("evt_user%d", idx)
+		b, _ := json.Marshal(e)
+		_, _ = fmt.Fprintf(w, "event: message\ndata: %s\n\n", b)
+	}
 	for i := range flood {
 		_, _ = fmt.Fprintf(w, "data: {\"type\":\"agent.thinking\",\"id\":\"evt_flood%d\",\"content\":[{\"type\":\"text\",\"text\":\"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"}]}\n\n", i)
 	}

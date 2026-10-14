@@ -439,8 +439,10 @@ api POST "$base?beta=true" "$body"
 
 # Follow the stream. Only whole lines count: curl appends as bytes arrive, and
 # a line cut in the middle is read again once its newline is there. The turn's
-# state is turn_jq's, carried from poll to poll in $turn.
-printf '%s\n' '{"started": true}' >"$turn"
+# state is turn_jq's, carried from poll to poll in $turn. It starts at this
+# run's own user.message: the stream opened before the send, so what comes
+# before that (a turn still running, its answer and its idle) is not this one's.
+printf '%s\n' '{"started": false}' >"$turn"
 off=0
 reason=
 while [ -z "$reason" ]; do

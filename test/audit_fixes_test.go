@@ -525,3 +525,18 @@ func TestBridgeStreamAndCatchUpAgree(t *testing.T) {
 		}
 	}
 }
+
+// sec 1: events on the stream before this run's own user.message belong to
+// another turn: its answer and its idle are not this message's
+func TestBridgeStreamIgnoresAnotherTurnsEvents(t *testing.T) {
+	h := newBridgeHarness(t)
+	h.api.set(func(f *fakeMA) {
+		f.pre = []any{textEvent("agent.message", "old1", "PREVIOUS TURN ANSWER"), idle("end_turn")}
+	})
+	h.script(agentMsg(bnAnswer), idle("end_turn"))
+	r := h.run(rnOpts{})
+	s := h.sends()
+	if r.Code != 0 || len(s) != 1 || s[0].Text != bnAnswer {
+		t.Fatalf("exit %d, sends %v", r.Code, s)
+	}
+}
