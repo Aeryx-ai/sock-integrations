@@ -228,3 +228,30 @@ func TestAnAskThatNeverReachedSockIsSentAgain(t *testing.T) {
 		t.Fatalf("%d send attempts, want 1: a send that never ran sock held the ask back", n)
 	}
 }
+
+// Over 64 KiB, extract_ask keeps the tail, and the cut can land inside a secret
+// whose marker is then gone: the partial first paragraph is dropped, and so is
+// everything through a key's END line whose BEGIN was cut away.
+func TestTheTailCutNeverStartsInsideASecret(t *testing.T) {
+	const tok = "sock_pt_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef0123456789"
+	// the window is the last 65536 bytes of the message plus its newline
+	pre := strings.Repeat("a", 1000)
+	rest := 65536 - (len(tok) - 10) - 2
+	line := pre + tok + strings.Repeat("x", rest) + "?"
+	pem := "-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nDEK-Info: " + strings.Repeat("A", 70000) +
+		"\n\nMIIEsecretBODYcut1\nMIIEsecretBODYcut2\n-----END RSA PRIVATE KEY-----\n\n1. use it\n2. rotate it"
+	for name, c := range map[string]struct{ msg, secret string }{
+		"token": {line, "KLMNOPQRSTUVWXYZabcdef0123456789"},
+		"pem":   {pem, "MIIEsecretBODYcut"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := newStub(t)
+			runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PROJECT_DIR": "/x/proj"}, Stdin: stopInput("s29", c.msg)}, "--stop", "--ask-now")
+			for _, r := range s.Requests() {
+				if strings.Contains(r.Text, c.secret) {
+					t.Fatalf("%q reached the owner: %.80q", c.secret, r.Text)
+				}
+			}
+		})
+	}
+}

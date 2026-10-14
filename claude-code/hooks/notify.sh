@@ -160,9 +160,26 @@ utf8_cap() {
 # and no list: nothing. Capped at 600 bytes.
 extract_ask() {
 	# Redacted whole before any cut, so a secret a paragraph split (an encrypted
-	# key's blank line) cannot lose its marker; the last 64 KiB, where the ask
-	# is, less a UTF-8 sequence the cut left incomplete at the start.
-	printf '%s\n' "$1" | LC_ALL=C tail -c 65536 | LC_ALL=C awk 'NR == 1 { sub(/^[\200-\277]+/, "") } { print }' | redact_stream |
+	# key's blank line) cannot lose its marker. Only the last 64 KiB, where the
+	# ask is, are read; when that cuts the message, the cut may sit inside a
+	# secret, so the partial first paragraph goes, and everything through a
+	# private key's END line whose BEGIN was cut away.
+	local cut=0
+	[ "$(printf '%s\n' "$1" | LC_ALL=C wc -c)" -le 65536 ] || cut=1
+	printf '%s\n' "$1" | LC_ALL=C tail -c 65536 | LC_ALL=C awk -v cut="$cut" '
+		{ l[++n] = $0 }
+		END {
+			s = 1
+			if (cut) {
+				s = n + 1
+				for (i = 1; i <= n; i++) if (l[i] ~ /^[[:space:]]*$/) { s = i + 1; break }
+				for (i = 1; i <= n; i++) {
+					if (l[i] ~ /-----BEGIN[A-Z ]*PRIVATE KEY/) break
+					if (l[i] ~ /-----END[A-Z ]*PRIVATE KEY/) { if (i + 1 > s) s = i + 1; break }
+				}
+			}
+			for (i = s; i <= n; i++) print l[i]
+		}' | redact_stream |
 		LC_ALL=C tr -d '\000-\010\013\014\016-\037\177' | awk '
 		BEGIN { prevblank = 1 }
 		{
