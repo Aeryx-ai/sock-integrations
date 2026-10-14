@@ -160,6 +160,7 @@ utf8_cap() {
 # and no list: nothing. Capped at 600 bytes.
 extract_ask() {
 	printf '%s\n' "$1" | LC_ALL=C tr -d '\000-\010\013\014\016-\037\177' | awk '
+		BEGIN { prevblank = 1 }
 		{
 			t = $0
 			sub(/^[[:space:]]*/, "", t)
@@ -169,6 +170,10 @@ extract_ask() {
 			if (c == "`" || c == "~") while (substr(t, run + 1, 1) == c) run++
 			rest = substr(t, run + 1)
 		}
+		# An indented code block (4 spaces or a tab, after a blank line or more
+		# code) is code too and never leaves the machine.
+		!fence && run < 3 && (ind ~ /\t/ || length(ind) >= 4) && t != "" && (prevblank || icode) { icode = 1; prevblank = 0; next }
+		{ if (t == "") prevblank = 1; else { prevblank = 0; icode = 0 } }
 		fence {
 			# A closer takes at most 3 spaces of indent.
 			if (run >= 3 && c == fc && run >= fl && rest ~ /^[[:space:]]*$/ && length(ind) <= 3 && ind !~ /\t/) fence = 0
@@ -205,20 +210,27 @@ extract_ask() {
 }
 
 # redact replaces the plugin token and common secret shapes with [redacted]:
-# sock tokens, AWS access key ids, GitHub and OpenAI style keys, bearer
-# values, NAME=value where NAME names a key, token, secret or password, and
+# private keys (BEGIN through END, every line between), a URL's user part,
+# sock and Tailscale tokens, AWS access key ids, GitHub and OpenAI style keys,
+# bearer values, NAME=value or NAME: value (quoted or not) where NAME names a
+# key, token, secret or password, NAME value for such an env-style NAME, and
 # the query string of any URL. It narrows what an echoed secret can leak; it
 # does not close it.
 redact() {
 	local s=$1
 	if [ -n "$token" ]; then s=${s//"$token"/[redacted]}; fi
 	printf '%s' "$s" | sed -E \
+		-e 's/-----BEGIN[A-Z ]*PRIVATE KEY-----.*-----END[A-Z ]*PRIVATE KEY-----/[redacted]/g' \
+		-e '/-----BEGIN[A-Z ]*PRIVATE KEY-----/,/-----END[A-Z ]*PRIVATE KEY-----/s/.*/[redacted]/' \
+		-e 's#(://)[^/@[:space:]]+@#\1[redacted]@#g' \
+		-e 's/tskey-[A-Za-z0-9-]+/[redacted]/g' \
 		-e 's/sock_(pt|st|ot|mk|rt|ct)_[A-Za-z0-9_-]+/[redacted]/g' \
 		-e 's/AKIA[0-9A-Z]{16}/[redacted]/g' \
 		-e 's/(ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]+/[redacted]/g' \
 		-e 's/sk-[A-Za-z0-9_-]{16,}/[redacted]/g' \
 		-e 's/[Bb]earer [A-Za-z0-9._~+\/=-]+/Bearer [redacted]/g' \
-		-e 's/([A-Za-z0-9_]*([Kk][Ee][Yy]|[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd])[A-Za-z0-9_]*)=[^[:space:]]+/\1=[redacted]/g' \
+		-e 's/([A-Za-z0-9_]*([Kk][Ee][Yy]|[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd])[A-Za-z0-9_]*)(["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"']?)[^[:space:]"'"'"',]+/\1\3[redacted]/g' \
+		-e 's/([A-Z0-9_]*_[A-Z0-9_]*(KEY|TOKEN|SECRET|PASSWORD)[A-Z0-9_]*|(KEY|TOKEN|SECRET|PASSWORD)_[A-Z0-9_]+)[[:blank:]]+[^[:space:]]+/\1 [redacted]/g' \
 		-e 's#(https?://[^[:space:]?]*)\?[^[:space:]]*#\1?[redacted]#g'
 }
 

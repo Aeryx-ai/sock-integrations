@@ -40,3 +40,30 @@ func TestAnAskWhoseSendTimedOutIsNotReposted(t *testing.T) {
 		t.Fatalf("%d send attempts for one ask, want 1", n)
 	}
 }
+
+// Secret shapes an agent's ask can echo, each reaching the owner before
+// redaction learned it (security review, 2026-10-14).
+func TestMoreSecretShapesAreRedacted(t *testing.T) {
+	cases := map[string]struct{ msg, secret string }{
+		"url userinfo":  {"Connect with postgres://admin:Pq7xSecret@db.internal/app now?", "Pq7xSecret"},
+		"colon form":    {`The config has "api_key": "Vv9Secret" set. Keep it?`, "Vv9Secret"},
+		"tailscale key": {"Use tskey-auth-kAbC123-XYZsecret for the node?", "kAbC123"},
+		"space form":    {"Set AWS_SECRET_ACCESS_KEY wJalrXUtnFEMIK7MDENG in CI?", "wJalrXUtnFEMIK7MDENG"},
+		"pem body":      {"Should I install this key?\n-----BEGIN RSA PRIVATE KEY-----\nMIIEpQIBAAKCAQEAbody\n-----END RSA PRIVATE KEY-----", "MIIEpQIBAAKCAQEAbody"},
+		"one line pem":  {"Install -----BEGIN PRIVATE KEY-----MIIEoneline-----END PRIVATE KEY----- here?", "MIIEoneline"},
+		"indented code": {"Run this?\n\n    export PATH=/opt/Zq9code:$PATH", "Zq9code"},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			s := newStub(t)
+			runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PROJECT_DIR": "/x/proj"}, Stdin: stopInput("s22", c.msg)}, "--stop", "--ask-now")
+			g := s.Requests()
+			if len(g) != 1 {
+				t.Fatalf("%+v", g)
+			}
+			if strings.Contains(g[0].Text, c.secret) {
+				t.Fatalf("%q reached the owner: %q", c.secret, g[0].Text)
+			}
+		})
+	}
+}
