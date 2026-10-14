@@ -204,18 +204,6 @@ func (f *fakeMA) play(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (f *fakeMA) streamCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	n := 0
-	for _, k := range f.log {
-		if k == "stream" {
-			n++
-		}
-	}
-	return n
-}
-
 func (f *fakeMA) kinds() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
