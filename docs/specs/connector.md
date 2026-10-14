@@ -84,7 +84,7 @@ Closure is not a field. A closed subscription has a `SubscriptionClosure` row.
 ### Behaviors
 
 - `Subscribe(event, webhookUrl, secret, cursor)` (factory): validates the URL and secret, runs the callback verification (`{"type":"verification","challenge"}` signed; the webhook must echo the challenge or the subscribe fails with JSON-RPC `-32015`), returns `id`, `cursor`, `refreshBefore` (null: no expiry) and `truncated` false. A host that does not resolve and one that resolves to a non-public address get the same answer, `-32015` with `data.reason` `callback_unreachable`, so subscribe is no probe of what resolves where; the detail goes to the log only, without the URL's query. A connection holds at most 10 live subscriptions: an 11th is `-32602` (a refresh of a live one still succeeds), decided under the per-grant subscribe lock. A new callback past the cap is refused before its verification, so no challenge is posted for it, and each verification POST takes one of the webhook delivery slots
-- `Deliver(event)`: one POST, body `{eventId, name, timestamp, data, cursor}`, at most 256 KiB, headers `webhook-id`, `webhook-timestamp`, `webhook-signature` (Standard Webhooks HMAC-SHA256 over `id.timestamp.body`), `X-MCP-Subscription-Id`; `2xx` acknowledges; `410` and `413` close the subscription; anything else retries with backoff 1, 2, 4 s and the same `eventId`, then closes with `deliveryFailed`. An event whose own body would exceed 256 KiB is `Dropped`: never sent, the delivery acked, the subscription kept and the event id logged, since the platform did nothing wrong
+- `Deliver(event)`: one POST, body `{eventId, name, timestamp, data, cursor}`, at most 256 KiB, headers `webhook-id`, `webhook-timestamp`, `webhook-signature` (Standard Webhooks HMAC-SHA256 over `id.timestamp.body`), `X-MCP-Subscription-Id`; `2xx` acknowledges; `410` and `413` close the subscription at once; anything else retries with the same `eventId`, after the answer's `Retry-After` (delta-seconds or HTTP-date; a past date or garbage falls back) or else backoff 1, 2, 4 s, and ends `Failed` after four attempts or at once on a `Retry-After` over 30 s. `Failed` leaves the delivery pending: the other subscriptions are still offered it, then the hub delivery is not acked, the stream attempt ends and the hub redelivers in order, after at least the wait the platform asked for. The redelivery skips each subscription whose last accepted event is this one, so no second POST and no second cursor step. A subscription failing for 24 h (since its first failure, reset by an accept) closes `deliveryFailed` on its next failure, the owner notified, and no longer holds the ack. The cost: while one subscription fails, the grant's other subscriptions wait for the events behind it, since a grant has one stream and it delivers in order. An event whose own body would exceed 256 KiB is `Dropped`: never sent, the delivery acked, the subscription kept and the event id logged, since the platform did nothing wrong
 - `Unsubscribe()`: closes with `unsubscribed`. The platform names the subscription by `name`, `arguments` and `delivery.url`, as OpenAI's events page has it (an `id` is accepted too); one already closed is a repeat and succeeds, one never made (or another connection's) is `404`
 
 ### Invariants
@@ -99,8 +99,9 @@ Closure is not a field. A closed subscription has a `SubscriptionClosure` row.
 stateDiagram-v2
     [*] --> live: Subscribe() with a verified callback
     live --> live: Deliver() accepted
+    live --> live: Deliver() failed (left pending, redelivered)
     live --> closed: Unsubscribe()
-    live --> closed: Deliver() got 410 or 413, or failed four times
+    live --> closed: Deliver() got 410 or 413, or failed after 24 h failing
     live --> closed: connection closed (grantRevoked)
     closed --> [*]
 ```
@@ -218,6 +219,20 @@ CREATE TABLE connector.subscription_closures (
     closed_at        timestamptz NOT NULL DEFAULT now()
         -- a closed subscription and its closure are swept 30 days after closed_at
 );
+
+-- migration 00002
+CREATE TABLE connector.subscription_last_accepted (
+    subscription_id  uuid  PRIMARY KEY REFERENCES connector.event_subscriptions (id) ON DELETE CASCADE,
+    message_id       uuid  NOT NULL
+        -- the last event the platform accepted; written in the statement that steps cursor, so a
+        -- redelivery skips it. Its own row since a subscription has none before its first accept
+);
+
+CREATE TABLE connector.subscription_failing (
+    subscription_id  uuid        PRIMARY KEY REFERENCES connector.event_subscriptions (id) ON DELETE CASCADE,
+    since            timestamptz NOT NULL
+        -- set by the first failure, deleted by an accept; 24 h past since, a failure closes deliveryFailed
+);
 ```
 
 Live subscription is derived: no closure row. Stream open is replica memory, never stored.
@@ -232,7 +247,7 @@ Observability (sock-contract ADR 14). Logs, metrics and traces go over OTLP/HTTP
 
 - Standard signals: Go runtime, process and host (CPU, memory, file descriptors, network), HTTP server and client duration, request and response sizes and requests in flight (`/mcp`, the well-known routes, the webhook client, the hub client), hub RPC duration per procedure, Postgres pool stats and query duration.
 - The service's own: connections stored and live subscriptions (gauges); tool calls by tool and outcome (`ok`, `error`, `refused`); puppet token issues by outcome (`issued`, `recovered`, `revoked`, `failed`); webhook deliveries by outcome (`accepted`, `gone`, `too_large`, `failed`, `dropped`, `canceled`); delivery slot wait (histogram), slots in use and POSTs waiting with the oldest wait; hub streams open; pending deliveries and the oldest one's age, which keeps aging across replays so an alert catches a grant stuck behind a store or hub error; limiter refusals by reason (`rate`, `batch`) and the grants the limiter tracks.
-- Labels from a fixed set only, enforced by a view on every instrument: the RPC and HTTP keys whose values are closed (`http.route` is the mux pattern, never the path), `outcome`, `reason`, `tool` (a registered tool or `unknown`) and `peer.service` (`sock-hub` or `webhook`). Never a grant, puppet, subscription, message or event id, a webhook host or URL, a peer address or a user agent. Exemplars are off, since they keep what the view drops.
+- Labels from a fixed set only, enforced by a view on every instrument: the RPC and HTTP keys whose values are a small closed set (`http.route` is the mux pattern, never the path; the HTTP status is `http.response.status_class`, `1xx` to `5xx`, while spans keep the code; no `error.type`), `outcome`, `reason`, `tool` (a registered tool or `unknown`) and `peer.service` (`sock-hub` or `webhook`). Never a grant, puppet, subscription, message or event id, a webhook host or URL, a peer address or a user agent. Exemplars are off, since they keep what the view drops.
 - Traces: a server span per request named by route pattern and JSON-RPC method (`POST /mcp tools/call`, never params); client spans for hub RPCs (trace context goes to the hub) and webhook POSTs (none goes to a platform; a caller's `traceparent` is ignored too). A filter before the exporter keeps an allow-list of span attributes: no URL, query, host, client address or user agent, no error text, no message text, token or secret.
 
 Log leaks the redactor cannot catch (free text with no secret shape):
@@ -247,7 +262,7 @@ Go, in this repository's `test/` module to start, moving with the service into i
 
 - A fake hub (`httptest`): JWKS, `IssueConnectorPuppetToken`, `whoami`, `Subscribe` stream, `Ack`, `NotifyOwner`, `Send`, with scripted deliveries and failures.
 - A fake platform: a webhook receiver that answers the verification challenge, 2xx, 410, 413, 5xx and timeouts, and checks signatures.
-- Cases: every auth refusal above; a connection opened once per grant; tool calls as the puppet; subscribe with a failing callback is refused; a delivery from the owner reaches every live subscription in order, signed, and is acked after the last 2xx; a non-owner delivery is acked and produces no event; 410 and 413 close the subscription and the owner is told once; four failures close it; the stream opens with the first subscription and closes with the last; a revoked grant closes the connection; cursors resume; the request limit; secrets never appear in logs; the drift test pins the three tools.
+- Cases: every auth refusal above; a connection opened once per grant; tool calls as the puppet; subscribe with a failing callback is refused; a delivery from the owner reaches every live subscription in order, signed, and is acked after the last 2xx; a non-owner delivery is acked and produces no event; 410 and 413 close the subscription and the owner is told once; a failure leaves the delivery pending and the redelivery skips the subscriptions that accepted it; 24 h of failures close it `deliveryFailed`; `Retry-After` in both forms, garbage, a past date and one over 30 s; the stream opens with the first subscription and closes with the last; a revoked grant closes the connection; cursors resume; the request limit; secrets never appear in logs; the drift test pins the three tools.
 - Contract tests against staging `sockd` for `IssueConnectorPuppetToken`, the JWKS and the stream, with a staging grant.
 - Live, in order, as [integrations](integrations.md) says: tool discovery over the Secure MCP Tunnel with the stdio server, the staging endpoint as a custom MCP server in ChatGPT and as a claude.ai connector, an owner reply arriving at a dot, then the directory submission.
 
