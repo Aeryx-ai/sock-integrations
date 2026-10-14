@@ -4,7 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // A Stop that found no ask records that nothing is pending: --idle does not
@@ -65,5 +67,54 @@ func TestMoreSecretShapesAreRedacted(t *testing.T) {
 				t.Fatalf("%q reached the owner: %q", c.secret, g[0].Text)
 			}
 		})
+	}
+}
+
+// staleThrottleLock leaves the lock a killed hook would, older than a minute.
+func staleThrottleLock(t *testing.T, state string) {
+	t.Helper()
+	lock := throttleFile(state, "proj") + ".lock"
+	if err := os.MkdirAll(lock, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-5 * time.Minute)
+	if err := os.Chtimes(lock, old, old); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Hooks that find the same stale throttle lock cannot both take it and both
+// send inside the hour: whoever clears it stays quiet this run.
+func TestHooksRacingOverAStaleThrottleLockSendOnce(t *testing.T) {
+	env := map[string]string{"CLAUDE_PROJECT_DIR": "/x/proj"}
+	for trial := range 40 {
+		s := newStub(t)
+		state := t.TempDir()
+		staleThrottleLock(t, state)
+		var wg sync.WaitGroup
+		for range 4 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				runHook(t, s.URL, hookEnv{Env: env, Stdin: permissionInput("s23", nil), State: state}, "--permission")
+			}()
+		}
+		wg.Wait()
+		if g := s.Requests(); len(g) > 1 {
+			t.Fatalf("trial %d: %d sends inside one hour", trial, len(g))
+		}
+	}
+}
+
+// The hook that clears a stale lock stays quiet; the next one sends.
+func TestAStaleThrottleLockIsClearedForTheNextHook(t *testing.T) {
+	s := newStub(t)
+	state := t.TempDir()
+	env := map[string]string{"CLAUDE_PROJECT_DIR": "/x/proj"}
+	staleThrottleLock(t, state)
+	runHook(t, s.URL, hookEnv{Env: env, Stdin: permissionInput("s24", nil), State: state}, "--permission")
+	runHook(t, s.URL, hookEnv{Env: env, Stdin: permissionInput("s24", nil), State: state}, "--permission")
+	if g := s.Requests(); len(g) != 1 {
+		t.Fatalf("%+v", g)
 	}
 }

@@ -382,9 +382,19 @@ reserve_hour() {
 		mkdir -p "$throttle_dir"
 	) 2>/dev/null
 	if ! mkdir "$lock" 2>/dev/null; then
-		# A lock a killed hook left behind goes after a minute.
-		[ -z "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ] || rmdir "$lock" 2>/dev/null
-		mkdir "$lock" 2>/dev/null || return 1
+		# A lock a killed hook left behind goes after a minute, removed under a
+		# second guard that rechecks it, so one remover cannot take away the
+		# fresh lock another hook made after a first remover cleared the stale
+		# one. A remover stays quiet this run; the next hook takes the lock.
+		if [ -n "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+			if mkdir "$lock.break" 2>/dev/null; then
+				[ -z "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ] || rmdir "$lock" 2>/dev/null
+				rmdir "$lock.break" 2>/dev/null
+			elif [ -n "$(find "$lock.break" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+				rmdir "$lock.break" 2>/dev/null # a guard left by a hook killed inside it
+			fi
+		fi
+		return 1
 	fi
 	now=$(date +%s)
 	[ -f "$throttle_file" ] && IFS= read -r last <"$throttle_file"
