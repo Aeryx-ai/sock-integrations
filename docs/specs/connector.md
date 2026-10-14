@@ -8,7 +8,7 @@ Out: the plugin directory listing package and client setup ([integrations](integ
 
 ```mermaid
 flowchart TB
-    subgraph CN["Connector (supporting) — sock-mcpd"]
+    subgraph CN["Connector (supporting): sock-mcpd"]
         Connection; EventSubscription; SubscriptionClosure; OwnerReplyEvent
     end
     subgraph ID["Identity (sockd)"]
@@ -39,7 +39,7 @@ Entity, aggregate root. `sock-mcpd`'s view of one connector grant: the puppet it
 | `ownerId` | UUID | `account.puppet.ownerId` from the same call: the only sender whose messages become events |
 | `createdAt` | Timestamp | |
 
-Closure is not a field. A connection whose puppet token the hub refuses (`TOKEN_INVALID`: the grant was revoked) is deleted together with its subscriptions, each closed with cause `grantRevoked`.
+Closure is not a field. A connection whose puppet token the hub refuses (`TOKEN_INVALID`: the grant was revoked) is deleted together with its subscriptions, each closed with cause `grantRevoked`; the closure rows go with them (the cascade), so a revoked grant leaves nothing for the 30-day sweep.
 
 ### Behaviors
 
@@ -74,7 +74,7 @@ Entity, owned by `Connection`. A platform's webhook registration for one event o
 | `id` | UUID | Returned to the platform; `X-MCP-Subscription-Id` on every delivery |
 | `grantId` | UUID | |
 | `event` | `EventName` | `owner.reply`, the only event in v1 |
-| `webhookUrl` | string | `https` only, public address only (checked at subscribe time and again before each delivery), at most 2048 characters |
+| `webhookUrl` | string | `https` on port 443 only (no other port, no userinfo), public address only (checked at subscribe time and again before each delivery), at most 2048 characters |
 | `secretCiphertext` | bytes | The platform's `whsec_` secret (24 to 64 bytes decoded), encrypted like the puppet token; signs every delivery |
 | `cursor` | int64 | The number of events this subscription delivered and the platform accepted, 0 at creation; returned on subscribe and re-subscribe. It is a progress count, not a replay position: the hub queue is the replay mechanism (an undelivered message comes back on the next stream), and a cursor sent on subscribe is accepted and ignored |
 | `createdAt` | Timestamp | |
@@ -84,14 +84,14 @@ Closure is not a field. A closed subscription has a `SubscriptionClosure` row.
 ### Behaviors
 
 - `Subscribe(event, webhookUrl, secret, cursor)` (factory): validates the URL and secret, runs the callback verification (`{"type":"verification","challenge"}` signed; the webhook must echo the challenge or the subscribe fails with JSON-RPC `-32015`), returns `id`, `cursor`, `refreshBefore` (null: no expiry) and `truncated` false
-- `Deliver(event)`: one POST, body `{eventId, name, timestamp, data, cursor}`, at most 256 KiB, headers `webhook-id`, `webhook-timestamp`, `webhook-signature` (Standard Webhooks HMAC-SHA256 over `id.timestamp.body`), `X-MCP-Subscription-Id`; `2xx` acknowledges; `410` and `413` close the subscription; anything else retries with backoff 1, 2, 4 s and the same `eventId`, then closes with `deliveryFailed`
-- `Unsubscribe()`: closes with `unsubscribed`
+- `Deliver(event)`: one POST, body `{eventId, name, timestamp, data, cursor}`, at most 256 KiB, headers `webhook-id`, `webhook-timestamp`, `webhook-signature` (Standard Webhooks HMAC-SHA256 over `id.timestamp.body`), `X-MCP-Subscription-Id`; `2xx` acknowledges; `410` and `413` close the subscription; anything else retries with backoff 1, 2, 4 s and the same `eventId`, then closes with `deliveryFailed`. An event whose own body would exceed 256 KiB is `Dropped`: never sent, the delivery acked, the subscription kept and the event id logged, since the platform did nothing wrong
+- `Unsubscribe()`: closes with `unsubscribed`. The platform names the subscription by `name`, `arguments` and `delivery.url`, as OpenAI's events page has it (an `id` is accepted too); one already closed is a repeat and succeeds, one never made (or another connection's) is `404`
 
 ### Invariants
 
 - The secret decrypts only to sign a delivery and is never returned, logged or echoed.
 - Deliveries to one subscription follow the hub stream order; `cursor` increases by one per accepted event and never decreases. `seq` is per conversation and travels in `data`, never as the cursor.
-- A subscription whose connection closed is closed with `grantRevoked` before the connection row goes.
+- A subscription whose connection closed is closed with `grantRevoked` before the connection row goes, then deleted with it.
 
 ### States
 
@@ -160,7 +160,7 @@ erDiagram
 
 ## Transport and auth in
 
-- `POST https://mcp.sock.aeryx.ai/mcp`, MCP over Streamable HTTP, protocol revision `2026-07-28` (events need it; the Go MCP SDK's support for the revision's discovery handshake is the first thing the implementation plan checks) with the legacy `initialize` accepted for clients that still send it.
+- `POST https://mcp.sock.aeryx.ai/mcp`, MCP over Streamable HTTP, protocol revision `2026-07-28` (events need it; the Go MCP SDK's support for the revision's discovery handshake is the first thing the implementation plan checks) with the legacy `initialize` accepted for clients that still send it. Stateless, JSON framing: every answer is one `application/json` body (an array for a batch), never an SSE stream (the SDK's `JSONResponse`).
 - `GET /.well-known/oauth-protected-resource/mcp` and `GET /.well-known/oauth-protected-resource` (RFC 9728): `resource` = `https://mcp.sock.aeryx.ai/mcp`, `authorization_servers` = [`https://api.sock.aeryx.ai`], `scopes_supported` = [`sock`], `bearer_methods_supported` = [`header`].
 - `GET /.well-known/openai-apps-challenge`: the exact token OpenAI's portal gives, as `text/plain`.
 - `GET /healthz`: 200 when the database answers, 503 otherwise, no data.
@@ -173,9 +173,9 @@ The three sending tools, linked from `sock-mcp` as a library in outbound-only fo
 
 ## Events
 
-- Capability `events` in the discovery result. `events/list` returns `owner.reply` with `delivery: ["webhook"]`, the empty `inputSchema` and the `payloadSchema` above. `events/subscribe` and `events/unsubscribe` as `EventSubscription` says. All three on the same authenticated endpoint as the tools; a subscription belongs to the connection the access token names, and `events/unsubscribe` of another connection's id is `404`.
+- Capability `events` in the discovery result. `events/list` returns `owner.reply` with `delivery: ["webhook"]`, the empty `inputSchema` and the `payloadSchema` above. `events/subscribe` and `events/unsubscribe` as `EventSubscription` says. All three on the same authenticated endpoint as the tools; a subscription belongs to the connection the access token names, and `events/unsubscribe` of another connection's subscription is `404`.
 - The connection's stream opens with its first live subscription and closes with its last. Each delivery: gate, fan out, ack. The hub holds deliveries up to 30 days and redelivers on reconnect, so a platform outage shorter than that loses nothing.
-- The grant is re-checked by use: a `TOKEN_INVALID` from the hub on the stream or on a tool call closes the connection.
+- The grant is re-checked by use: a `TOKEN_INVALID` from the hub on the stream or on a tool call closes the connection. On a tool call the request answers `401` with `WWW-Authenticate: Bearer error="invalid_token"`, so the platform authorizes again; the next request opens a fresh connection, or meets the revoked grant.
 
 ## State
 
@@ -239,6 +239,8 @@ Go, in this repository's `test/` module to start, moving with the service into i
 ## Deployment
 
 Scaffolded from rookery as `sock-mcpd` (daemon plus a small CLI for the service token and the challenge file), Go, Postgres, the hub's canary to staging to tag pipeline, behind the same Cloudflare front as the hub, on `mcp.sock.aeryx.ai` (staging `stage-mcp.aeryx.ai`). Configuration: `SOCK_URL`, `SOCK_MCPD_RESOURCE`, `SOCK_MCPD_SERVICE_TOKEN` (`sock_ct_`), `SOCK_MCPD_TOKEN_KEY`, `SOCK_MCPD_DATABASE_URL`, `SOCK_MCPD_OPENAI_CHALLENGE`. The service refuses to start without any of them.
+
+One instance per environment in v1, never a second replica: the stream per connection, the request limit and the first `Open` are per instance, and a second instance's `Open` would meet `ALREADY_ISSUED` and revoke the first's connector device.
 
 ## Open, not assumed
 
