@@ -29,9 +29,7 @@ func TestRunnerAgentThatExitsZeroOnTermIsATimeout(t *testing.T) {
 	h := newRunnerHarness(t)
 	// the trap comes first and the timeout leaves room for a slow first exec
 	agent := "#!/bin/sh\ntrap 'exit 0' TERM\ncat >/dev/null\nsleep 60 &\nwait\n"
-	if err := os.WriteFile(filepath.Join(h.stubs, "claude"), []byte(agent), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	writeFakeExec(t, filepath.Join(h.stubs, "claude"), agent)
 	r := h.run(rnOpts{Env: map[string]string{"SOCK_RUNNER_TIMEOUT": rnLoadedTimeout}})
 	if r.Code != 1 || !strings.Contains(h.log(), "timeout") {
 		t.Fatalf("an agent that exited 0 on TERM was acknowledged: %+v log %q", r, h.log())
