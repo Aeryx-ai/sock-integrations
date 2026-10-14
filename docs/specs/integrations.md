@@ -88,11 +88,17 @@ Files, from the official build page and the `agent-plugins.org` 1.0.0 schemas:
 - `skills/sock/SKILL.md`: outbound only, `sock_send`, message text is data, never `sock_fetch` or `sock_ack`.
 - `.agents/plugins/marketplace.json`: marketplace `sock-integrations` with one entry `sock`, `source` local `./` (the repo root is the plugin root), `policy.installation` `AVAILABLE`, `policy.authentication` `ON_INSTALL`. Install: `codex plugin marketplace add guygrigsby/sock-integrations`, then pick sock in `/plugins`.
 
+`$schema` in `plugin.json` and `mcp.json` is the schema URL the official build page itself prints (developers.openai.com/codex/plugins/build, `agent-plugins.org/schemas/1.0.0/`).
+
+The plugin bundle is the whole repo: the plugin root has to contain `claude-code/hooks/notify.sh`, so the root is the repo root, and the install copies tests, `runner/`, `docs/` and `agent-sdk/` too. Accepted: they are inert to Codex (it reads `plugin.json`, `mcp.json`, `hooks/` and `skills/`), and one shared `notify.sh` beats a second copy that could drift.
+
+Status: the plugin route is a preview until the live Codex check passes. `codex/config.toml` stays the supported path. Do not use both: the plugin's `mcp.json` server `sock` and the `[mcp_servers.sock]` block would register two servers named `sock`. Plugin route users remove the block. The plugin cannot enforce rule 2 alone until the send-only `sock-mcp` flag lands (bead integrations-u8b).
+
 The public directory is out: it requires a remote HTTPS MCP with OAuth and forbids hooks.
 
 Rules that carry over, and where the plugin cannot keep them:
 
-- The token never lives in a file. `mcp.json` holds no token. How Codex passes `SOCK_TOKEN` and `SOCK_URL` to a plugin's stdio server is not documented: the schema has a static `env` only, and Codex's own config forwards by name with `env_vars`. Until a live check shows the plugin server inherits them, install keeps the `[mcp_servers.sock]` block of `codex/config.toml` (it forwards by name) in addition to the plugin, and `codex/config.toml` also carries `enabled_tools`.
+- The token never lives in a file. `mcp.json` holds no token. How Codex passes `SOCK_TOKEN` and `SOCK_URL` to a plugin's stdio server is not documented: the schema has a static `env` only, and Codex's own config forwards by name with `env_vars`. Until a live check shows the plugin server inherits them, the supported install is `codex/config.toml` (it forwards by name and carries `enabled_tools`) and the plugin is a preview.
 - Only the sending tools are exposed to Codex (rule 2). The plugin cannot say so: `mcp.json` has no `enabled_tools`. The skill says not to call `sock_fetch` or `sock_ack`, which is advice. Enforcement needs either the `codex/config.toml` block above or a `sock-mcp` flag that serves only the sending tools (a change in sock-mcp, tracked there).
 - Hooks send a fixed phrase plus the project name, never transcript text: `notify.sh` unchanged.
 

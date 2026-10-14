@@ -1,6 +1,6 @@
 # Sock for Codex
 
-Plugin route (see the Codex plugin section of `docs/specs/integrations.md`): `codex plugin marketplace add guygrigsby/sock-integrations`, pick sock in `/plugins`, and review the hooks with `/hooks`. It installs the hooks and the skill, with no path substitution. Keep steps 1, 2 and 3 below until a live check shows the plugin's MCP server inherits `SOCK_TOKEN` and `SOCK_URL`; step 3's `enabled_tools` is also what keeps `sock_fetch` and `sock_ack` away from Codex. The manual steps 4 and 5 are replaced by the plugin.
+Plugin route (preview; see the Codex plugin section of `docs/specs/integrations.md`): `codex plugin marketplace add guygrigsby/sock-integrations`, pick sock in `/plugins`, review the hooks with `/hooks`. It installs the hooks and the skill with no path substitution (steps 4 and 5 below), but its MCP server cannot forward `SOCK_TOKEN` or restrict tools yet. `config.toml` stays the supported path. Pick one: if you install the plugin, remove the `[mcp_servers.sock]` block from `~/.codex/config.toml` or expect two servers named `sock` to clash.
 
 Outbound only: hooks message you when Codex needs permission or finishes a turn, and the model can call `sock_send`. No inbound in v1. The token is forwarded from your shell and never written to config.
 
