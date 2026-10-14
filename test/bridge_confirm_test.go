@@ -195,3 +195,96 @@ func TestBridgeRedeliveryOfABlockedTurnAsksAgain(t *testing.T) {
 		t.Fatalf("exit %d, sends %v", r.Code, s)
 	}
 }
+
+// review fix 1: a question that can no longer be answered must not lock the owner out
+func TestBridgeConfirmationRefusedByTheAPIClearsThePending(t *testing.T) {
+	h := newBridgeHarness(t)
+	code := h.asked(t)
+	h.api.set(func(f *fakeMA) { f.status["send"] = []int{400} })
+	r := h.answer("allow " + code)
+	s := h.sends()
+	if r.Code != 0 || len(s) != 2 || !strings.Contains(s[1].Text, "no longer waiting") {
+		t.Fatalf("exit %d, sends %v, log %q", r.Code, s, h.bridgeLog())
+	}
+	// a normal message now goes to the agent again
+	h.script(agentMsg(bnAnswer), idle("end_turn"))
+	r = h.answer("carry on")
+	if s := h.sends(); r.Code != 0 || !strings.Contains(s[len(s)-1].Text, "ANSWERSENTINEL") {
+		t.Fatalf("exit %d, last send %v", r.Code, s[len(s)-1].Text)
+	}
+}
+
+func TestBridgeEndOfTurnClearsAnyPending(t *testing.T) {
+	h := newBridgeHarness(t)
+	h.script(toolUse("toolu_A", "bash"), toolUse("toolu_B", "edit"), requiresAction("toolu_A", "toolu_B"))
+	h.run(rnOpts{})
+	var codes []string
+	for _, m := range regexp.MustCompile(`allow ([0-9a-f]{6}) or deny`).FindAllStringSubmatch(h.sends()[0].Text, -1) {
+		codes = append(codes, m[1])
+	}
+	if len(codes) != 2 {
+		t.Fatalf("codes %v in %q", codes, h.sends()[0].Text)
+	}
+	h.script(map[string]any{"type": "session.error", "id": "evt_err", "error": map[string]any{"message": "boom"}})
+	h.answer("allow " + codes[0]) // the session ends in an error; B is never answered
+	h.script(agentMsg(bnAnswer), idle("end_turn"))
+	r := h.answer("carry on")
+	if s := h.sends(); r.Code != 0 || !strings.Contains(s[len(s)-1].Text, "ANSWERSENTINEL") {
+		t.Fatalf("exit %d, last send %v", r.Code, s[len(s)-1].Text)
+	}
+}
+
+// review fix 2: the pending set is written only once the question was posted,
+// so a failed post is retried from history with the tool names
+func TestBridgeFailedQuestionLeavesNoPendingAndRetriesWithNames(t *testing.T) {
+	h := newBridgeHarness(t)
+	h.script(toolUse(bcToolID, "bash"), requiresAction(bcToolID))
+	r := h.run(rnOpts{Env: map[string]string{"STUB_SEND_FAIL_N": "0"}})
+	if r.Code != 1 {
+		t.Fatalf("exit %d", r.Code)
+	}
+	if _, err := os.Stat(filepath.Join(h.state, "pending."+bnSession)); err == nil {
+		t.Fatal("pending written before the question was posted")
+	}
+	tag := `id="` + rnMsgID + `"`
+	h.api.set(func(f *fakeMA) {
+		f.history = []map[string]any{
+			{"type": "user.message", "id": "evt_u1", "content": []any{map[string]any{"type": "text", "text": "<sock-message " + tag + ">x</sock-message>"}}},
+			toolUse(bcToolID, "bash"),
+			requiresAction(bcToolID),
+		}
+	})
+	r = h.run(rnOpts{})
+	s := h.sends()
+	if r.Code != 0 || len(s) != 2 || !strings.Contains(s[1].Text, "run bash") {
+		t.Fatalf("exit %d, sends %v", r.Code, s)
+	}
+}
+
+// review fix 3: control characters in a tool name cannot rewrite the lookup
+func TestBridgeToolNameWithNewlineCannotSpoofAnotherCall(t *testing.T) {
+	h := newBridgeHarness(t)
+	h.script(toolUse("toolu_A", "x\ntoolu_B\tread_file"), toolUse("toolu_B", "bash"), requiresAction("toolu_B"))
+	h.run(rnOpts{})
+	s := h.sends()
+	if len(s) != 1 || !strings.Contains(s[0].Text, "run bash") || strings.Contains(s[0].Text, "read_file") {
+		t.Fatalf("sends %q", s)
+	}
+}
+
+// review fix 4: an id from the API is data, never a glob
+func TestBridgeBlockedIDIsNotGlobExpanded(t *testing.T) {
+	h := newBridgeHarness(t)
+	if err := os.WriteFile(filepath.Join(h.work, "toolu_FILE"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.script(requiresAction("*"))
+	h.run(rnOpts{})
+	s := h.sends()
+	if len(s) != 1 || strings.Contains(s[0].Text, "run a tool: reply") {
+		t.Fatalf("sends %q", s)
+	}
+	if b, _ := os.ReadFile(filepath.Join(h.state, "pending."+bnSession)); strings.Contains(string(b), "toolu_FILE") {
+		t.Fatalf("pending %q", b)
+	}
+}

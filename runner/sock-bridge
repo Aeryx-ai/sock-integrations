@@ -67,6 +67,8 @@ page=$state_dir/page.$$
 hist=$state_dir/hist.$$
 parts=$state_dir/parts.$$
 tools_file=$state_dir/tools.$$
+pnew=$state_dir/pnew.$$
+histp=$state_dir/histp.$$
 # tool calls waiting for the owner: one "<code> <event id>" per line, tab separated
 pending_file=$state_dir/pending.$session
 blocking=
@@ -74,7 +76,7 @@ stream_pid=
 # shellcheck disable=SC2329 # run by the library's EXIT trap
 extra_cleanup() {
 	[ -n "$stream_pid" ] && kill "$stream_pid" 2>/dev/null
-	rm -rf "$cfg" "$hdr" "$resp" "$stream_file" "$stream_hdr" "$body" "$answer" "$new" "$batch" "$ids_file" "$page" "$hist" "$parts" "$tools_file"
+	rm -rf "$cfg" "$hdr" "$resp" "$stream_file" "$stream_hdr" "$body" "$answer" "$new" "$batch" "$ids_file" "$page" "$hist" "$parts" "$tools_file" "$pnew" "$histp"
 }
 install_traps
 
@@ -160,6 +162,8 @@ api() {
 			exit 1
 		} ;;
 		*)
+			# a 4xx the caller wants to handle itself (api_soft=1): hand it back
+			[ "${api_soft:-}" = 1 ] && return 1
 			log_line "http $code"
 			exit 1
 			;;
@@ -236,22 +240,31 @@ post_text() {
 # or "deny <code>". Only the tool's name is shown, never its input: the input can
 # hold secrets, and the owner's answer is about running that tool.
 ask_owner() {
-	: >"$pending_file.tmp"
+	: >"$pnew"
 	lines=
+	set -f # ids come from the API: words to compare, never globs
 	for id in $blocking; do
 		printf '%s\n' "$id" | grep -Eqx '[A-Za-z0-9_-]{1,128}' || continue
-		code=$(printf '%08x' "$(printf '%s' "$id" | cksum | cut -d' ' -f1)" | cut -c3-8)
+		# six hex digits of a checksum of the id; another slice if two ids share one
+		sum=$(printf '%08x' "$(printf '%s' "$id" | cksum | cut -d' ' -f1)")
+		code=
+		for off in 1 2 3; do
+			cand=$(printf '%s' "$sum" | cut -c"${off}-$((off + 5))")
+			if ! cut -f1 "$pnew" | grep -qxF "$cand"; then
+				code=$cand
+				break
+			fi
+		done
+		[ -n "$code" ] || continue
 		name=$(awk -F'\t' -v i="$id" '$1 == i { print $2; exit }' "$tools_file" 2>/dev/null | LC_ALL=C tr -cd 'A-Za-z0-9_.:-' | cut -c1-64)
 		[ -n "$name" ] || name="a tool"
-		printf '%s\t%s\n' "$code" "$id" >>"$pending_file.tmp"
+		printf '%s\t%s\n' "$code" "$id" >>"$pnew"
 		lines="$lines
 the agent wants to run $name: reply allow $code or deny $code"
 	done
-	if [ -s "$pending_file.tmp" ]; then
-		mv "$pending_file.tmp" "$pending_file"
+	if [ -s "$pnew" ]; then
 		printf '%s' "${lines#?}"
 	else
-		rm -f "$pending_file.tmp"
 		printf '%s' "the agent is waiting for approval of a tool call"
 	fi
 }
@@ -282,6 +295,14 @@ finish() {
 		;;
 	esac
 	post_text "$text"
+	# The question is remembered only once it was posted: a failed post is retried
+	# from the history with the tool names. Any other end of a turn leaves
+	# nothing to answer, so an old question cannot swallow the owner's messages.
+	if [ "$reason" = requires_action ] && [ -s "$pnew" ]; then
+		mv "$pnew" "$pending_file"
+	else
+		rm -f "$pending_file"
+	fi
 	record_done
 	log_line "$out"
 	exit 0
@@ -301,12 +322,12 @@ text_of='[.content[]? | select(.type == "text") | .text] | join("")'
 # fetch_history leaves every event of the session in $hist as {data: [...]},
 # following next_page (events are in processed_at order, oldest first)
 fetch_history() {
-	: >"$hist.pages"
+	: >"$histp"
 	api GET "$base?beta=true"
 	cp "$resp" "$page"
 	n=0
 	while :; do
-		jq -c '.data // []' "$page" >>"$hist.pages" 2>/dev/null || {
+		jq -c '.data // []' "$page" >>"$histp" 2>/dev/null || {
 			log_line "http bad history"
 			exit 1
 		}
@@ -320,8 +341,8 @@ fetch_history() {
 		api GET "$base?beta=true&page=$(jq -rn --arg v "$next" '$v | @uri')"
 		cp "$resp" "$page"
 	done
-	jq -cs '{data: (add // [])}' "$hist.pages" >"$hist"
-	rm -f "$hist.pages"
+	jq -cs '{data: (add // [])}' "$histp" >"$hist"
+	rm -f "$histp"
 }
 
 # catch_up reads the history for this message's turn. It sets found and done,
@@ -338,7 +359,7 @@ catch_up() {
 		    else {found: true, done: true,
 		      reason: (if \$after[\$j].type == \"session.error\" then \"error\" else \$after[\$j].stop_reason.type end),
 		      text: (\$after[:\$j] | unique_by(.id) | map(select(.type == \"agent.message\") | $text_of) | join(\"\n\n\")),
-		      tools: [\$after[:\$j][] | select(.type == \"agent.tool_use\" or .type == \"agent.mcp_tool_use\" or .type == \"agent.custom_tool_use\") | {id: (.id // \"\"), name: (.name // .tool_name // \"\")}],
+		      tools: [\$after[:\$j][] | select(.type == \"agent.tool_use\" or .type == \"agent.mcp_tool_use\" or .type == \"agent.custom_tool_use\") | {id: (.id // \"\"), name: ((.name // .tool_name // \"\") | tostring | gsub(\"[^A-Za-z0-9_.:-]\"; \"\") | .[0:64])}],
 		      blocking: (\$after[\$j].stop_reason.event_ids // [])} end end" "$hist" 2>/dev/null) || verdict='{"found":false}'
 	found=$(printf '%s' "$verdict" | jq -r '.found // false')
 	finished=$(printf '%s' "$verdict" | jq -r '.done // false')
@@ -436,7 +457,22 @@ else
 		exit 1
 	}
 fi
-api POST "$base?beta=true" "$body"
+if [ "$mode" = decision ]; then
+	api_soft=1
+	if ! api POST "$base?beta=true" "$body"; then
+		# the API will not take it (answered in the console, expired): it cannot
+		# be answered any more, so it must not hold the owner's messages hostage
+		api_soft=
+		awk -F'\t' -v c="$dcode" '$1 != c' "$pending_file" >"$pending_file.tmp" && mv "$pending_file.tmp" "$pending_file"
+		post_text "that confirmation is no longer waiting: the agent's API refused it"
+		record_done
+		log_line "confirmation refused http $code"
+		exit 0
+	fi
+	api_soft=
+else
+	api POST "$base?beta=true" "$body"
+fi
 if [ "$mode" = decision ]; then
 	# answered: it is not asked again
 	awk -F'\t' -v c="$dcode" '$1 != c' "$pending_file" >"$pending_file.tmp" && mv "$pending_file.tmp" "$pending_file"
@@ -471,7 +507,7 @@ while [ -z "$reason" ]; do
 				| reduce .[] as $e ({texts: [], ids: [], reason: null, tools: [], blocking: []};
 					if .reason != null then .
 					elif ($e.type == "agent.tool_use" or $e.type == "agent.mcp_tool_use" or $e.type == "agent.custom_tool_use") then
-						.tools += [{id: ($e.id // ""), name: ($e.name // $e.tool_name // "")}]
+						.tools += [{id: ($e.id // ""), name: (($e.name // $e.tool_name // "") | tostring | gsub("[^A-Za-z0-9_.:-]"; "") | .[0:64])}]
 					elif $e.type == "agent.message" then
 						(($e.id // "") as $i
 						| if $i != "" and ((($seen | index($i)) != null) or ((.ids | index($i)) != null)) then .
