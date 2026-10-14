@@ -238,8 +238,10 @@ bounded() {
 }
 
 # scrubbed prints a captured stderr file fit for the log: control bytes
-# stripped, then every credential in $2... redacted, then cut to 300 bytes, so
-# a token split by a control byte or straddling the cut cannot leak a prefix.
+# stripped, then every credential in $2... and every secret shape redact knows
+# (a credential the script never saw, such as the config file's) redacted, then
+# cut to 300 bytes, so a token split by a control byte or straddling the cut
+# cannot leak a prefix.
 scrubbed() {
 	local detail
 	detail=$(head -c 65536 "$1" | LC_ALL=C tr -d '[:cntrl:]')
@@ -248,6 +250,7 @@ scrubbed() {
 	for s in "$@"; do
 		if [ -n "$s" ]; then detail=${detail//"$s"/[redacted]}; fi
 	done
+	detail=$(redact "$detail")
 	printf '%s' "$detail" | head -c 300
 }
 

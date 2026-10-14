@@ -1196,3 +1196,27 @@ func TestSecretStraddlingTheCapIsRedacted(t *testing.T) {
 		}
 	})
 }
+
+// Logged stderr has every token shape redacted, not only the hook's own token.
+func TestLoggedStderrRedactsUnknownTokens(t *testing.T) {
+	leak := "sock_pt_00000000-0000-0000-0000-000000000000_BBBBBBBBBBBBBBBBBBBBBBBB"
+	pad := strings.Repeat("p", 280)
+	cases := map[string]map[string]string{
+		"as-puppet": {"SOCK_TOKEN": "", "PLUGIN_ROOT": "/x/plugin"},
+		"env token": {},
+	}
+	for name, extra := range cases {
+		t.Run(name, func(t *testing.T) {
+			s := newStub(t)
+			bin := fakeSock(t, "cat >/dev/null; echo '"+pad+" "+leak+"' >&2; echo 'boom "+leak+"' >&2; exit 1")
+			env := map[string]string{"PATH": bin + ":" + hookPathTail, "SOCK_HOOK_TIMEOUT": fakeSockTimeout}
+			for k, v := range extra {
+				env[k] = v
+			}
+			r := runHook(t, s.URL, hookEnv{Env: env}, "x")
+			if strings.Contains(r.Log, "sock_pt_0") || !strings.Contains(r.Log, "[redacted]") {
+				t.Fatalf("log %q", r.Log)
+			}
+		})
+	}
+}
