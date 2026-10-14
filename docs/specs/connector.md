@@ -34,7 +34,7 @@ Entity, aggregate root. `sock-mcpd`'s view of one connector grant: the puppet it
 | Field | Type | Meaning |
 |---|---|---|
 | `grantId` | UUID | The access token's `sub`. Identity within the service |
-| `puppetTokenCiphertext` | bytes | The grant's `sock_pt_` token, AES-256-GCM under `SOCK_MCPD_TOKEN_KEY`, nonce prefixed. Never logged, never returned |
+| `puppetTokenCiphertext` | bytes | The grant's `sock_pt_` token, AES-256-GCM under `SOCK_MCPD_TOKEN_KEY`, nonce prefixed, with `conn:<grantId>` as additional data so the ciphertext opens only in its own row. Never logged, never returned |
 | `puppetId` | UUID | From `sock whoami` with that token, for the sender gate |
 | `ownerId` | UUID | `account.puppet.ownerId` from the same call: the only sender whose messages become events |
 | `createdAt` | Timestamp | |
@@ -45,9 +45,9 @@ Closure is not a field. A connection whose puppet token the hub refuses (`TOKEN_
 
 - `Open(accessToken)` (factory): verifies the JWT, calls `IssueConnectorPuppetToken` with the service token and the JWT, calls `whoami` with the result, stores the ciphertext, puppet id and owner id. On `ALREADY_ISSUED` (a previous instance of this service held it and lost the database) it calls `RevokeConnectorDevice` with the same JWT and issues again, logging the recovery for the operator
 - `Call(tool, input)`: `sock_whoami`, `sock_list_conversations`, `sock_send` with the puppet token, through the `sock-mcp` tool implementations
-- `Stream()`: one `Subscribe` on the puppet token, reconnecting with the CLI's backoff, held open while the connection has at least one live `EventSubscription`; otherwise not opened (nothing to deliver to), so deliveries wait in the hub's queue
+- `Stream()`: one `Subscribe` on the puppet token, reconnecting with the CLI's backoff, held open while the connection has at least one live `EventSubscription`; otherwise not opened (nothing to deliver to), so deliveries wait in the hub's queue. A delivery that fails to be handled (the store unavailable, an ack refused) ends the stream attempt, which backs off and reconnects: the hub then redelivers from its queue in order, so nothing behind the failed delivery is handled before it. Streams are not capped per instance; one per connection with a live subscription
 - `Deliver(delivery)`: the sender gate, then one `OwnerReplyEvent` per live subscription; `Ack` after every subscription accepted it (2xx) or was closed trying
-- `Close(cause)`: closes every subscription with the cause and deletes the connection
+- `Close(cause)`: closes every subscription with the cause and deletes the connection, in one transaction, only while the stored connection is still the one this `Close` was opened from (same token ciphertext). A stale stream or a slow close never deletes a connection a refresh made since
 
 ### Invariants
 
@@ -75,7 +75,7 @@ Entity, owned by `Connection`. A platform's webhook registration for one event o
 | `grantId` | UUID | |
 | `event` | `EventName` | `owner.reply`, the only event in v1 |
 | `webhookUrl` | string | `https` on port 443 only (no other port, no userinfo), public address only (checked at subscribe time and again before each delivery), at most 2048 characters |
-| `secretCiphertext` | bytes | The platform's `whsec_` secret (24 to 64 bytes decoded), encrypted like the puppet token; signs every delivery |
+| `secretCiphertext` | bytes | The platform's `whsec_` secret (24 to 64 bytes decoded), encrypted like the puppet token with `sub:<id>` as additional data; signs every delivery |
 | `cursor` | int64 | The number of events this subscription delivered and the platform accepted, 0 at creation; returned on subscribe and re-subscribe. It is a progress count, not a replay position: the hub queue is the replay mechanism (an undelivered message comes back on the next stream), and a cursor sent on subscribe is accepted and ignored |
 | `createdAt` | Timestamp | |
 
@@ -83,14 +83,14 @@ Closure is not a field. A closed subscription has a `SubscriptionClosure` row.
 
 ### Behaviors
 
-- `Subscribe(event, webhookUrl, secret, cursor)` (factory): validates the URL and secret, runs the callback verification (`{"type":"verification","challenge"}` signed; the webhook must echo the challenge or the subscribe fails with JSON-RPC `-32015`), returns `id`, `cursor`, `refreshBefore` (null: no expiry) and `truncated` false
+- `Subscribe(event, webhookUrl, secret, cursor)` (factory): validates the URL and secret, runs the callback verification (`{"type":"verification","challenge"}` signed; the webhook must echo the challenge or the subscribe fails with JSON-RPC `-32015`), returns `id`, `cursor`, `refreshBefore` (null: no expiry) and `truncated` false. A host that does not resolve and one that resolves to a non-public address get the same answer, `-32015` with `data.reason` `callback_unreachable`, so subscribe is no probe of what resolves where; the detail goes to the log only, without the URL's query. A connection holds at most 10 live subscriptions: an 11th is `-32602` (a refresh of a live one still succeeds), decided under the per-grant subscribe lock
 - `Deliver(event)`: one POST, body `{eventId, name, timestamp, data, cursor}`, at most 256 KiB, headers `webhook-id`, `webhook-timestamp`, `webhook-signature` (Standard Webhooks HMAC-SHA256 over `id.timestamp.body`), `X-MCP-Subscription-Id`; `2xx` acknowledges; `410` and `413` close the subscription; anything else retries with backoff 1, 2, 4 s and the same `eventId`, then closes with `deliveryFailed`. An event whose own body would exceed 256 KiB is `Dropped`: never sent, the delivery acked, the subscription kept and the event id logged, since the platform did nothing wrong
 - `Unsubscribe()`: closes with `unsubscribed`. The platform names the subscription by `name`, `arguments` and `delivery.url`, as OpenAI's events page has it (an `id` is accepted too); one already closed is a repeat and succeeds, one never made (or another connection's) is `404`
 
 ### Invariants
 
 - The secret decrypts only to sign a delivery and is never returned, logged or echoed.
-- Deliveries to one subscription follow the hub stream order; `cursor` increases by one per accepted event and never decreases. `seq` is per conversation and travels in `data`, never as the cursor.
+- Deliveries to one subscription follow the hub stream order, including across a failed handling (the stream attempt ends and the hub redelivers in order); `cursor` increases by one per accepted event and never decreases. `seq` is per conversation and travels in `data`, never as the cursor.
 - A subscription whose connection closed is closed with `grantRevoked` before the connection row goes, then deleted with it.
 
 ### States
@@ -163,23 +163,24 @@ erDiagram
 - `POST https://mcp.sock.aeryx.ai/mcp`, MCP over Streamable HTTP, protocol revision `2026-07-28` (events need it; the Go MCP SDK's support for the revision's discovery handshake is the first thing the implementation plan checks) with the legacy `initialize` accepted for clients that still send it. Stateless, JSON framing: every answer is one `application/json` body (an array for a batch), never an SSE stream (the SDK's `JSONResponse`).
 - `GET /.well-known/oauth-protected-resource/mcp` and `GET /.well-known/oauth-protected-resource` (RFC 9728): `resource` = `https://mcp.sock.aeryx.ai/mcp`, `authorization_servers` = [`https://api.sock.aeryx.ai`], `scopes_supported` = [`sock`], `bearer_methods_supported` = [`header`].
 - `GET /.well-known/openai-apps-challenge`: the exact token OpenAI's portal gives, as `text/plain`.
-- `GET /healthz`: 200 when the database answers, 503 otherwise, no data.
-- Every `/mcp` request carries `Authorization: Bearer <access JWT>`. Verified offline against the hub's JWKS (cached by `Cache-Control`, refreshed on an unknown `kid` at most once a minute): ES256, `iss` = the hub, `aud` = this resource exactly, `exp`, `scope` contains `sock`. Missing or invalid: `401` with `WWW-Authenticate: Bearer resource_metadata="https://mcp.sock.aeryx.ai/.well-known/oauth-protected-resource/mcp"`; a valid token without the scope: `403` with `error="insufficient_scope"`. Nothing else is accepted: no API keys, no puppet tokens, no cookies.
+- `GET /healthz`: 200 when the database answers, 503 otherwise, no data. The ping runs under a 2 s timeout and its result is reused for 2 s, so a flood of hits is one ping every 2 s.
+- Every `/mcp` request carries `Authorization: Bearer <access JWT>`. Verified offline against the hub's JWKS (cached by `Cache-Control`, refreshed on an unknown `kid` at most once a minute): ES256, `iss` = the hub, `aud` = this resource exactly (a single member: a token whose `aud` also names another resource is refused), `exp`, `scope` contains `sock`. Missing or invalid: `401` with `WWW-Authenticate: Bearer resource_metadata="https://mcp.sock.aeryx.ai/.well-known/oauth-protected-resource/mcp"`; a valid token without the scope: `403` with `error="insufficient_scope"`. Nothing else is accepted: no API keys, no puppet tokens, no cookies.
 - The `sub` names the connection. The first request for an unknown `sub` opens it (`Connection.Open`), which is the only call that costs a hub round trip for identity; later requests use the stored ciphertext.
 
 ## Tools
 
-The three sending tools, linked from `sock-mcp` as a library in outbound-only form: `sock_whoami`, `sock_list_conversations`, `sock_send`. Same names, schemas and descriptions as the stdio server, pinned by the drift test in `test/`. Every tool declares `securitySchemes: [{type: oauth2}]` for the OpenAI package. No `sock_fetch`, no `sock_ack`: this service is the single consumer of every connector puppet's deliveries. Per-grant limits are the hub's (60 sends a minute per puppet); the service adds a request limit of 120 a minute per grant and 20 concurrent streams per instance, answering `429` with `Retry-After`.
+The three sending tools, linked from `sock-mcp` as a library in outbound-only form: `sock_whoami`, `sock_list_conversations`, `sock_send`. Same names, schemas and descriptions as the stdio server, pinned by the drift test in `test/`. Every tool declares `securitySchemes: [{type: oauth2}]` for the OpenAI package. No `sock_fetch`, no `sock_ack`: this service is the single consumer of every connector puppet's deliveries. Per-grant limits are the hub's (60 sends a minute per puppet); the service adds a request limit of 120 a minute per grant, answering `429` with `Retry-After`. Each element of a batch counts against it; a batch that would exceed it is refused `429` as a whole. Outbound, at most 20 webhook deliveries are in flight per instance; a delivery over that waits for a slot (logged), and a backoff wait between attempts holds none.
 
 ## Events
 
+- A batch that carries any `events/*` request holds at most 10 elements; a larger one is answered with one `-32600` for the whole batch. Each events request runs under a 30 s deadline, and the HTTP server's write timeout is 60 s (JSON framing: no long streams on `/mcp`).
 - Capability `events` in the discovery result. `events/list` returns `owner.reply` with `delivery: ["webhook"]`, the empty `inputSchema` and the `payloadSchema` above. `events/subscribe` and `events/unsubscribe` as `EventSubscription` says. All three on the same authenticated endpoint as the tools; a subscription belongs to the connection the access token names, and `events/unsubscribe` of another connection's subscription is `404`.
 - The connection's stream opens with its first live subscription and closes with its last. Each delivery: gate, fan out, ack. The hub holds deliveries up to 30 days and redelivers on reconnect, so a platform outage shorter than that loses nothing.
-- The grant is re-checked by use: a `TOKEN_INVALID` from the hub on the stream or on a tool call closes the connection. On a tool call the request answers `401` with `WWW-Authenticate: Bearer error="invalid_token"`, so the platform authorizes again; the next request opens a fresh connection, or meets the revoked grant.
+- The grant is re-checked by use: a `TOKEN_INVALID` from the hub on the stream or on a tool call closes the connection (`Close` bound to the connection that met it). On a tool call that close also stops the connection's stream, and the request answers `401` with `WWW-Authenticate: Bearer error="invalid_token"`, so the platform authorizes again; the next request opens a fresh connection, or meets the revoked grant.
 
 ## State
 
-Postgres, schema `connector`, Postgres types, numbered migrations. No JSON columns. The two secrets at rest are ciphertext under `SOCK_MCPD_TOKEN_KEY` (32 bytes, from the deployment's secret store, never in the database).
+Postgres, schema `connector`, Postgres types, numbered migrations. No JSON columns. The two secrets at rest are ciphertext under `SOCK_MCPD_TOKEN_KEY` (32 bytes, from the deployment's secret store, never in the database), each bound to its row with additional data (`conn:<grantId>`, `sub:<subscriptionId>`): a ciphertext copied into another row does not open.
 
 ```sql
 CREATE SCHEMA connector;
@@ -238,7 +239,7 @@ Go, in this repository's `test/` module to start, moving with the service into i
 
 ## Deployment
 
-Scaffolded from rookery as `sock-mcpd` (daemon plus a small CLI for the service token and the challenge file), Go, Postgres, the hub's canary to staging to tag pipeline, behind the same Cloudflare front as the hub, on `mcp.sock.aeryx.ai` (staging `stage-mcp.aeryx.ai`). Configuration: `SOCK_URL`, `SOCK_MCPD_RESOURCE`, `SOCK_MCPD_SERVICE_TOKEN` (`sock_ct_`), `SOCK_MCPD_TOKEN_KEY`, `SOCK_MCPD_DATABASE_URL`, `SOCK_MCPD_OPENAI_CHALLENGE`. The service refuses to start without any of them.
+Scaffolded from rookery as `sock-mcpd` (daemon plus a small CLI for the service token and the challenge file), Go, Postgres, the hub's canary to staging to tag pipeline, behind the same Cloudflare front as the hub, on `mcp.sock.aeryx.ai` (staging `stage-mcp.aeryx.ai`). Configuration: `SOCK_URL`, `SOCK_MCPD_RESOURCE`, `SOCK_MCPD_SERVICE_TOKEN` (`sock_ct_`), `SOCK_MCPD_TOKEN_KEY`, `SOCK_MCPD_DATABASE_URL`, `SOCK_MCPD_OPENAI_CHALLENGE`. The service refuses to start without any of them, with an empty secret (from the variable or its `_FILE`), or with a `SOCK_URL` that is not `https` (plain `http` only for a loopback host, a hub under test).
 
 One instance per environment in v1, never a second replica: the stream per connection, the request limit and the first `Open` are per instance, and a second instance's `Open` would meet `ALREADY_ISSUED` and revoke the first's connector device.
 
