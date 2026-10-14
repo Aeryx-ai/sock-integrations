@@ -44,7 +44,7 @@ hash16() {
 sweep_dead() {
 	for f in "$state_dir"/curl.* "$state_dir"/hdr.* "$state_dir"/resp.* "$state_dir"/stream.* "$state_dir"/streamh.* \
 		"$state_dir"/body.* "$state_dir"/answer.* "$state_dir"/parts.* "$state_dir"/prompt.* "$state_dir"/new.* \
-		"$state_dir"/batch.* "$state_dir"/ids.* "$state_dir"/page.* "$state_dir"/hist.*; do
+		"$state_dir"/batch.* "$state_dir"/ids.* "$state_dir"/page.* "$state_dir"/hist.* "$state_dir"/histp.* "$state_dir"/newc.*; do
 		[ -e "$f" ] || continue
 		pid=${f##*.}
 		case $pid in

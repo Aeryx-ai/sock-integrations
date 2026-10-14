@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -194,5 +195,53 @@ func TestBridgeStreamOpenRetries(t *testing.T) {
 				t.Fatal("a user.message was posted without a stream")
 			}
 		})
+	}
+}
+
+// M6: the history being gathered is a temp file like any other: removed when a
+// history read fails, and swept when its run died
+func TestBridgeFailedHistoryReadLeavesNoHistory(t *testing.T) {
+	h := newBridgeHarness(t)
+	h.dropThenHistory(textEvent("agent.message", "evt_a1", bnAnswer))
+	h.api.set(func(f *fakeMA) { f.status["list"] = []int{200, 503, 503, 503, 503, 503} })
+	h.api.set(func(f *fakeMA) {
+		f.pages = [][]map[string]any{f.history, {textEvent("agent.message", "evt_a2", "more")}}
+	})
+	r := h.run(rnOpts{Env: map[string]string{"SOCK_BRIDGE_TIMEOUT": "5"}})
+	if r.Code != 1 {
+		t.Fatalf("exit %d", r.Code)
+	}
+	ents, _ := os.ReadDir(h.state)
+	for _, e := range ents {
+		if strings.HasPrefix(e.Name(), "hist") {
+			t.Fatalf("left behind: %s", e.Name())
+		}
+	}
+}
+
+func TestBridgeSweepsTheHistoryAndStreamCutsOfDeadRuns(t *testing.T) {
+	h := newBridgeHarness(t)
+	if err := os.MkdirAll(h.state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dead, live := strconv.Itoa(rnDeadPid(t)), strconv.Itoa(rnLivePid(t))
+	// histp: the history pages; newc: a stream batch cut at its last newline
+	names := []string{"histp", "newc"}
+	for _, name := range names {
+		for _, pid := range []string{dead, live} {
+			if err := os.WriteFile(filepath.Join(h.state, name+"."+pid), []byte(bnToolInput), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	h.script(agentMsg(bnAnswer), idle("end_turn"))
+	h.run(rnOpts{})
+	for _, name := range names {
+		if _, err := os.Stat(filepath.Join(h.state, name+"."+dead)); err == nil {
+			t.Fatalf("%s.%s of a dead run was kept", name, dead)
+		}
+		if _, err := os.Stat(filepath.Join(h.state, name+"."+live)); err != nil {
+			t.Fatalf("%s.%s of a live process was swept", name, live)
+		}
 	}
 }

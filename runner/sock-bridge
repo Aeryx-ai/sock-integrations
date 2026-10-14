@@ -66,16 +66,18 @@ stream_hdr=$state_dir/streamh.$$
 body=$state_dir/body.$$
 answer=$state_dir/answer.$$
 new=$state_dir/new.$$
+newc=$state_dir/newc.$$
 batch=$state_dir/batch.$$
 ids_file=$state_dir/ids.$$
 page=$state_dir/page.$$
 hist=$state_dir/hist.$$
+histp=$state_dir/histp.$$
 parts=$state_dir/parts.$$
 stream_pid=
 # shellcheck disable=SC2329 # run by the library's EXIT trap
 extra_cleanup() {
 	[ -n "$stream_pid" ] && kill "$stream_pid" 2>/dev/null
-	rm -rf "$cfg" "$hdr" "$resp" "$stream_file" "$stream_hdr" "$body" "$answer" "$new" "$batch" "$ids_file" "$page" "$hist" "$parts"
+	rm -rf "$cfg" "$hdr" "$resp" "$stream_file" "$stream_hdr" "$body" "$answer" "$new" "$newc" "$batch" "$ids_file" "$page" "$hist" "$histp" "$parts"
 }
 install_traps
 
@@ -293,12 +295,12 @@ once_per_id='reduce .[] as $e ({seen: {}, out: []};
 # fetch_history leaves every event of the session in $hist as {data: [...]},
 # following next_page (events are in processed_at order, oldest first)
 fetch_history() {
-	: >"$hist.pages"
+	: >"$histp"
 	api GET "$base?beta=true"
 	cp "$resp" "$page"
 	n=0
 	while :; do
-		jq -c '.data // []' "$page" >>"$hist.pages" 2>/dev/null || {
+		jq -c '.data // []' "$page" >>"$histp" 2>/dev/null || {
 			log_line "http bad history"
 			exit 1
 		}
@@ -312,8 +314,8 @@ fetch_history() {
 		api GET "$base?beta=true&page=$(jq -rn --arg v "$next" '$v | @uri')"
 		cp "$resp" "$page"
 	done
-	jq -cs '{data: (add // [])}' "$hist.pages" >"$hist"
-	rm -f "$hist.pages"
+	jq -cs '{data: (add // [])}' "$histp" >"$hist"
+	rm -f "$histp"
 }
 
 # catch_up reads the history for this message's turn. It sets found and done,
@@ -409,7 +411,7 @@ while [ -z "$reason" ]; do
 	if [ "$size" -gt "$off" ]; then
 		tail -c "+$((off + 1))" "$stream_file" >"$new"
 		# drop a trailing line that has no newline yet
-		if [ "$(tail -c 1 "$new" | wc -l | tr -d ' ')" != 1 ]; then sed '$d' "$new" >"$new.cut" && mv "$new.cut" "$new"; fi
+		if [ "$(tail -c 1 "$new" | wc -l | tr -d ' ')" != 1 ]; then sed '$d' "$new" >"$newc" && mv "$newc" "$new"; fi
 		used=$(wc -c <"$new" | tr -d ' ')
 		if [ "$used" -gt 0 ]; then
 			off=$((off + used))
