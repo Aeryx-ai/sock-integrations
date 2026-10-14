@@ -217,7 +217,7 @@ stdin, env and exit codes are `sock-runner`'s (the `sock listen --exec` contract
 ### Rules that follow
 
 - The bridge's puppet is its own and its one consumer is `sock listen`. Nothing calls `sock_fetch` or `sock_ack` for it.
-- Temp files are named `<prefix>.<pid>` in the state directory and removed on exit; the next run removes those of pids that no longer exist, and any `curl.*` older than the turn timeout whatever its pid (it holds the key), so a SIGKILL cannot leave the curl config and its key behind for long (an orphaned stream curl ends at its `--max-time`, the turn deadline). An unwritable state directory exits 2 before any wait.
+- Temp files are named `<prefix>.<pid>` in the state directory and removed on exit; the next run removes those of pids that no longer exist, and any `curl.*` older than the turn timeout whatever its pid (it holds the key), so a SIGKILL cannot leave the curl config and its key behind for long (an orphaned stream curl ends at its `--max-time`, the turn deadline). A state directory that is unwritable or cannot be made this user's alone (owner, mode 700), or a relative one when the start directory is gone, exits 2 before any wait, for both commands.
 - One session per bridge, and the session is not driven by anything else at the same moment: two writers interleave turns, and the bridge cannot tell whose answer a `session.status_idle` ends.
 - The owner's reply is data to the agent, in a tag, like everywhere in this repo. What the agent may do is the session's own configuration.
 - The agent's answer goes only to the owner, over the bridge's puppet, as ordinary messages.

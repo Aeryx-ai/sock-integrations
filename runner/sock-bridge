@@ -88,7 +88,6 @@ extra_cleanup() {
 }
 install_traps
 
-require_state_dir
 read_message
 owner_gate
 drop_if_done

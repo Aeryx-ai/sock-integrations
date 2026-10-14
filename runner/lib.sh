@@ -54,23 +54,36 @@ sweep_dead() {
 	done
 }
 
-# require_state_dir fails fast, as a configuration error, when the state
-# directory cannot be written: otherwise the lock wait would spin to the timeout.
+# require_state_dir fails fast, as a configuration error, unless the state
+# directory is this user's alone: owned by it, mode 700 and writable. A shared
+# one would put the lock, the log and predictable temp names where others can
+# reach them, and an unwritable one would spin the lock wait to the timeout.
 require_state_dir() {
-	[ -d "$state_dir" ] && [ -w "$state_dir" ] || die_config "the state directory $state_dir is not writable"
+	[ -d "$state_dir" ] && [ -w "$state_dir" ] &&
+		[ -n "$(find "$state_dir" -maxdepth 0 -user "$(id -u)" ! \( -perm -g+r -o -perm -g+w -o -perm -g+x -o -perm -o+r -o -perm -o+w -o -perm -o+x \) 2>/dev/null)" ] ||
+		die_config "the state directory $state_dir is not writable, or cannot be made this user's alone (owner, mode 700)"
 }
 
-# lib_init makes the state directory and sweeps what a SIGKILLed run left.
+# lib_init makes the state directory, checks it and sweeps what a SIGKILLed run
+# left.
 lib_init() {
-	# absolute, so a later cd (the runner's into its workdir) keeps every path
+	# absolute, so a later cd (the runner's into its workdir) keeps every path. With
+	# no start directory (deleted, so pwd fails) a relative one means nothing.
 	case $state_dir in
 	/*) ;;
-	*) state_dir=$(pwd)/$state_dir ;;
+	*)
+		start=$(pwd -P 2>/dev/null) || start=
+		case $start in
+		/*) state_dir=$start/$state_dir ;;
+		*) die_config "the state directory $state_dir is relative and the start directory is gone" ;;
+		esac
+		;;
 	esac
 	log=$state_dir/$log_name
 	lock=$state_dir/$lock_name
 	done_file=$state_dir/$ledger_name
 	mkdir -p "$state_dir" 2>/dev/null && chmod 700 "$state_dir" 2>/dev/null
+	require_state_dir
 	# prompt files older than any run can last
 	find "$state_dir" -maxdepth 1 -name 'prompt.*' -mmin "+$((timeout / 60 + 2))" -exec rm -f {} + 2>/dev/null || true
 	# the bridge's curl config holds the API key: an old one goes whatever its pid

@@ -1,9 +1,11 @@
 package test
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -362,5 +364,48 @@ func TestBridgeCurlIgnoresCurlrcAndPinsTheProtocol(t *testing.T) {
 		if !strings.HasPrefix(c, "-q ") || !strings.Contains(c, " --proto =http,https ") || !strings.Contains(c, " --proto-redir =http,https ") || !strings.Contains(c, " --max-redirs 0 ") {
 			t.Fatalf("curl call %q", c)
 		}
+	}
+}
+
+// sec 6: a state directory the runner cannot make its own (here root's) is a
+// configuration error, not a lock wait in a shared directory
+func TestRunnerStateDirItCannotOwnExits2(t *testing.T) {
+	h := newRunnerHarness(t)
+	r := h.run(rnOpts{Env: map[string]string{"SOCK_RUNNER_STATE": "/usr", "SOCK_RUNNER_TIMEOUT": "3"}})
+	h.wantNoRun(r, 2)
+}
+
+// sec 6: a relative state directory with no start directory to resolve it
+// against (pwd fails once it is deleted) must not become one under /
+func TestRunnerRelativeStateDirWithNoStartDirExits2(t *testing.T) {
+	for _, bin := range []string{"runner", "bridge"} {
+		t.Run(bin, func(t *testing.T) {
+			var h *rnHarness
+			if bin == "runner" {
+				h = newRunnerHarness(t)
+			} else {
+				h = newBridgeHarness(t).rnHarness
+			}
+			name := "tmp/sock-sec-" + strconv.Itoa(os.Getpid()) + "-" + bin
+			t.Cleanup(func() { _ = os.RemoveAll("/" + name) })
+			gone := filepath.Join(h.dir, "gone")
+			if err := os.Mkdir(gone, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			cmd := h.command(rnOpts{Env: map[string]string{"SOCK_RUNNER_STATE": name, "SOCK_BRIDGE_STATE": name}})
+			cmd.Path = "/bin/sh"
+			cmd.Args = []string{"/bin/sh", "-c", `cd "$1" && rmdir "$1" && exec "$2"`, "sh", gone, h.bin}
+			err := cmd.Run()
+			code := 0
+			if ee := (*exec.ExitError)(nil); errors.As(err, &ee) {
+				code = ee.ExitCode()
+			}
+			if code != 2 {
+				t.Fatalf("exit %d (%v), stderr %q", code, err, cmd.Stderr)
+			}
+			if _, err := os.Stat("/" + name); err == nil {
+				t.Fatalf("state went to /%s", name)
+			}
+		})
 	}
 }
