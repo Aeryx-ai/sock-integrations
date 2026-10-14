@@ -106,13 +106,14 @@ parts=$state_dir/parts.$$
 reasonf=$state_dir/reason.$$
 cfnew=$state_dir/cfnew.$$
 cfadd=$state_dir/cfadd.$$
+cfall=$state_dir/cfall.$$
 stream_pid=
 curl_pid=
 # shellcheck disable=SC2329 # run by the library's EXIT trap
 extra_cleanup() {
 	[ -n "$stream_pid" ] && kill "$stream_pid" 2>/dev/null
 	[ -n "$curl_pid" ] && kill "$curl_pid" 2>/dev/null
-	rm -rf "$cfg" "$codef" "$hdr" "$resp" "$stream_file" "$stream_hdr" "$body" "$turn" "$turnn" "$new" "$newc" "$batch" "$page" "$hist" "$histp" "$parts" "$reasonf" "$cfnew" "$cfadd"
+	rm -rf "$cfg" "$codef" "$hdr" "$resp" "$stream_file" "$stream_hdr" "$body" "$turn" "$turnn" "$new" "$newc" "$batch" "$page" "$hist" "$histp" "$parts" "$reasonf" "$cfnew" "$cfadd" "$cfall"
 }
 install_traps
 
@@ -267,6 +268,7 @@ c1=$(printf '\302[\200-\237]')
 bidi=$(printf '\342\200[\250-\256]')
 isol=$(printf '\342\201[\246-\251]')
 clean_text() { LC_ALL=C tr -d '\000-\010\013-\037\177' | LC_ALL=C sed "s/$c1//g; s/$bidi//g; s/$isol//g"; }
+# post_text TEXT [FIRST]
 post_text() {
 	mkdir -p "$parts" || exit 1
 	# Paragraphs (lines up to a blank one) go into a part whole; one too long for
@@ -295,6 +297,16 @@ post_text() {
 		END { flush() }'
 	count=$(find "$parts" -name 'part.*' | wc -l | tr -d ' ')
 	[ "$count" -gt 0 ] || { printf '%s\n' "$1" >"$parts/part.1"; count=1; }
+	# a first message of its own goes ahead of the parts, counted with them
+	if [ -n "${2:-}" ]; then
+		i=$count
+		while [ "$i" -gt 0 ]; do
+			mv "$parts/part.$i" "$parts/part.$((i + 1))" || exit 1
+			i=$((i - 1))
+		done
+		printf '%s\n' "$2" >"$parts/part.1" || exit 1
+		count=$((count + 1))
+	fi
 	# parts of this message already posted by an earlier run stay posted
 	i=1
 	posted_file=$state_dir/posted.part
@@ -322,10 +334,10 @@ post_text() {
 	rm -rf "$parts"
 }
 
-# answer posts a fixed text to the owner, records the message replied, logs
-# the outcome and acknowledges
+# answer posts a text to the owner (after FIRST, as its own message, when
+# given), records the message replied, logs the outcome and acknowledges
 answer() {
-	post_text "$1"
+	post_text "$1" "${3:-}"
 	record_done
 	log_line "$2"
 	exit 0
@@ -382,7 +394,7 @@ mark_sent() {
 # id is kept. Of a tool call only its type, name, server and evaluated
 # permission are kept, by id, never its input. The end is the first
 # session.status_idle, with its stop reason (end_turn when it gives none) and
-# the ids it waits on, or session.error. An end seen before the turn started
+# the ids it waits on, each once, or session.error. An end seen before the turn started
 # sets unanchored: on the stream, that is an end the bridge cannot place.
 # shellcheck disable=SC2016 # jq's variables, not the shell's
 turn_jq='
@@ -407,7 +419,8 @@ def step($e; $tag; $tuid):
 		  else .tools[$k] = {type: $e.type, name: ($e.name | str), server: ($e.mcp_server_name | str), perm: ($e.evaluated_permission | str)} end
 	elif $e.type == "session.status_idle" then
 		.reason = ((($e.stop_reason | objects | .type) // "end_turn") | tostring)
-		| .blockers = [$e.stop_reason | objects | .event_ids | arrays | .[] | strings]
+		| .blockers = ([$e.stop_reason | objects | .event_ids | arrays | .[] | strings]
+			| reduce .[] as $x ([]; if any(.[]; . == $x) then . else . + [$x] end))
 	elif $e.type == "session.error" then .reason = "error"
 	else . end;
 '
@@ -622,15 +635,17 @@ resolve_session() {
 # confirm.pending holds one line per call waiting on the owner:
 #   <code> <conversationId> <session> <tool_use_id> <pending|sent> <message id|-> <tool|?> <server|?>
 # The code is 6 characters of a-km-z2-9 from /dev/urandom. It goes only into
-# this file and to the owner: never into the session, a request or the log.
-# The file is read and rewritten only under the run lock, by tmp and rename,
-# mode 600, and holds the newest 50 lines.
+# this file and to the owner: never into the session, a request, the log or
+# any process's argv (a child gets it in its environment, BRIDGE_CODE or
+# BRIDGE_CODES, which only this user can read). The file is read and
+# rewritten only under the run lock, by tmp and rename, mode 600, and holds at
+# most 50 lines (ask keeps the bound).
 confirm_file=$state_dir/confirm.pending
 
-# confirm_put FILE replaces confirm.pending with the last 50 lines of FILE
+# confirm_put FILE replaces confirm.pending with FILE
 confirm_put() {
 	{
-		tail -n 50 "$1" >"$confirm_file.tmp" && chmod 600 "$confirm_file.tmp" && mv "$confirm_file.tmp" "$confirm_file"
+		cat "$1" >"$confirm_file.tmp" && chmod 600 "$confirm_file.tmp" && mv "$confirm_file.tmp" "$confirm_file"
 	} 2>/dev/null || {
 		log_line "confirm not writable"
 		exit 1
@@ -643,7 +658,7 @@ confirm_put() {
 # read as numbers as numbers, and 10 and 1e1 are one number
 confirm_keep() {
 	[ -f "$confirm_file" ] || return 0
-	awk -v s="$session" -v c="${ccode:-}" -v v="$stdin_conv" -v m="$stdin_id" "$1" "$confirm_file" >"$cfnew" 2>/dev/null || {
+	BRIDGE_CODE=${ccode:-} awk -v s="$session" -v v="$stdin_conv" -v m="$stdin_id" 'BEGIN { c = ENVIRON["BRIDGE_CODE"] } '"$1" "$confirm_file" >"$cfnew" 2>/dev/null || {
 		log_line "confirm not writable"
 		exit 1
 	}
@@ -664,11 +679,20 @@ new_code() {
 	for _ in 1 2 3 4 5 6 7 8; do
 		ccode=$(head -c 512 /dev/urandom | LC_ALL=C tr -dc 'a-km-z2-9' | head -c 6)
 		[ "${#ccode}" -eq 6 ] || continue
-		cat "$confirm_file" "$cfadd" 2>/dev/null | awk -v c="$ccode" '"" $1 == "" c { f = 1 } END { exit !f }' || return 0
+		cat "$confirm_file" "$cfadd" 2>/dev/null |
+			BRIDGE_CODE=$ccode awk 'BEGIN { c = ENVIRON["BRIDGE_CODE"] } "" $1 == "" c { f = 1 } END { exit !f }' || return 0
 	done
 	log_line "no code"
 	exit 1
 }
+
+# pending_codes prints every code in confirm.pending, one per line
+pending_codes() { cut -d' ' -f1 "$confirm_file" 2>/dev/null; }
+# scrub_jq defines scrub: every code of $ENV.BRIDGE_CODES replaced by [code],
+# in any case, with format characters (Cf) allowed between its characters
+# shellcheck disable=SC2016 # jq's variables
+scrub_jq='def scrub: reduce ($ENV.BRIDGE_CODES // "" | split("\n")[] | select(test("\\A[a-km-z2-9]{6}\\z"))) as $c
+	(.; gsub($c | split("") | join("\\p{Cf}*"); "[code]"; "i"));'
 
 # requests prints, for each line of this conversation and session still
 # pending, what the owner replies to answer it
@@ -730,19 +754,43 @@ EOF
 		confirm_put "$cfnew"
 		answer "the agent is waiting for approval of a tool call" "waiting for approval"
 	fi
-	cat "$cfadd" >>"$cfnew"
-	confirm_put "$cfnew"
-	if [ -n "$tuid" ] && [ "$added" -eq 0 ]; then
+	# The bound, 50 lines. A sent line and a call of this turn are never
+	# evicted; other pending lines go oldest first, and calls past the bound
+	# are not asked: the owner answers those in the console.
+	held=$(awk -v s="$session" '$5 == "sent" || "" $3 == "" s' "$cfnew" | wc -l | tr -d ' ')
+	others=$(($(wc -l <"$cfnew" | tr -d ' ') - held))
+	room=$((50 - held))
+	[ "$room" -ge 0 ] || room=0
+	skipped=0
+	if [ "$added" -gt "$room" ]; then
+		skipped=$((added - room))
+		added=$room
+	fi
+	drop=$((others - (room - added)))
+	[ "$drop" -ge 0 ] || drop=0
+	if ! {
+		awk -v s="$session" -v d="$drop" '$5 == "sent" || "" $3 == "" s { print; next } ++n > d' "$cfnew" &&
+			awk -v a="$added" 'NR <= a' "$cfadd"
+	} >"$cfall" 2>/dev/null; then
+		log_line "confirm not writable"
+		exit 1
+	fi
+	confirm_put "$cfall"
+	if [ -n "$tuid" ] && [ "$added" -eq 0 ] && [ "$skipped" -eq 0 ]; then
 		answer "recorded; $(printf '%s\n' "$blk" | grep -c .) more waiting" "approval recorded"
 	fi
-	# the requests come last, after the agent's text cut short enough that
-	# the split cannot cut them
+	# the requests are a message of their own, ahead of the agent's text: no
+	# cut of that text can drop them, and they cannot be taken for it
 	msg=$(requests)
-	if [ -n "$(printf '%s' "$1" | tr -d ' \t\r\n')" ]; then
-		msg="$(printf '%s' "$1" | LC_ALL=C awk -v max=200000 "$awk_cut"'
-			BEGIN { ord_init() } { buf = buf (NR > 1 ? "\n" : "") $0 } END { print substr(buf, 1, cut_at(buf, max)) }')
+	if [ "$skipped" -gt 0 ]; then
+		if [ "$skipped" -eq 1 ]; then note="1 more tool call waits"; else note="$skipped more tool calls wait"; fi
+		note="$note for approval: answer them in the Managed Agents console"
+		if [ -n "$msg" ]; then msg="$msg
 
-$msg"
+$note"; else msg=$note; fi
+	fi
+	if [ -n "$(printf '%s' "$1" | tr -d ' \t\r\n')" ]; then
+		answer "$1" "approval requested" "$msg"
 	fi
 	answer "$msg" "approval requested"
 }
@@ -776,10 +824,13 @@ parse_reply() {
 # answers that none is pending. A line marked sent counts only for the message
 # that sent it.
 confirm_line() {
-	line=$(awk -v c="$ccode" -v v="$stdin_conv" '"" $1 == "" c && "" $2 == "" v' "$confirm_file" 2>/dev/null | head -n 1)
-	read -r _ _ c_session c_tuid c_state c_msg _ <<EOF
-$line
-EOF
+	line=$(BRIDGE_CODE=$ccode awk -v v="$stdin_conv" 'BEGIN { c = ENVIRON["BRIDGE_CODE"] } "" $1 == "" c && "" $2 == "" v' "$confirm_file" 2>/dev/null | head -n 1)
+	# split by the shell, not a here-document (which can be a temp file)
+	set -f
+	# shellcheck disable=SC2086 # split into its fields on purpose
+	set -- $line
+	set +f
+	c_session=${3:-} c_tuid=${4:-} c_state=${5:-} c_msg=${6:-}
 	if [ -n "$line" ] && session_ok "${c_session:-}" && matches "${c_tuid:-}" '[A-Za-z0-9_-]{1,128}' &&
 		{ [ "$c_state" = pending ] || { [ "$c_state" = sent ] && [ "$c_msg" = "$stdin_id" ]; }; }; then
 		return 0
@@ -788,16 +839,13 @@ EOF
 }
 
 # confirm_body writes the confirmation to $body: the reason, if any, cleaned of
-# control characters, every code in confirm.pending taken out, cut to 1000
-# bytes on a character boundary
+# control and format characters, every code in confirm.pending replaced by
+# [code] in any case, cut to 1000 bytes on a character boundary
 confirm_body() {
 	if [ "$verb" = deny ]; then
-		clean_text <"$reasonf" >"$cfadd" || exit 1
-		# shellcheck disable=SC2013 # the codes are words, checked below
-		for c in $(cut -d' ' -f1 "$confirm_file" 2>/dev/null); do
-			matches "$c" '[a-km-z2-9]{6}' || continue
-			sed "s/$c/[code]/g" "$cfadd" >"$reasonf" && mv "$reasonf" "$cfadd" || exit 1
-		done
+		# format characters (Cf, U+200B among them) go before the codes are
+		# looked for, so none can hide a code
+		clean_text <"$reasonf" | BRIDGE_CODES=$(pending_codes) jq -Rjs "$scrub_jq"'gsub("\\p{Cf}"; "") | scrub' >"$cfadd" || exit 1
 		LC_ALL=C awk -v max=1000 "$awk_cut"'
 			BEGIN { ord_init() } { buf = buf (NR > 1 ? "\n" : "") $0 } END { printf "%s", substr(buf, 1, cut_at(buf, max)) }' "$cfadd" >"$reasonf" || exit 1
 	fi
@@ -983,7 +1031,11 @@ else
 	hold_if_waiting
 fi
 
-# a fresh turn: stream first, then send, then follow the stream
+# a fresh turn: stream first, then send, then follow the stream. A pending
+# code quoted in the reply, from any conversation, does not go into a session.
+if [ -s "$confirm_file" ]; then
+	input=$(printf '%s' "$input" | BRIDGE_CODES=$(pending_codes) jq -c "$scrub_jq"'.text |= scrub') || exit 1
+fi
 write_prompt
 open_stream
 jq -n --rawfile t "$prompt" '{events: [{type: "user.message", content: [{type: "text", text: $t}]}]}' >"$body"
