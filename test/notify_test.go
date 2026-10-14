@@ -1147,3 +1147,16 @@ func TestClaudePluginWithPluginRootIsUnchanged(t *testing.T) {
 		t.Fatalf("%+v", g)
 	}
 }
+
+// --- notify.sh security review fixes -----------------------------------------
+
+// A backtick in a backtick opener's info string makes it text under
+// CommonMark; the hook still treats it as an opener so the code stays home.
+func TestBacktickInfoStringStillOpensAFence(t *testing.T) {
+	s := newStub(t)
+	msg := "Which value do you want?\n\n```sh `env`\nDB password hunter2\n```"
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PROJECT_DIR": "/x/proj"}, Stdin: stopInput("f1", msg)}, "--stop", "--ask-now")
+	if g := s.Requests(); len(g) != 1 || g[0].Text != "proj: Which value do you want?" {
+		t.Fatalf("%+v", g)
+	}
+}

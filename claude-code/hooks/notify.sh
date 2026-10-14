@@ -145,8 +145,9 @@ extract_ask() {
 			if (run >= 3 && c == fc && run >= fl && rest ~ /^[[:space:]]*$/) fence = 0
 			next
 		}
-		# A backtick run with a backtick after it is inline code, not a fence.
-		run >= 3 && !(c == "`" && index(rest, "`")) { fence = 1; fc = c; fl = run; next }
+		# CommonMark makes a backtick run with a backtick after it inline code;
+		# it opens a fence here anyway, so code under it never leaves the machine.
+		run >= 3 { fence = 1; fc = c; fl = run; next }
 		{ lines[++n] = $0 }
 		END {
 			# paragraph starts
