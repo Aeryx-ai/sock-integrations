@@ -6,9 +6,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -616,5 +618,173 @@ func TestConfirmCallIDsMatchAsTextNotNumbers(t *testing.T) {
 	last := h.sends()[len(h.sends())-1].Text
 	if c := cfCodeRE.FindAllStringSubmatch(last, -1); len(c) != 1 || c[0][1] == "gggggg" || !strings.Contains(h.pendingFile(), " 1e1 pending") || strings.Contains(h.pendingFile(), " 10 ") {
 		t.Fatalf("posted %q pending %q", last, h.pendingFile())
+	}
+}
+
+// L1: the requests go first, in a message of their own, so no cut of the
+// agent's text can drop them and they cannot be mistaken for the agent's text
+func TestConfirmRequestsComeFirstInTheirOwnMessage(t *testing.T) {
+	h := newBridgeHarness(t)
+	var paras []string
+	for range 7 {
+		paras = append(paras, strings.Repeat("x", 30001))
+	}
+	h.script(toolUse(cfTool, "agent.tool_use", cfName, "ask"), agentMsg(strings.Join(paras, "\n\n")), blocked(cfTool))
+	if r := h.run(rnOpts{}); r.Code != 0 {
+		t.Fatalf("exit %d", r.Code)
+	}
+	s := h.sends()
+	if len(s) < 2 || len(s) > 5 || !strings.HasPrefix(s[0].Text, "the agent wants to run "+cfName) || strings.Contains(s[0].Text, "xxx") || len(h.codes()) != 1 {
+		t.Fatalf("%d sends, first %q, codes %v", len(s), s[0].Text[:min(len(s[0].Text), 120)], h.codes())
+	}
+	if !strings.Contains(s[1].Text, "xxx") {
+		t.Fatal("the agent's text does not follow the requests")
+	}
+}
+
+// fold is s lower-cased with the format characters a reader cannot see taken out
+func fold(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return unicode.ToLower(r)
+	}, s)
+}
+
+// L2: a deny reason loses every pending code, in any case and through format
+// characters
+func TestConfirmDenyScrubsCodesInAnyCaseAndThroughFormatCharacters(t *testing.T) {
+	h := newBridgeHarness(t)
+	h.script(toolUse(cfTool, "agent.tool_use", cfName, "ask"), toolUse(cfTool2, "agent.tool_use", cfName, "ask"), blocked(cfTool, cfTool2))
+	if r := h.run(rnOpts{}); r.Code != 0 {
+		t.Fatalf("exit %d", r.Code)
+	}
+	c := h.codes()
+	h.script(blocked(cfTool2))
+	o := c[1]
+	reason := "upper " + strings.ToUpper(o) + " zwsp " + o[:3] + "\u200b" + o[3:] + " soft " + o[:2] + "\u00ad" + o[2:] + " tag " + o[:1] + "\U000e0041" + o[1:] + " plain " + o
+	if r := h.run(h.reply(2, "deny "+c[0]+" "+reason)); r.Code != 0 {
+		t.Fatalf("exit %d log %q", r.Code, h.bridgeLog())
+	}
+	cf := h.api.confirmations()
+	m, _ := cf[0]["deny_message"].(string)
+	if len(cf) != 1 || strings.Contains(fold(m), o) || !strings.HasPrefix(m, "upper [code] zwsp [code]") {
+		t.Fatalf("deny_message %q", m)
+	}
+}
+
+// L3: an ordinary reply that quotes a pending code, in another conversation
+// whose session takes it, carries no code into that session
+func TestConfirmAnOrdinaryReplyCarriesNoCode(t *testing.T) {
+	h := newConvHarness(t)
+	code := h.askOnce()
+	o := h.inConv(2, bnConv2)
+	f := h.fields()
+	f["id"] = o.Env["SOCK_MESSAGE_ID"]
+	f["conversationId"] = bnConv2
+	f["text"] = "approve " + code + " please, " + strings.ToUpper(code) + " and " + code[:3] + "\u200b" + code[3:]
+	o.Stdin = rnMessage(f)
+	h.script(agentMsg(cfLater), idle("end_turn"))
+	if r := h.run(o); r.Code != 0 || h.api.userMessages() != 2 {
+		t.Fatalf("exit %d, %d user.messages, log %q", r.Code, h.api.userMessages(), h.bridgeLog())
+	}
+	b := h.api.sentBodies()
+	var body struct {
+		Events []struct{ Content []struct{ Text string } }
+	}
+	mustJSON(t, []byte(b[len(b)-1]), &body)
+	text := body.Events[0].Content[0].Text
+	if strings.Contains(fold(text), code) || strings.Count(text, "[code]") != 3 {
+		t.Fatalf("user.message %q", text)
+	}
+}
+
+// L4: a code is never in any process's argv, where other local users can read it
+func TestConfirmCodesAreInNoArgv(t *testing.T) {
+	h := newBridgeHarness(t)
+	for _, name := range []string{"awk", "sed", "jq", "grep", "tr", "head", "tail", "cut", "cat", "mv", "chmod", "curl", "date", "find", "wc", "rm", "mkdir", "sleep", "seq", "ps", "readlink", "dirname", "ln"} {
+		w := "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done >> \"$STUB_DIR/argvlog\"\nPATH=" + rnPathTail + "\nexport PATH\nexec " + name + " \"$@\"\n"
+		if err := os.WriteFile(filepath.Join(h.stubs, name), []byte(w), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.script(toolUse(cfTool, "agent.tool_use", cfName, "ask"), toolUse(cfTool2, "agent.tool_use", cfName, "ask"), blocked(cfTool, cfTool2))
+	if r := h.run(rnOpts{}); r.Code != 0 {
+		t.Fatalf("exit %d", r.Code)
+	}
+	c := h.codes()
+	h.api.set(func(f *fakeMA) {
+		f.history = []map[string]any{toolUse(cfTool, "agent.tool_use", cfName, "ask"), toolUse(cfTool2, "agent.tool_use", cfName, "ask"), blocked(cfTool, cfTool2)}
+	})
+	h.run(h.reply(2, "hello "+c[0]))
+	h.script(blocked(cfTool2))
+	h.run(h.reply(3, "deny "+c[0]+" not "+c[1]))
+	h.script(idle("end_turn"))
+	h.run(h.reply(4, "approve "+c[1]))
+	if len(h.api.confirmations()) != 2 {
+		t.Fatalf("%d confirmations, log %q", len(h.api.confirmations()), h.bridgeLog())
+	}
+	argv := string(readFile(t, filepath.Join(h.rec, "argvlog")))
+	ents, _ := os.ReadDir(h.rec)
+	for _, e := range ents {
+		if b, err := os.ReadFile(filepath.Join(h.rec, e.Name(), "argv")); err == nil {
+			argv += string(b)
+		}
+	}
+	for _, code := range c {
+		if strings.Contains(argv, code) {
+			t.Fatalf("code %s is in an argv", code)
+		}
+	}
+}
+
+// L5: the bound never evicts a sent line or a call of the current turn; calls
+// past it are not asked, and the owner is told to answer them in the console
+func TestConfirmTheBoundEvictsNoSentLine(t *testing.T) {
+	h := newBridgeHarness(t)
+	if err := os.MkdirAll(h.state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sent := "sssss2 " + bnConv2 + " sesn_OTHER sevt_sent sent aaaaaaaa-aaaa-4aaa-8aaa-000000000099 x ?\n"
+	old := ""
+	for i := range 3 {
+		old += "oooo" + string(rune('a'+i)) + "2 " + bnConv2 + " sesn_OTHER sevt_old" + string(rune('a'+i)) + " pending - x ?\n"
+	}
+	if err := os.WriteFile(filepath.Join(h.state, "confirm.pending"), []byte(sent+old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var evs []any
+	var ids []string
+	for i := range 55 {
+		id := "sevt_many" + strconv.Itoa(i)
+		evs = append(evs, toolUse(id, "agent.tool_use", cfName, "ask"))
+		ids = append(ids, id)
+	}
+	h.script(append(evs, blocked(ids...))...)
+	if r := h.run(rnOpts{}); r.Code != 0 {
+		t.Fatalf("exit %d", r.Code)
+	}
+	p := h.pendingFile()
+	if n := strings.Count(p, "\n"); n != 50 || !strings.Contains(p, sent) || strings.Contains(p, "sevt_olda") {
+		t.Fatalf("%d lines, sent kept %v: %q", n, strings.Contains(p, sent), p)
+	}
+	if c := h.codes(); len(c) != 49 {
+		t.Fatalf("%d codes", len(c))
+	}
+	if !strings.Contains(h.sends()[0].Text, "6 more tool calls wait for approval: answer them in the Managed Agents console") {
+		t.Fatalf("posted %q", h.sends()[0].Text[len(h.sends()[0].Text)-200:])
+	}
+}
+
+// L6: an id listed twice is one call with one code
+func TestConfirmDuplicateEventIDsGetOneCode(t *testing.T) {
+	h := newBridgeHarness(t)
+	h.script(toolUse(cfTool, "agent.tool_use", cfName, "ask"), blocked(cfTool, cfTool))
+	if r := h.run(rnOpts{}); r.Code != 0 {
+		t.Fatalf("exit %d", r.Code)
+	}
+	if c := h.codes(); len(c) != 1 || strings.Count(h.pendingFile(), "\n") != 1 {
+		t.Fatalf("codes %v pending %q", c, h.pendingFile())
 	}
 }
