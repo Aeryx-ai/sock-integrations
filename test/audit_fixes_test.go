@@ -245,3 +245,18 @@ func TestBridgeSweepsTheHistoryAndStreamCutsOfDeadRuns(t *testing.T) {
 		}
 	}
 }
+
+// L2: CR and the C1 controls go too, and no other character is touched
+func TestBridgeCleansCarriageReturnsAndC1Controls(t *testing.T) {
+	h := newBridgeHarness(t)
+	h.script(agentMsg("safe\rrm -rf ~ \u0085next \u009b31m csi \u0080\u009f 日本語  nbsp é Ā"), idle("end_turn"))
+	r := h.run(rnOpts{})
+	s := h.sends()
+	if r.Code != 0 || len(s) != 1 {
+		t.Fatalf("exit %d, sends %v", r.Code, s)
+	}
+	got := s[0].Text
+	if want := "saferm -rf ~ next 31m csi  日本語  nbsp é Ā"; got != want {
+		t.Fatalf("posted %q, want %q", got, want)
+	}
+}

@@ -198,7 +198,11 @@ awk_cut='
 	}'
 # the text goes on stdin: argv is visible in ps to the same user
 post_one() { printf '%s' "$1" | sock send >/dev/null 2>&1; }
-clean_text() { LC_ALL=C tr -d '\000-\010\013\014\016-\037\177'; }
+# clean_text removes the control characters but newline and tab: C0 (CR among
+# them), DEL, and C1 (U+0080 to U+009F, the UTF-8 pairs C2 80 to C2 9F: C2 only
+# ever leads a character, so no other one is cut)
+c1=$(printf '\302[\200-\237]')
+clean_text() { LC_ALL=C tr -d '\000-\010\013-\037\177' | LC_ALL=C sed "s/$c1//g"; }
 post_text() {
 	mkdir -p "$parts" || exit 1
 	printf '%s\n' "$1" | LC_ALL=C awk -v max=60000 -v dir="$parts" "$awk_cut"'
