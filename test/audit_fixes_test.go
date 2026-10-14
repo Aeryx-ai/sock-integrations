@@ -489,3 +489,39 @@ func TestBridgeTermDuringARetryWaitExitsAtOnceAndCleansUp(t *testing.T) {
 		}
 	}
 }
+
+// sec 3: the stream and the history read one turn the same way: the same text
+// and outcome, the same dedup, and odd ids refused on both
+func TestBridgeStreamAndCatchUpAgree(t *testing.T) {
+	msg := func(id any, text string) map[string]any {
+		return map[string]any{"type": "agent.message", "id": id, "content": []any{map[string]any{"type": "text", "text": text}}}
+	}
+	for _, c := range []struct {
+		name string
+		evs  []map[string]any
+		want string
+	}{
+		{"idle without a stop reason", []map[string]any{msg("m1", "THE ANSWER"), {"type": "session.status_idle", "id": "i1"}}, "THE ANSWER"},
+		{"numeric and newline ids", []map[string]any{msg("m1", "KEPT"), msg(5, "NUMERIC"), msg(5, "NUMERIC"), msg("a\nb", "NEWLINE"), msg("m1", "KEPT"), msg("m2", "ALSO"), idle("end_turn")}, "KEPT\n\nALSO"},
+		{"stop reason not an object", []map[string]any{msg("m1", "X"), {"type": "session.status_idle", "id": "i1", "stop_reason": "end_turn"}}, "X"},
+	} {
+		for _, path := range []string{"stream", "history"} {
+			t.Run(c.name+"/"+path, func(t *testing.T) {
+				h := newBridgeHarness(t)
+				if path == "stream" {
+					var anys []any
+					for _, e := range c.evs {
+						anys = append(anys, e)
+					}
+					h.script(anys...)
+				} else {
+					h.dropThenHistory(c.evs...)
+				}
+				r := h.run(rnOpts{})
+				if s := h.sends(); r.Code != 0 || len(s) != 1 || s[0].Text != c.want {
+					t.Fatalf("exit %d, sends %v, want %q", r.Code, s, c.want)
+				}
+			})
+		}
+	}
+}

@@ -39,7 +39,7 @@ hash16() {
 }
 
 # The prefixes of the temp files, named <prefix>.<pid> in the state directory.
-tmp_prefixes='curl code hdr resp stream streamh body answer parts prompt new newc batch ids page hist histp'
+tmp_prefixes='curl code hdr resp stream streamh body answer parts prompt new newc batch ids page hist histp turn turnn'
 
 # sweep_dead removes the temp files a run killed with SIGKILL (or a lost power)
 # left, the bridge's curl config with its API key among them: those of pids that

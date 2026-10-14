@@ -72,11 +72,11 @@ resp=$state_dir/resp.$$
 stream_file=$state_dir/stream.$$
 stream_hdr=$state_dir/streamh.$$
 body=$state_dir/body.$$
-answer=$state_dir/answer.$$
+turn=$state_dir/turn.$$
+turnn=$state_dir/turnn.$$
 new=$state_dir/new.$$
 newc=$state_dir/newc.$$
 batch=$state_dir/batch.$$
-ids_file=$state_dir/ids.$$
 page=$state_dir/page.$$
 hist=$state_dir/hist.$$
 histp=$state_dir/histp.$$
@@ -87,7 +87,7 @@ curl_pid=
 extra_cleanup() {
 	[ -n "$stream_pid" ] && kill "$stream_pid" 2>/dev/null
 	[ -n "$curl_pid" ] && kill "$curl_pid" 2>/dev/null
-	rm -rf "$cfg" "$codef" "$hdr" "$resp" "$stream_file" "$stream_hdr" "$body" "$answer" "$new" "$newc" "$batch" "$ids_file" "$page" "$hist" "$histp" "$parts"
+	rm -rf "$cfg" "$codef" "$hdr" "$resp" "$stream_file" "$stream_hdr" "$body" "$turn" "$turnn" "$new" "$newc" "$batch" "$page" "$hist" "$histp" "$parts"
 }
 install_traps
 
@@ -106,7 +106,6 @@ deadline=$(($(now) + timeout))
 		'header = "content-type: application/json"' 'user-agent = "sock-bridge"'
 } >"$cfg" || exit 1
 unset key
-: >"$ids_file"
 
 base="$api/v1/sessions/$session/events"
 
@@ -320,12 +319,31 @@ mark_sent() {
 	} 2>/dev/null
 }
 
-text_of='[.content[]? | select(.type == "text") | .text] | join("")'
-# once_per_id keeps the first event of each id, in order, and every event without one
+# turn_jq is the one reading of a turn's events, for the stream and the history
+# alike. step($e; $tag) folds an event into the state {started, ids, texts,
+# reason}: a user.message whose second line is this message's tag (re)starts the
+# turn, so the last one counts; before it, and after the turn's end, nothing
+# counts. agent.message text is kept in order, once per id. An event whose id is
+# not a string of 1 to 256 characters without a control character (a number,
+# one holding a newline) is refused; one with no id is kept. The end is the
+# first session.status_idle, with its stop reason (end_turn when it gives none),
+# or session.error.
 # shellcheck disable=SC2016 # jq's variables, not the shell's
-once_per_id='reduce .[] as $e ({seen: {}, out: []};
-    ($e.id | if type == "string" then . else null end) as $k
-    | if $k != null and .seen[$k] then . else .out += [$e] | if $k != null then .seen[$k] = true else . end end) | .out'
+turn_jq='
+def texts: [.content[]? | objects | select(.type == "text") | .text | strings];
+def okid: if .id == null then "" elif (.id | type) == "string" and (.id | test("^[^\u0000-\u001f\u007f]{1,256}$")) then .id else null end;
+def step($e; $tag):
+	if $e.type == "user.message" and (($e | texts | join("") | split("\n"))[1] == $tag) then {started: true, ids: {}, texts: [], reason: null}
+	elif (.started | not) or .reason != null then .
+	elif $e.type == "agent.message" then
+		($e | okid) as $k
+		| if $k == null or ($k != "" and .ids[$k]) then .
+		  else .texts += [$e | texts | join("")] | if $k != "" then .ids[$k] = true else . end end
+	elif $e.type == "session.status_idle" then .reason = ((($e.stop_reason | objects | .type) // "end_turn") | tostring)
+	elif $e.type == "session.error" then .reason = "error"
+	else . end;
+'
+tag=$(open_tag | tr -d '\n')
 
 # fetch_history leaves every event of the session in $hist as {data: [...]},
 # following next_page (events are in processed_at order, oldest first)
@@ -357,18 +375,9 @@ fetch_history() {
 # and, when done, reason and text.
 catch_up() {
 	fetch_history
-	# this message's own prompt: its second line is the tag, whole. A tag quoted
-	# inside some message's text is on a later line and does not count.
-	verdict=$(jq -c --arg tag "$(open_tag | tr -d '\n')" "
-		.data as \$d
-		| ([range(0; \$d | length) | select(\$d[.].type == \"user.message\" and (((\$d[.].content // []) | map(.text // \"\") | join(\"\") | split(\"\n\"))[1] == \$tag))] | last) as \$i
-		| if \$i == null then {found: false}
-		  else (\$d[\$i + 1:]) as \$after
-		  | ([range(0; \$after | length) | select(\$after[.].type == \"session.status_idle\" or \$after[.].type == \"session.error\")] | first) as \$j
-		  | if \$j == null then {found: true, done: false}
-		    else {found: true, done: true,
-		      reason: (if \$after[\$j].type == \"session.error\" then \"error\" else \$after[\$j].stop_reason.type end),
-		      text: (\$after[:\$j] | map(select(.type == \"agent.message\")) | $once_per_id | map($text_of) | join(\"\n\n\"))} end end" "$hist" 2>/dev/null) || verdict='{"found":false}'
+	verdict=$(jq -c --arg tag "$tag" "$turn_jq"'
+		reduce (.data[]? | objects) as $e ({started: false}; step($e; $tag))
+		| {found: (.started == true), done: (.reason != null), reason, text: ((.texts // []) | join("\n\n"))}' "$hist" 2>/dev/null) || verdict='{"found":false}'
 	found=$(printf '%s' "$verdict" | jq -r '.found // false')
 	finished=$(printf '%s' "$verdict" | jq -r '.done // false')
 }
@@ -429,8 +438,9 @@ mark_sent || {
 api POST "$base?beta=true" "$body"
 
 # Follow the stream. Only whole lines count: curl appends as bytes arrive, and
-# a line cut in the middle is read again once its newline is there.
-: >"$answer"
+# a line cut in the middle is read again once its newline is there. The turn's
+# state is turn_jq's, carried from poll to poll in $turn.
+printf '%s\n' '{"started": true}' >"$turn"
 off=0
 reason=
 while [ -z "$reason" ]; do
@@ -451,27 +461,10 @@ while [ -z "$reason" ]; do
 		if [ "$used" -gt 0 ]; then
 			off=$((off + used))
 			grep '^data:' "$new" | sed 's/^data: *//' >"$batch"
-			summary=$(jq -Rcs --rawfile seen "$ids_file" '
-				($seen | split("\n")) as $seen
-				| [split("\n")[] | select(length > 0) | fromjson?]
-				| reduce .[] as $e ({texts: [], ids: [], reason: null};
-					if .reason != null then .
-					elif $e.type == "agent.message" then
-						(($e.id // "") as $i
-						| if $i != "" and ((($seen | index($i)) != null) or ((.ids | index($i)) != null)) then .
-						  else .ids += [$i] | .texts += [[$e.content[]? | select(.type == "text") | .text] | join("")] end)
-					elif $e.type == "session.status_idle" then .reason = ($e.stop_reason.type // "end_turn")
-					elif $e.type == "session.error" then .reason = "error"
-					else . end)' "$batch" 2>/dev/null) || summary=
-			if [ -n "$summary" ]; then
-				printf '%s' "$summary" | jq -r '.ids[]' >>"$ids_file" 2>/dev/null
-				chunk=$(printf '%s' "$summary" | jq -r '.texts | join("\n\n")' 2>/dev/null)
-				if [ -n "$chunk" ]; then
-					[ -s "$answer" ] && printf '\n\n' >>"$answer"
-					printf '%s' "$chunk" >>"$answer"
-				fi
-				reason=$(printf '%s' "$summary" | jq -r '.reason // empty' 2>/dev/null)
-			fi
+			jq -Rcs --arg tag "$tag" --slurpfile st "$turn" "$turn_jq"'
+				reduce (split("\n")[] | select(length > 0) | fromjson? | objects) as $e ($st[0]; step($e; $tag))' "$batch" >"$turnn" 2>/dev/null &&
+				mv "$turnn" "$turn"
+			reason=$(jq -r '.reason // empty' "$turn" 2>/dev/null)
 			[ -n "$reason" ] && break
 		fi
 	fi
@@ -485,4 +478,4 @@ while [ -z "$reason" ]; do
 	fi
 	nap 0.2
 done
-finish "$reason" "$(cat "$answer")"
+finish "$reason" "$(jq -r '(.texts // []) | join("\n\n")' "$turn")"
