@@ -154,7 +154,7 @@ func TestConfirmAsksWithACodeAndWithholdsTheInput(t *testing.T) {
 	if err != nil || st.Mode().Perm() != 0o600 {
 		t.Fatalf("confirm.pending: %v %v", st, err)
 	}
-	if f := h.pendingFile(); f != code+" "+rnConvID+" "+bnSession+" "+cfTool+" pending - "+cfName+" ?\n" {
+	if f := h.pendingFile(); !regexp.MustCompile(`\A` + code + " " + rnConvID + " " + bnSession + " " + cfTool + " pending - " + cfName + ` \? [0-9]{10}\n\z`).MatchString(f) {
 		t.Fatalf("confirm.pending %q", f)
 	}
 	if _, err := os.Stat(p + ".tmp"); err == nil {
@@ -733,7 +733,8 @@ func TestConfirmDuplicateEventIDsGetOneCode(t *testing.T) {
 }
 
 // writeLines puts n lines of another conversation and session in
-// confirm.pending, in state st, sent at that time when st is sent
+// confirm.pending, in state st, at that time (a pending line with at 0 has
+// none, as one written before lines had a time)
 func (h *bnHarness) writeLines(n int, st string, at int64) string {
 	h.t.Helper()
 	if err := os.MkdirAll(h.state, 0o700); err != nil {
@@ -745,7 +746,11 @@ func (h *bnHarness) writeLines(n int, st string, at int64) string {
 		if st == "sent" {
 			fmt.Fprintf(&b, "%s %s sesn_OTHER sevt_o%d sent aaaaaaaa-aaaa-4aaa-8aaa-%012d x ? %d\n", code, bnConv2, i, i, at)
 		} else {
-			fmt.Fprintf(&b, "%s %s sesn_OTHER sevt_o%d pending - x ?\n", code, bnConv2, i)
+			fmt.Fprintf(&b, "%s %s sesn_OTHER sevt_o%d pending - x ?", code, bnConv2, i)
+			if at != 0 {
+				fmt.Fprintf(&b, " %d", at)
+			}
+			b.WriteString("\n")
 		}
 	}
 	if err := os.WriteFile(filepath.Join(h.state, "confirm.pending"), []byte(b.String()), 0o600); err != nil {
@@ -789,7 +794,7 @@ func TestConfirmATurnAsksAtMostTwenty(t *testing.T) {
 // nothing and says so (the reviewer's input: 50 lines, then 55 calls)
 func TestConfirmATurnNeverEvictsAnotherSession(t *testing.T) {
 	h := newBridgeHarness(t)
-	old := h.writeLines(50, "pending", 0)
+	old := h.writeLines(50, "pending", time.Now().Unix())
 	h.manyCalls(55)
 	if r := h.run(rnOpts{}); r.Code != 0 {
 		t.Fatalf("exit %d", r.Code)
@@ -799,7 +804,7 @@ func TestConfirmATurnNeverEvictsAnotherSession(t *testing.T) {
 	}
 	// with room for a few, only those are asked, and nothing is evicted
 	g := newBridgeHarnessNoParallel(t)
-	old = g.writeLines(47, "pending", 0)
+	old = g.writeLines(47, "pending", time.Now().Unix())
 	g.manyCalls(5)
 	if r := g.run(rnOpts{}); r.Code != 0 {
 		t.Fatalf("exit %d", r.Code)
@@ -917,5 +922,35 @@ func TestConfirmDenyReasonKeepsJoinersAndMarks(t *testing.T) {
 	}
 	if m, _ := h.api.confirmations()[0]["deny_message"].(string); m != reason {
 		t.Fatalf("deny_message %q, want %q", m, reason)
+	}
+}
+
+// A pending line older than 7 days is dropped, and its code answers nothing
+func TestConfirmAnOldPendingLineIsDropped(t *testing.T) {
+	h := newBridgeHarness(t)
+	h.writeLines(50, "pending", time.Now().Unix()-8*24*3600)
+	code := h.askOnce()
+	if p := h.pendingFile(); strings.Count(p, "\n") != 1 || !strings.HasPrefix(p, code+" ") {
+		t.Fatalf("pending %q", p)
+	}
+	o := h.inConv(2, bnConv2)
+	f := h.fields()
+	f["id"] = o.Env["SOCK_MESSAGE_ID"]
+	f["conversationId"] = bnConv2
+	f["text"] = "approve aaq222"
+	o.Stdin = rnMessage(f)
+	if r := h.run(o); r.Code != 0 || h.sends()[len(h.sends())-1].Text != cfNoCode {
+		t.Fatalf("exit %d sends %v", r.Code, h.sends())
+	}
+}
+
+// A line with no time, written before lines had one, counts as made now
+func TestConfirmALineWithNoTimeIsKept(t *testing.T) {
+	h := newBridgeHarness(t)
+	old := h.writeLines(3, "pending", 0)
+	h.askOnce()
+	p := h.pendingFile()
+	if strings.Count(p, "\n") != 4 || !strings.Contains(p, "sevt_o0 pending - x ? ") || strings.Contains(p, old) {
+		t.Fatalf("pending %q", p)
 	}
 }
