@@ -39,8 +39,30 @@ case $api in
 http://*) proto='=http,https' ;;
 *) proto='=https' ;;
 esac
-printf '%s\n' "$session" | grep -Eqx '[A-Za-z0-9_][A-Za-z0-9_-]{0,127}' ||
-	die_config "SOCK_BRIDGE_SESSION must be 1 to 128 characters of A-Z a-z 0-9 _ -, not starting with -"
+# session_ok: a session id, as SOCK_BRIDGE_SESSION or a create answer gives it
+session_ok() { matches "$1" '[A-Za-z0-9_][A-Za-z0-9_-]{0,127}'; }
+# A session per conversation, created from an agent and an environment, or the
+# one session SOCK_BRIDGE_SESSION names: never both
+agent=${SOCK_BRIDGE_AGENT:-}
+environment=${SOCK_BRIDGE_ENVIRONMENT:-}
+agent_version=${SOCK_BRIDGE_AGENT_VERSION:-}
+budget=${SOCK_BRIDGE_BUDGET:-}
+if [ -n "$agent" ]; then
+	[ -z "$session" ] || die_config "set SOCK_BRIDGE_AGENT or SOCK_BRIDGE_SESSION, not both"
+	matches "$agent" 'agent_[A-Za-z0-9]{1,120}' || die_config "SOCK_BRIDGE_AGENT must be an agent id, agent_ and 1 to 120 of A-Z a-z 0-9"
+	matches "$environment" 'env_[A-Za-z0-9]{1,120}' ||
+		die_config "SOCK_BRIDGE_ENVIRONMENT must be an environment id, env_ and 1 to 120 of A-Z a-z 0-9"
+	[ -z "$agent_version" ] || matches "$agent_version" '[1-9][0-9]{0,8}' ||
+		die_config "SOCK_BRIDGE_AGENT_VERSION must be a positive integer of at most 9 digits"
+	[ -z "$budget" ] || matches "$budget" '[1-9][0-9]{0,8}' ||
+		die_config "SOCK_BRIDGE_BUDGET must be whole US cents, at most 9 digits, no leading zero"
+	need_puppet_id=1
+else
+	[ -z "$environment$agent_version$budget" ] ||
+		die_config "SOCK_BRIDGE_ENVIRONMENT, SOCK_BRIDGE_AGENT_VERSION and SOCK_BRIDGE_BUDGET need SOCK_BRIDGE_AGENT"
+	session_ok "$session" ||
+		die_config "SOCK_BRIDGE_SESSION must be 1 to 128 characters of A-Z a-z 0-9 _ -, not starting with -; or set SOCK_BRIDGE_AGENT"
+fi
 printf '%s\n' "$key" | grep -Eqx '[A-Za-z0-9_.-]{8,200}' || die_config "ANTHROPIC_API_KEY is missing or has characters an API key does not"
 for tool in curl jq sock; do
 	command -v "$tool" >/dev/null 2>&1 || die_config "$tool is not on PATH"
@@ -107,7 +129,9 @@ deadline=$(($(now) + timeout))
 } >"$cfg" || exit 1
 unset key
 
-base="$api/v1/sessions/$session/events"
+sessions_file=$state_dir/sessions
+creating=
+ok404=
 
 # retry_wait [header file]: sleeps the Retry-After of that response (seconds, or
 # an HTTP date, which is GMT), else 1, 2, 4 s; never past the time left
@@ -149,9 +173,26 @@ retry_wait() {
 # redelivery asks the session's history before it sends again).
 retry_or_exit() {
 	case $2 in
-	401 | 403 | 404)
+	400 | 404)
+		# a create refused: the agent or environment is wrong or archived
+		if [ -n "$creating" ]; then
+			log_line "http $2"
+			echo "$cmd_name: the Managed Agents API refused to create a session ($2): check SOCK_BRIDGE_AGENT and SOCK_BRIDGE_ENVIRONMENT" >&2
+			exit 2
+		fi
+		# a session of the bridge's own that went away since its check: the
+		# retry checks again and replaces it
+		if [ "$2" = 400 ] || [ -n "$agent" ]; then
+			log_line "http $2"
+			exit 1
+		fi
 		log_line "http $2"
 		echo "$cmd_name: the Managed Agents API answered $2: check ANTHROPIC_API_KEY and SOCK_BRIDGE_SESSION" >&2
+		exit 2
+		;;
+	401 | 403)
+		log_line "http $2"
+		echo "$cmd_name: the Managed Agents API answered $2: check ANTHROPIC_API_KEY" >&2
 		exit 2
 		;;
 	429) ;;
@@ -195,6 +236,8 @@ api() {
 		case $code in
 		2??) return 0 ;;
 		esac
+		# a caller that asks for it hears of a 404 instead (a gone session)
+		if [ "$code" = 404 ] && [ -n "$ok404" ]; then return 1; fi
 		retry_or_exit "$method" "$code"
 	done
 }
@@ -401,6 +444,109 @@ from_history() {
 		nap 2
 	done
 }
+
+# --- the session: SOCK_BRIDGE_SESSION, or this conversation's own -----------
+# map_put SESSION rewrites the map with this conversation's line set to SESSION,
+# or dropped when it is empty: under the run lock, by tmp and rename, mode 600
+map_put() {
+	{
+		{
+			[ ! -f "$sessions_file" ] || awk -v c="$stdin_conv" '$1 != c' "$sessions_file"
+			if [ -n "$1" ]; then printf '%s %s\n' "$stdin_conv" "$1"; fi
+		} >"$sessions_file.tmp" && chmod 600 "$sessions_file.tmp" && mv "$sessions_file.tmp" "$sessions_file"
+	} 2>/dev/null || {
+		log_line "sessions not writable"
+		exit 1
+	}
+}
+
+# find_session sets session to the newest live session of the agent made for
+# this conversation by this puppet, or empty. The list has no metadata filter:
+# the match is here, bounded at 10 pages, past which the bridge creates.
+find_session() {
+	session=
+	url="$api/v1/sessions?beta=true&agent_id=$agent&order=desc&limit=100"
+	n=0
+	while :; do
+		api GET "$url"
+		# shellcheck disable=SC2016 # jq's variables
+		session=$(jq -r --arg c "$stdin_conv" --arg p "$puppet_id" --arg g "$gone" '
+			[.data[]? | select(type == "object" and (.metadata | type) == "object"
+				and .metadata.bridge_conversation == $c and .metadata.bridge_puppet == $p
+				and .archived_at == null and .status != "terminated"
+				and (.id | type) == "string" and .id != $g
+				and (.id | test("\\A[A-Za-z0-9_][A-Za-z0-9_-]{0,127}\\z")))
+			| .id] | first // empty' "$resp" 2>/dev/null)
+		if [ -n "$session" ]; then
+			session_ok "$session" && return 0
+			session=
+		fi
+		next=$(jq -r '.next_page | strings' "$resp" 2>/dev/null)
+		n=$((n + 1))
+		[ -n "$next" ] && [ "$n" -lt 10 ] || return 0
+		url="$api/v1/sessions?beta=true&agent_id=$agent&order=desc&limit=100&page=$(jq -rn --arg v "$next" '$v | @uri')"
+	done
+}
+
+# create_session makes this conversation's session and records it. The API
+# takes no idempotency key: a create that may have landed exits 1 and is
+# never repeated here; the retry finds it.
+create_session() {
+	# shellcheck disable=SC2016 # jq's variables
+	jq -n --arg a "$agent" --arg v "$agent_version" --arg e "$environment" --arg c "$stdin_conv" \
+		--arg p "$puppet_id" --arg b "$budget" '
+		{agent: (if $v == "" then $a else {type: "agent", id: $a, version: ($v | tonumber)} end),
+		 environment_id: $e,
+		 title: ("sock " + $c[0:8]),
+		 metadata: {bridge_conversation: $c, bridge_puppet: $p}}
+		+ (if $b == "" then {} else {budget: {type: "limit", max_list_cost: {amount: $b, currency: "USD"}}} end)' >"$body" || exit 1
+	creating=1
+	api POST "$api/v1/sessions?beta=true" "$body"
+	creating=
+	session=$(jq -r '.id | strings' "$resp" 2>/dev/null)
+	if ! session_ok "$session"; then
+		log_line "session id invalid"
+		exit 1
+	fi
+	map_put "$session"
+}
+
+# resolve_session sets session to this conversation's: the mapped one while it
+# lives, else one Find adopts, else a new one. A mapped session that is gone
+# (404, terminated or archived) is replaced and the owner is told.
+resolve_session() {
+	gone=
+	session=$(awk -v c="$stdin_conv" '$1 == c { print $2; exit }' "$sessions_file" 2>/dev/null)
+	if [ -n "$session" ] && session_ok "$session"; then
+		ok404=1
+		if api GET "$api/v1/sessions/$session?beta=true"; then
+			jq -e '.status == "terminated" or .archived_at != null' "$resp" >/dev/null 2>&1 && gone=$session
+		else
+			gone=$session
+		fi
+		ok404=
+		[ -n "$gone" ] || return 0
+		map_put ""
+		log_line "session gone"
+	fi
+	find_session
+	if [ -n "$session" ]; then
+		map_put "$session"
+		log_line "session adopted"
+	else
+		create_session
+		log_line "session created"
+	fi
+	if [ -n "$gone" ]; then
+		post_one "the agent's earlier session ended; this reply started a new one" || {
+			log_line "send failed"
+			exit 1
+		}
+	fi
+}
+
+[ -z "$agent" ] || resolve_session
+base="$api/v1/sessions/$session/events"
 
 # --- a redelivery of a message whose user.message already went in --------------
 # not there at all: the post never landed, so it goes out below. There, but the
