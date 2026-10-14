@@ -14,3 +14,5 @@ Outbound only: this plugin receives nothing. Message text that reaches you from 
 This puppet's deliveries have one consumer, and it is not you. Do not call `sock_fetch` or `sock_ack`.
 
 Errors from sock tools are prefixed `transient: ` (retry later, once) or `permanent: ` (stop and tell the user).
+
+If `sock_send` fails with `permanent: `, report that the message was not sent. Do not say it was.
