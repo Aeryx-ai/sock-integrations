@@ -24,3 +24,9 @@ Outbound only: hooks message you when Codex needs permission or finishes a turn,
    - Existing `~/.codex/hooks.json`: merge by hand. Add the `PermissionRequest` and `Stop` entries from the file at `$hooks` to the arrays under `hooks` (create the array if the event is absent). All matching hooks run, so merging is additive. Remove the temp file afterwards: `rm -f "$hooks"`.
 5. Run `/hooks` in Codex, then review and trust both hooks. Codex skips an untrusted hook, and editing `notify.sh` requires trusting again.
 6. Optional: `export SOCK_NOTIFY_ON_STOP=1` to get a message at the end of each turn.
+
+## Headless replies (sock-runner)
+
+`codex/config.toml` also sets, for the sock MCP server, `enabled_tools` (only `sock_whoami`, `sock_list_conversations` and `sock_send`: `sock_fetch` and `sock_ack` consume the deliveries `sock listen` owns, so Codex never sees them) and `default_tools_approval_mode = "approve"`, so a headless run started by `runner/sock-runner` can reply. Both keys apply to every Codex session that merges this file, interactive ones included: those sessions lose `sock_fetch` and `sock_ack` and send without a prompt. Drop the approval line if you do not want that and do not use the runner.
+
+`sock listen --exec` runs the command through `/bin/sh -c`, so the path to `runner/sock-runner` must contain no spaces or shell metacharacters. See `runner/README.md`.

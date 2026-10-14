@@ -42,9 +42,9 @@ printf '%s\n' "$session" | grep -Eqx '[A-Za-z0-9_][A-Za-z0-9._-]{0,127}' ||
 [ -n "$workdir" ] && [ -d "$workdir" ] || die_config "SOCK_RUNNER_WORKDIR must be an existing directory"
 # exactly the modes each agent has: nothing else reaches its argv
 case "$agent:$mode" in
-claude:acceptEdits | claude:auto | claude:default | claude:dontAsk | claude:manual | claude:plan) ;;
+claude:acceptEdits | claude:default | claude:dontAsk | claude:manual | claude:plan) ;;
 codex:read-only | codex:workspace-write) ;;
-claude:bypassPermissions | codex:danger-full-access)
+claude:auto | claude:bypassPermissions | codex:danger-full-access)
 	[ "${SOCK_RUNNER_ALLOW_BYPASS:-}" = 1 ] || die_config "$mode needs SOCK_RUNNER_ALLOW_BYPASS=1"
 	;;
 *) die_config "SOCK_RUNNER_PERMISSION must be one of the $agent modes, got '$mode'" ;;
@@ -154,16 +154,27 @@ if [ -z "$owner" ]; then
 	fi
 	owner=$(printf '%s' "$me" | jq -r 'if (.account.puppet.ownerId | type) == "string" then .account.puppet.ownerId else empty end' 2>/dev/null)
 	if ! is_uuid "$owner"; then
-		# a human session token, or anything that is not a puppet: every message
-		# is dropped, which keeps the stream moving; the log and stderr say why
-		echo "sock-runner: SOCK_TOKEN is not a puppet token, so no message can come from its owner" >&2
-		log_line "dropped: not a puppet token"
-		exit 0
+		# a human session token, or anything that is not a puppet: acknowledging
+		# would consume that account's own deliveries and lose them, so this is a
+		# configuration error: exit 2, nothing acknowledged
+		echo "sock-runner: SOCK_TOKEN is not a puppet token (sock whoami shows no puppet); nothing was acknowledged" >&2
+		log_line "not a puppet token"
+		exit 2
 	fi
 	printf '%s %s\n' "$(date +%s)" "$owner" >"$owner_cache" 2>/dev/null || true
 fi
 if [ "$sender" != "$owner" ]; then
 	log_line "dropped: sender $sender"
+	exit 0
+fi
+
+# --- redelivery, checked before the lock wait so a repeat does not queue behind
+# a running turn, and again under the lock, where a runner we waited for may
+# have just finished the same id ---------------------------------------------
+done_file=$state/done.ids
+is_done() { [ -f "$done_file" ] && grep -qxF "$stdin_id" "$done_file" 2>/dev/null; }
+if is_done; then
+	log_line "duplicate"
 	exit 0
 fi
 
@@ -174,7 +185,8 @@ fi
 # has) is replaced under a second guard so two runners cannot both break it.
 # A bare pid target (an older runner's) counts as live while the pid exists.
 now() { date +%s; }
-start_of() { ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //'; }
+# the start time is compared as text: pin the locale and zone it is printed in
+start_of() { LC_ALL=C TZ=UTC ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //'; }
 mytoken="$$:$(start_of "$$")"
 lock_is_stale() {
 	holder=$1
@@ -215,9 +227,8 @@ while :; do
 	sleep 0.2
 done
 
-# --- redelivery: an id that already finished is acknowledged, not rerun -------
-done_file=$state/done.ids
-if [ -f "$done_file" ] && grep -qx "$stdin_id" "$done_file" 2>/dev/null; then
+# --- redelivery again, now that the lock is ours -----------------------------
+if is_done; then
 	log_line "duplicate"
 	exit 0
 fi
@@ -241,8 +252,11 @@ prompt=$(mktemp "$state/prompt.XXXXXX") || {
 # without these the reply path is denied under every mode but bypassPermissions.
 # A plugin's MCP tool is mcp__plugin_<plugin>_<server>__<tool>, characters
 # outside A-Za-z0-9_- replaced with _ (code.claude.com/docs/en/mcp, "Plugin MCP
-# tool names"): plugin sock, server sock. test/runner_names_test.go guards it.
+# tool names"): plugin sock, server sock. test/runner_fixes_test.go guards it.
 claude_tools=mcp__plugin_sock_sock__sock_whoami,mcp__plugin_sock_sock__sock_list_conversations,mcp__plugin_sock_sock__sock_send
+# the other two sock tools consume the deliveries `sock listen` owns (spec rule
+# 2): denied even under bypassPermissions
+claude_denied=mcp__plugin_sock_sock__sock_fetch,mcp__plugin_sock_sock__sock_ack
 
 # --- the agent, in its own process group, with a timeout ---------------------
 # Listen variables and the runner's own settings never reach the agent. For
@@ -262,7 +276,7 @@ cd "$workdir" || {
 set -m
 # shellcheck disable=SC2086 # $scrub is a list of -u NAME pairs
 case $agent in
-claude) env $scrub claude -p --resume "$session" --permission-mode "$mode" --allowedTools "$claude_tools" --permission-prompts none <"$prompt" >/dev/null 2>&1 & ;;
+claude) env $scrub claude -p --resume "$session" --permission-mode "$mode" --allowedTools "$claude_tools" --disallowedTools "$claude_denied" --permission-prompts none <"$prompt" >/dev/null 2>&1 & ;;
 codex) env $scrub codex exec --sandbox "$mode" resume "$session" - <"$prompt" >/dev/null 2>&1 & ;;
 esac
 agent_pgid=$!

@@ -21,4 +21,5 @@ sock listen --exec /path/to/runner/sock-runner
 - `sock listen --exec` runs the command through `/bin/sh -c`: the runner's path must have no spaces or shell metacharacters.
 - One `SOCK_RUNNER_STATE` per runner. Runners sharing a directory share one lock, one ledger of finished message ids and one log.
 - The agent's own session transcript keeps the owner's text for as long as the transcript lives; the runner's prompt file is private and removed on exit.
-- `claude` runs with `--allowedTools` for the three sock tools and `--permission-prompts none`, so `sock_send` works under `plan`, `default` and the other modes; `codex` relies on `default_tools_approval_mode = "approve"` in `codex/config.toml`. Neither is confirmed against a live model yet.
+- `claude` runs with `--allowedTools` for the three sending sock tools, `--disallowedTools` for `sock_fetch` and `sock_ack`, and `--permission-prompts none`, so `sock_send` works under `plan`, `default` and the other modes; `codex` relies on `enabled_tools` and `default_tools_approval_mode = "approve"` in `codex/config.toml`, which also apply to interactive Codex sessions that merge it. Neither is confirmed against a live model yet.
+- `auto` and `bypassPermissions` (claude) and `danger-full-access` (codex) need `SOCK_RUNNER_ALLOW_BYPASS=1`. A `SOCK_TOKEN` that is not a puppet's exits 2 and acknowledges nothing.

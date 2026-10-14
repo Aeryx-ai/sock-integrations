@@ -17,6 +17,9 @@ const rnClaudeTools = "mcp__plugin_sock_sock__sock_whoami,mcp__plugin_sock_sock_
 
 // withID gives a run its own message id (a UUID), in the environment and on
 // stdin, so tests that run several messages are not taken for redeliveries.
+// rnClaudeDenied are the two sock tools that consume `sock listen`'s deliveries.
+const rnClaudeDenied = "mcp__plugin_sock_sock__sock_fetch,mcp__plugin_sock_sock__sock_ack"
+
 func (h *rnHarness) withID(n int, o rnOpts) rnOpts {
 	id := "aaaaaaaa-aaaa-4aaa-8aaa-" + strings.Repeat("0", 11) + strconv.Itoa(n%10)
 	if o.Env == nil {
@@ -59,9 +62,16 @@ func TestRunnerAllowedToolsFollowThePluginNames(t *testing.T) {
 	for k := range servers.MCPServers {
 		server = k
 	}
-	var want []string
+	name := func(tool string) string { return "mcp__plugin_" + norm(plug.Name) + "_" + norm(server) + "__" + tool }
+	var want, denied []string
 	for _, tool := range []string{"sock_whoami", "sock_list_conversations", "sock_send"} {
-		want = append(want, "mcp__plugin_"+norm(plug.Name)+"_"+norm(server)+"__"+tool)
+		want = append(want, name(tool))
+	}
+	for _, tool := range []string{"sock_fetch", "sock_ack"} {
+		denied = append(denied, name(tool))
+	}
+	if got := strings.Join(denied, ","); got != rnClaudeDenied {
+		t.Fatalf("plugin %q server %q give denied %s; rnClaudeDenied says %s", plug.Name, server, got, rnClaudeDenied)
 	}
 	if got := strings.Join(want, ","); got != rnClaudeTools {
 		t.Fatalf("plugin %q server %q give %s; rnClaudeTools and runner/sock-runner say %s", plug.Name, server, got, rnClaudeTools)
@@ -70,12 +80,47 @@ func TestRunnerAllowedToolsFollowThePluginNames(t *testing.T) {
 	if !strings.Contains(string(runner), "claude_tools="+rnClaudeTools+"\n") {
 		t.Fatalf("runner/sock-runner does not set claude_tools=%s", rnClaudeTools)
 	}
+	if !strings.Contains(string(runner), "claude_denied="+rnClaudeDenied+"\n") {
+		t.Fatalf("runner/sock-runner does not set claude_denied=%s", rnClaudeDenied)
+	}
 }
 
-func TestRunnerCodexConfigAutoApprovesTheSockTools(t *testing.T) {
+func TestRunnerCodexConfigApprovesOnlyTheSendingTools(t *testing.T) {
 	cfg := string(readFile(t, filepath.Join(root, "codex", "config.toml")))
 	if !strings.Contains(cfg, `default_tools_approval_mode = "approve"`) {
 		t.Fatal("codex/config.toml does not set default_tools_approval_mode for the sock server")
+	}
+	// fetch and ack consume the deliveries `sock listen` owns: never exposed
+	if !strings.Contains(cfg, `enabled_tools = ["sock_whoami", "sock_list_conversations", "sock_send"]`) {
+		t.Fatal("codex/config.toml does not restrict the sock server to its sending tools")
+	}
+}
+
+func TestRunnerStartTimeIsComparedUnderAPinnedLocaleAndZone(t *testing.T) {
+	runner := string(readFile(t, filepath.Join(root, "runner", "sock-runner")))
+	if !strings.Contains(runner, "LC_ALL=C TZ=UTC ps -o lstart=") {
+		t.Fatal("start_of does not pin LC_ALL and TZ for ps")
+	}
+}
+
+// a repeat of a finished message is acknowledged at once, not queued behind a
+// run that holds the lock
+func TestRunnerDuplicateDoesNotWaitOnTheLock(t *testing.T) {
+	h := newRunnerHarness(t)
+	if err := os.MkdirAll(h.state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(h.state, "done.ids"), []byte(rnMsgID+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.symlinkLock(rnLivePid(t))
+	r := h.run(rnOpts{Env: map[string]string{"SOCK_RUNNER_TIMEOUT": "30"}})
+	h.wantNoRun(r, 0)
+	if r.Elapsed > 5*time.Second {
+		t.Fatalf("waited %v on the lock for a message that had finished", r.Elapsed)
+	}
+	if !strings.Contains(h.log(), "duplicate") {
+		t.Fatalf("log %q", h.log())
 	}
 }
 
@@ -125,7 +170,7 @@ func TestRunnerLedgerKeepsTheLastTwoHundred(t *testing.T) {
 
 func TestRunnerPermissionIsAnAllowlist(t *testing.T) {
 	for _, c := range []struct{ agent, mode string }{
-		{"claude", "plan; id"}, {"claude", "--dangerously-skip-permissions"}, {"claude", "codex"}, {"claude", "read-only"},
+		{"claude", "auto"}, {"claude", "plan; id"}, {"claude", "--dangerously-skip-permissions"}, {"claude", "codex"}, {"claude", "read-only"},
 		{"codex", "plan"}, {"codex", "--yolo"}, {"codex", "workspace-write\nx"},
 	} {
 		t.Run(c.agent+" "+c.mode, func(t *testing.T) {
@@ -211,10 +256,11 @@ func TestRunnerCachesTheOwnerAndLogsTheDroppedSender(t *testing.T) {
 	}
 }
 
-func TestRunnerHumanTokenIsDroppedAndSaysSo(t *testing.T) {
+// acknowledging would consume the human account's own deliveries and lose them
+func TestRunnerHumanTokenIsAConfigurationErrorAndAcksNothing(t *testing.T) {
 	h := newRunnerHarness(t)
 	r := h.run(rnOpts{Env: map[string]string{"STUB_WHOAMI": "nopuppet"}})
-	h.wantNoRun(r, 0)
+	h.wantNoRun(r, 2)
 	if !strings.Contains(r.Stderr, "not a puppet token") || !strings.Contains(h.log(), "not a puppet token") {
 		t.Fatalf("stderr %q log %q", r.Stderr, h.log())
 	}

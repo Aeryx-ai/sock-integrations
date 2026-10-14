@@ -136,7 +136,7 @@ func TestRunnerClaudeArgv(t *testing.T) {
 	h := newRunnerHarness(t)
 	h.run(rnOpts{})
 	runs := h.runs()
-	want := []string{"-p", "--resume", rnSess, "--permission-mode", "plan", "--allowedTools", rnClaudeTools, "--permission-prompts", "none"}
+	want := []string{"-p", "--resume", rnSess, "--permission-mode", "plan", "--allowedTools", rnClaudeTools, "--disallowedTools", rnClaudeDenied, "--permission-prompts", "none"}
 	if len(runs) != 1 || !slices.Equal(runs[0].Argv, want) {
 		t.Fatalf("%+v", runs)
 	}
@@ -252,9 +252,6 @@ func TestRunnerDrops(t *testing.T) {
 		{"missing id", func(f map[string]any) rnOpts {
 			delete(f, "id")
 			return rnOpts{Stdin: rnMessage(f)}
-		}, "dropped"},
-		{"whoami shows no puppet", func(f map[string]any) rnOpts {
-			return rnOpts{Env: map[string]string{"STUB_WHOAMI": "nopuppet"}, Stdin: rnMessage(f)}
 		}, "dropped"},
 	}
 	for _, c := range cases {
@@ -438,7 +435,7 @@ func TestRunnerBadConfigExits2(t *testing.T) {
 }
 
 func TestRunnerBypassNeedsOptIn(t *testing.T) {
-	cases := []struct{ agent, mode string }{{"claude", "bypassPermissions"}, {"codex", "danger-full-access"}}
+	cases := []struct{ agent, mode string }{{"claude", "bypassPermissions"}, {"claude", "auto"}, {"codex", "danger-full-access"}}
 	for _, c := range cases {
 		t.Run(c.agent+" refused", func(t *testing.T) {
 			h := newRunnerHarness(t)

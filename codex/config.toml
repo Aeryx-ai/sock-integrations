@@ -1,7 +1,10 @@
 [mcp_servers.sock]
 command = "sock-mcp"
 env_vars = ["SOCK_TOKEN", "SOCK_URL"]
-# sock tools only message the puppet's owner: approve them, so a headless run
-# (sock-runner) can reply. Not yet checked against a live codex exec; see
-# runner/README.md.
+# Only the tools that message the owner. sock_fetch and sock_ack consume the
+# deliveries `sock listen` (sock-runner) owns, so Codex does not see them.
+enabled_tools = ["sock_whoami", "sock_list_conversations", "sock_send"]
+# Approve those without a prompt, so a headless run (sock-runner) can reply.
+# This applies to every Codex session that merges this file, interactive ones
+# included. Not yet checked against a live codex exec (runner/README.md).
 default_tools_approval_mode = "approve"
