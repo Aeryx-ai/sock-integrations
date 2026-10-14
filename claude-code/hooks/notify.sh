@@ -402,7 +402,9 @@ release_hour() {
 }
 
 # send_owner sends $1 when this session may message the owner now, logging a
-# fixed outcome, never the text, when it may not.
+# fixed outcome, never the text, when it may not. $2, when set, is the ask's
+# hash, recorded before the send: a send the watchdog killed may have landed,
+# and the same ask is never reposted.
 send_owner() {
 	case $(session_kind) in
 	interactive) ;;
@@ -418,6 +420,12 @@ send_owner() {
 	if ! reserve_hour; then
 		log_line "quiet: throttled"
 		return 1
+	fi
+	if [ -n "${2:-}" ]; then
+		(
+			umask 077
+			mkdir -p "$asks" && printf '%s\n' "$2" >"$asks/$session.sent.$$" && mv "$asks/$session.sent.$$" "$asks/$session.sent"
+		) 2>/dev/null
 	fi
 	send_text "$1" && return 0
 	release_hour
@@ -531,12 +539,7 @@ send_ask() {
 	if [ -n "$hash" ] && [ -f "$asks/$session.sent" ] && [ "$(cat "$asks/$session.sent" 2>/dev/null)" = "$hash" ]; then
 		return 0
 	fi
-	if send_owner "$ask" && [ -n "$hash" ]; then
-		(
-			umask 077
-			mkdir -p "$asks" && printf '%s\n' "$hash" >"$asks/$session.sent.$$" && mv "$asks/$session.sent.$$" "$asks/$session.sent"
-		) 2>/dev/null
-	fi
+	send_owner "$ask" "$hash"
 	return 0
 }
 
@@ -548,11 +551,8 @@ remember_ask() {
 		mkdir -p "$asks" || exit 0
 		find "$asks" -type f -mtime +7 -delete 2>/dev/null
 		rm -f "$asks/$session.sent"
-		if [ -n "$1" ]; then
-			printf '%s' "$1" >"$asks/$session.ask.$$" && mv "$asks/$session.ask.$$" "$asks/$session.ask"
-		else
-			rm -f "$asks/$session.ask"
-		fi
+		# an empty file is "nothing pending", so --idle does not read the transcript
+		printf '%s' "$1" >"$asks/$session.ask.$$" && mv "$asks/$session.ask.$$" "$asks/$session.ask"
 	) 2>/dev/null
 	return 0
 }
@@ -585,7 +585,8 @@ idle)
 	if [ -f "$asks/$session.ask" ]; then
 		ask=$(cat "$asks/$session.ask" 2>/dev/null)
 	else
-		# Stop never ran for this session: the transcript's last assistant text.
+		# Stop never ran for this session (it leaves a file, empty when nothing
+		# is pending): the transcript's last assistant text.
 		# Only a regular file, only its last 2 MiB, read on stdin (a path that
 		# starts with "-" is never an option), and only entries that carry text.
 		transcript=$(field transcript_path)
