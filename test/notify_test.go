@@ -18,7 +18,7 @@ var failedSend = regexp.MustCompile(`sock send exit [1-9][0-9]*:`)
 
 func TestPermissionPrompt(t *testing.T) {
 	s := newStub(t)
-	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PROJECT_DIR": "/x/proj"}, Stdin: `{"message":"secret text"}`}, "needs permission")
+	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PROJECT_DIR": "/x/proj"}}, "--permission")
 	if r.Code != 0 {
 		t.Fatalf("exit %d", r.Code)
 	}
@@ -30,7 +30,7 @@ func TestPermissionPrompt(t *testing.T) {
 
 func TestPluginOptionTokenWinsOverSockToken(t *testing.T) {
 	s := newStub(t)
-	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_other_other", "CLAUDE_PLUGIN_OPTION_SOCK_URL": s.URL, "SOCK_URL": ""}}, "x")
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_other_other", "CLAUDE_PLUGIN_OPTION_SOCK_URL": s.URL, "SOCK_URL": ""}}, "--permission")
 	if g := s.Requests(); len(g) != 1 || g[0].Auth != "Bearer sock_pt_other_other" {
 		t.Fatalf("%+v", g)
 	}
@@ -39,7 +39,7 @@ func TestPluginOptionTokenWinsOverSockToken(t *testing.T) {
 // The plugin token must go only to the plugin URL, never to an ambient SOCK_URL.
 func TestPluginTokenNeverReachesAmbientURL(t *testing.T) {
 	plugin, ambient := newStub(t), newStub(t)
-	runHook(t, ambient.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_other_other", "CLAUDE_PLUGIN_OPTION_SOCK_URL": plugin.URL}}, "x")
+	runHook(t, ambient.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_other_other", "CLAUDE_PLUGIN_OPTION_SOCK_URL": plugin.URL}}, "--permission")
 	if g := ambient.Requests(); len(g) != 0 {
 		t.Fatalf("plugin token leaked to ambient SOCK_URL: %+v", g)
 	}
@@ -58,7 +58,7 @@ func TestNoURLFromSourceUsesCLIConfig(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cfg, "sock", "config.toml"), []byte("url = \""+cfgStub.URL+"\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	runHook(t, ambient.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_other_other", "XDG_CONFIG_HOME": cfg}}, "x")
+	runHook(t, ambient.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_other_other", "XDG_CONFIG_HOME": cfg}}, "--permission")
 	if g := ambient.Requests(); len(g) != 0 {
 		t.Fatalf("token leaked to ambient SOCK_URL: %+v", g)
 	}
@@ -70,7 +70,7 @@ func TestNoURLFromSourceUsesCLIConfig(t *testing.T) {
 // An env token must go only to SOCK_URL, never to the plugin URL.
 func TestEnvTokenNeverReachesPluginURL(t *testing.T) {
 	env, plugin := newStub(t), newStub(t)
-	runHook(t, env.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_OPTION_SOCK_URL": plugin.URL}}, "x")
+	runHook(t, env.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_OPTION_SOCK_URL": plugin.URL}}, "--permission")
 	if g := plugin.Requests(); len(g) != 0 {
 		t.Fatalf("env token leaked to plugin URL: %+v", g)
 	}
@@ -82,7 +82,7 @@ func TestEnvTokenNeverReachesPluginURL(t *testing.T) {
 // An ambient access gate belongs to the env-token deployment and must not go to the plugin URL.
 func TestPluginTokenDropsAmbientAccessGate(t *testing.T) {
 	s := newStub(t)
-	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_other_other", "CLAUDE_PLUGIN_OPTION_SOCK_URL": s.URL, "SOCK_ACCESS_GATE": "gate-secret"}}, "x")
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_other_other", "CLAUDE_PLUGIN_OPTION_SOCK_URL": s.URL, "SOCK_ACCESS_GATE": "gate-secret"}}, "--permission")
 	g := s.Requests()
 	if len(g) != 1 || g[0].Gate != "" {
 		t.Fatalf("access gate leaked to plugin URL: %+v", g)
@@ -92,7 +92,7 @@ func TestPluginTokenDropsAmbientAccessGate(t *testing.T) {
 // The env-token path keeps its gate.
 func TestEnvTokenKeepsAccessGate(t *testing.T) {
 	s := newStub(t)
-	runHook(t, s.URL, hookEnv{Env: map[string]string{"SOCK_ACCESS_GATE": "gate-secret"}}, "x")
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"SOCK_ACCESS_GATE": "gate-secret"}}, "--permission")
 	g := s.Requests()
 	if len(g) != 1 || g[0].Gate != "gate-secret" {
 		t.Fatalf("%+v", g)
@@ -109,7 +109,7 @@ func TestPluginTokenIgnoresConfigFileAccessGate(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cfg, "sock", "config.toml"), []byte("access_gate = \"file-gate\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_other_other", "CLAUDE_PLUGIN_OPTION_SOCK_URL": s.URL, "XDG_CONFIG_HOME": cfg}}, "x")
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_other_other", "CLAUDE_PLUGIN_OPTION_SOCK_URL": s.URL, "XDG_CONFIG_HOME": cfg}}, "--permission")
 	g := s.Requests()
 	if len(g) != 1 || g[0].Gate != "" {
 		t.Fatalf("config file access gate leaked to plugin URL: %+v", g)
@@ -118,7 +118,7 @@ func TestPluginTokenIgnoresConfigFileAccessGate(t *testing.T) {
 
 func TestPluginOptionTokenUsedWhenSockTokenUnset(t *testing.T) {
 	s := newStub(t)
-	runHook(t, s.URL, hookEnv{Env: map[string]string{"SOCK_TOKEN": "", "CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_opt_opt", "CLAUDE_PLUGIN_OPTION_SOCK_URL": s.URL, "SOCK_URL": ""}}, "x")
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"SOCK_TOKEN": "", "CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_opt_opt", "CLAUDE_PLUGIN_OPTION_SOCK_URL": s.URL, "SOCK_URL": ""}}, "--permission")
 	if g := s.Requests(); len(g) != 1 || g[0].Auth != "Bearer sock_pt_opt_opt" {
 		t.Fatalf("%+v", g)
 	}
@@ -126,7 +126,7 @@ func TestPluginOptionTokenUsedWhenSockTokenUnset(t *testing.T) {
 
 func TestMissingTokenLogsAndExitsZero(t *testing.T) {
 	s := newStub(t)
-	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"SOCK_TOKEN": ""}}, "x")
+	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"SOCK_TOKEN": ""}}, "--permission")
 	if r.Code != 0 || len(s.Requests()) != 0 || strings.Count(r.Log, "\n") != 1 {
 		t.Fatalf("%+v reqs=%d", r, len(s.Requests()))
 	}
@@ -135,7 +135,7 @@ func TestMissingTokenLogsAndExitsZero(t *testing.T) {
 func TestServerDownExitsZeroLogsOnce(t *testing.T) {
 	s := newStub(t)
 	s.setFail(func(int) error { return unavailable() })
-	r := runHook(t, s.URL, hookEnv{}, "x")
+	r := runHook(t, s.URL, hookEnv{}, "--permission")
 	if r.Code != 0 || strings.Count(r.Log, "\n") != 1 {
 		t.Fatalf("%+v", r)
 	}
@@ -153,7 +153,7 @@ func TestServerDownExitsZeroLogsOnce(t *testing.T) {
 func TestTokenInvalidNoRetryStorm(t *testing.T) {
 	s := newStub(t)
 	s.setFail(func(int) error { return tokenInvalid() })
-	r := runHook(t, s.URL, hookEnv{}, "x")
+	r := runHook(t, s.URL, hookEnv{}, "--permission")
 	if r.Code != 0 || len(s.Requests()) != 1 || strings.Count(r.Log, "\n") != 1 {
 		t.Fatalf("%+v reqs=%d", r, len(s.Requests()))
 	}
@@ -161,33 +161,37 @@ func TestTokenInvalidNoRetryStorm(t *testing.T) {
 
 func TestSockMissingFromPath(t *testing.T) {
 	s := newStub(t)
-	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": "/usr/bin:/bin"}}, "x")
+	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": "/usr/bin:/bin"}}, "--permission")
 	if r.Code != 0 || strings.Count(r.Log, "\n") != 1 || !strings.Contains(r.Log, "sock not found") {
 		t.Fatalf("%+v", r)
 	}
 }
 
-func TestStopGate(t *testing.T) {
+// Rule 4 of the quiet rule: only the ask and permission prompts send. The
+// end of a turn with no ask sends nothing, whatever the old opt-ins say, and so
+// does a bare phrase (the v1 shape).
+func TestOnlyTheAskAndPermissionPromptsSend(t *testing.T) {
 	s := newStub(t)
-	runHook(t, s.URL, hookEnv{}, "--stop", "finished a turn")
-	if n := len(s.Requests()); n != 0 {
-		t.Fatalf("sent %d with both gates unset", n)
+	for _, env := range []map[string]string{nil, {"CLAUDE_PLUGIN_OPTION_NOTIFY_ON_STOP": "true"}, {"SOCK_NOTIFY_ON_STOP": "1"}} {
+		for _, args := range [][]string{{"--stop"}, {"--stop", "--ask-now"}} {
+			r := runHook(t, s.URL, hookEnv{Env: env, Stdin: stopInput("s0", "Done.")}, args...)
+			if n := len(s.Requests()); n != 0 || r.Log != "" {
+				t.Fatalf("%v %v: sent %d, log %q", env, args, n, r.Log)
+			}
+		}
 	}
-	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_OPTION_NOTIFY_ON_STOP": "false"}}, "--stop", "finished a turn")
-	if n := len(s.Requests()); n != 0 {
-		t.Fatalf("sent %d with option false", n)
-	}
-	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_OPTION_NOTIFY_ON_STOP": "true"}}, "--stop", "finished a turn")
-	runHook(t, s.URL, hookEnv{Env: map[string]string{"SOCK_NOTIFY_ON_STOP": "1"}}, "--stop", "finished a turn")
-	if n := len(s.Requests()); n != 2 {
-		t.Fatalf("sent %d, want 2", n)
+	for _, phrase := range []string{"needs permission", "finished a turn", "x"} {
+		r := runHook(t, s.URL, hookEnv{}, phrase)
+		if n := len(s.Requests()); n != 0 || r.Code != 0 || r.Log != "" {
+			t.Fatalf("phrase %q: sent %d, %+v", phrase, n, r)
+		}
 	}
 }
 
 func TestStdinShapesDoNotHang(t *testing.T) {
 	s := newStub(t)
 	for _, in := range []string{"", `{"hook_event_name":"Notification"}`, strings.Repeat("x", 1<<20)} {
-		r := runHook(t, s.URL, hookEnv{Stdin: in}, "x")
+		r := runHook(t, s.URL, hookEnv{Stdin: in}, "--permission")
 		if r.Code != 0 || r.Elapsed.Seconds() > 8 {
 			t.Fatalf("stdin len %d: %+v", len(in), r)
 		}
@@ -201,7 +205,7 @@ func TestStdinHeldOpenIsBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = pw.Close(); _ = pr.Close() })
-	r := runHook(t, s.URL, hookEnv{StdinFile: pr}, "x")
+	r := runHook(t, s.URL, hookEnv{StdinFile: pr}, "--permission")
 	if r.Code != 0 || r.Elapsed.Seconds() < 1.5 || r.Elapsed.Seconds() > 5 {
 		t.Fatalf("%+v", r)
 	}
@@ -214,7 +218,7 @@ func TestStdinHeldOpenIsBounded(t *testing.T) {
 // Review Focus 1
 func TestProjectNameLikeFlag(t *testing.T) {
 	s := newStub(t)
-	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PROJECT_DIR": "/x/-v"}}, "needs permission")
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PROJECT_DIR": "/x/-v"}}, "--permission")
 	if g := s.Requests(); len(g) != 1 || g[0].Text != "-v: needs permission" {
 		t.Fatalf("%+v", g)
 	}
@@ -223,30 +227,30 @@ func TestProjectNameLikeFlag(t *testing.T) {
 // Review Focus 2
 func TestProjectNameSanitized(t *testing.T) {
 	s := newStub(t)
-	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PROJECT_DIR": "/x/a\nb\x1b[31mc"}}, "p")
-	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PROJECT_DIR": "/x/" + strings.Repeat("n", 500)}}, "p")
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PROJECT_DIR": "/x/a\nb\x1b[31mc"}}, "--permission")
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PROJECT_DIR": "/x/" + strings.Repeat("n", 500)}}, "--permission")
 	g := s.Requests()
 	if len(g) != 2 {
 		t.Fatalf("%+v", g)
 	}
-	if g[0].Text != "ab31mc: p" {
+	if g[0].Text != "ab31mc: needs permission" {
 		t.Fatalf("control chars kept: %q", g[0].Text)
 	}
-	if want := strings.Repeat("n", 100) + ": p"; g[1].Text != want {
+	if want := strings.Repeat("n", 100) + ": needs permission"; g[1].Text != want {
 		t.Fatalf("not cut: %d chars", len(g[1].Text))
 	}
 }
 
 func TestProjectNameAllowlist(t *testing.T) {
 	cases := []struct{ name, dir, want string }{
-		{"bidi override and C1 control removed", "/x/pro\u202eje\u0085ct", "project: p"},
-		{"all non-ASCII becomes project", "/x/\u65e5\u672c\u8a9e", "project: p"},
-		{"multibyte mixed with ASCII keeps ASCII", "/x/caf\u00e9-1.2_x y", "caf-1.2_x y: p"},
+		{"bidi override and C1 control removed", "/x/pro\u202eje\u0085ct", "project: needs permission"},
+		{"all non-ASCII becomes project", "/x/\u65e5\u672c\u8a9e", "project: needs permission"},
+		{"multibyte mixed with ASCII keeps ASCII", "/x/caf\u00e9-1.2_x y", "caf-1.2_x y: needs permission"},
 	}
 	for _, c := range cases {
 		for _, loc := range []string{"C", "en_US.UTF-8"} {
 			s := newStub(t)
-			runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PROJECT_DIR": c.dir, "LANG": loc, "LC_ALL": loc}}, "p")
+			runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PROJECT_DIR": c.dir, "LANG": loc, "LC_ALL": loc}}, "--permission")
 			if g := s.Requests(); len(g) != 1 || g[0].Text != c.want {
 				t.Fatalf("%s (%s): %+v, want %q", c.name, loc, g, c.want)
 			}
@@ -257,7 +261,7 @@ func TestProjectNameAllowlist(t *testing.T) {
 // A normal run, including reaping the watchdog, writes nothing to stderr.
 func TestNormalRunSilentOnStderr(t *testing.T) {
 	s := newStub(t)
-	r := runHook(t, s.URL, hookEnv{}, "x")
+	r := runHook(t, s.URL, hookEnv{}, "--permission")
 	if r.Code != 0 || len(s.Requests()) != 1 || r.Stderr != "" {
 		t.Fatalf("%+v", r)
 	}
@@ -272,7 +276,7 @@ func TestLogHasNoControlCharacters(t *testing.T) {
 	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": tmp + ":/usr/bin:/bin", "SOCK_HOOK_TIMEOUT": "10"}}, "x")
+	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": tmp + ":/usr/bin:/bin", "SOCK_HOOK_TIMEOUT": "10"}}, "--permission")
 	if !strings.Contains(r.Log, "pwned") {
 		t.Fatalf("no log: %q", r.Log)
 	}
@@ -292,7 +296,7 @@ func TestTokenNeverInLog(t *testing.T) {
 	if err := os.WriteFile(fake, []byte("#!/bin/sh\necho \"boom token=$SOCK_TOKEN\" >&2\nexit 1\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": tmp + ":/usr/bin:/bin", "SOCK_HOOK_TIMEOUT": "10"}}, "x")
+	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": tmp + ":/usr/bin:/bin", "SOCK_HOOK_TIMEOUT": "10"}}, "--permission")
 	if r.Log == "" || strings.Contains(r.Log, token) {
 		t.Fatalf("log %q", r.Log)
 	}
@@ -305,7 +309,7 @@ func TestLogCreatedWithPrivateModes(t *testing.T) {
 	s := newStub(t)
 	s.setFail(func(int) error { return unavailable() })
 	state := filepath.Join(t.TempDir(), "state")
-	runHook(t, s.URL, hookEnv{Env: map[string]string{"XDG_STATE_HOME": state}}, "x")
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"XDG_STATE_HOME": state}}, "--permission")
 	dir := filepath.Join(state, "sock-integrations")
 	di, err := os.Stat(dir)
 	if err != nil {
@@ -331,7 +335,7 @@ func TestLogTruncatedAboveLimit(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "hook.log"), []byte(strings.Repeat("y", 102401)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	runHook(t, s.URL, hookEnv{Env: map[string]string{"XDG_STATE_HOME": state}}, "x")
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"XDG_STATE_HOME": state}}, "--permission")
 	fi, err := os.Stat(filepath.Join(dir, "hook.log"))
 	if err != nil {
 		t.Fatal(err)
@@ -348,7 +352,7 @@ func TestUnwritableLogDirStillExitsZero(t *testing.T) {
 	}
 	s := newStub(t)
 	s.setFail(func(int) error { return unavailable() })
-	r := runHook(t, s.URL, hookEnv{HomeRO: true}, "x")
+	r := runHook(t, s.URL, hookEnv{HomeRO: true}, "--permission")
 	if r.Code != 0 || r.Elapsed.Seconds() > 2+3 || r.Log != "" { // watchdog timeout plus slack
 		t.Fatalf("%+v", r)
 	}
@@ -360,7 +364,7 @@ func TestHungServerKilledByWatchdog(t *testing.T) {
 	blk := make(chan struct{})
 	s.setBlock(blk)
 	t.Cleanup(func() { close(blk) })
-	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"SOCK_HOOK_TIMEOUT": "1"}}, "x")
+	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"SOCK_HOOK_TIMEOUT": "1"}}, "--permission")
 	if r.Code != 0 || r.Elapsed.Seconds() > 1+3 || strings.Count(r.Log, "\n") != 1 || !failedSend.MatchString(r.Log) { // watchdog timeout plus slack
 		t.Fatalf("%+v", r)
 	}
@@ -374,7 +378,7 @@ func TestProjectFallsBackToPWD(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Chdir(cwd)
-	runHook(t, s.URL, hookEnv{}, "needs permission")
+	runHook(t, s.URL, hookEnv{}, "--permission")
 	if g := s.Requests(); len(g) != 1 || g[0].Text != "fromcwd: needs permission" {
 		t.Fatalf("%+v", g)
 	}
@@ -389,7 +393,7 @@ func TestTokenStraddlingCutIsRedacted(t *testing.T) {
 	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": tmp + ":/usr/bin:/bin", "SOCK_HOOK_TIMEOUT": "10"}}, "x")
+	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": tmp + ":/usr/bin:/bin", "SOCK_HOOK_TIMEOUT": "10"}}, "--permission")
 	if r.Log == "" {
 		t.Fatal("no log")
 	}
@@ -408,7 +412,7 @@ func TestTokenSplitByControlByteIsRedacted(t *testing.T) {
 	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": tmp + ":/usr/bin:/bin", "SOCK_HOOK_TIMEOUT": "10"}}, "x")
+	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": tmp + ":/usr/bin:/bin", "SOCK_HOOK_TIMEOUT": "10"}}, "--permission")
 	if r.Log == "" {
 		t.Fatal("no log")
 	}
@@ -419,7 +423,7 @@ func TestTokenSplitByControlByteIsRedacted(t *testing.T) {
 
 func TestInvalidTimeoutFallsBackToDefault(t *testing.T) {
 	s := newStub(t)
-	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"SOCK_HOOK_TIMEOUT": "abc"}}, "x")
+	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"SOCK_HOOK_TIMEOUT": "abc"}}, "--permission")
 	if r.Code != 0 || len(s.Requests()) != 1 || r.Log != "" {
 		t.Fatalf("%+v reqs=%d", r, len(s.Requests()))
 	}
@@ -539,14 +543,6 @@ func TestStopWithAskNowSendsAtOnce(t *testing.T) {
 	s := newStub(t)
 	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PROJECT_DIR": "/x/proj"}, Stdin: stopInput("s6", askMessage)}, "--stop", "--ask-now")
 	if g := s.Requests(); len(g) != 1 || g[0].Text != askExpected {
-		t.Fatalf("%+v", g)
-	}
-}
-
-func TestNotifyOnStopStillSendsFinishedATurn(t *testing.T) {
-	s := newStub(t)
-	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PROJECT_DIR": "/x/proj", "CLAUDE_PLUGIN_OPTION_NOTIFY_ON_STOP": "true"}, Stdin: stopInput("s7", "Done.")}, "--stop")
-	if g := s.Requests(); len(g) != 1 || g[0].Text != "proj: finished a turn" {
 		t.Fatalf("%+v", g)
 	}
 }
@@ -1023,7 +1019,7 @@ func TestWatchdogKillsASockThatIgnoresTERM(t *testing.T) {
 	s := newStub(t)
 	bin := fakeSock(t, "trap '' TERM\nwhile :; do sleep 1; done")
 	env := map[string]string{"PATH": bin + ":" + hookPathTail, "SOCK_HOOK_TIMEOUT": "1"}
-	r := runHook(t, s.URL, hookEnv{Env: env}, "x")
+	r := runHook(t, s.URL, hookEnv{Env: env}, "--permission")
 	if r.Elapsed > 6*time.Second {
 		t.Fatalf("hook took %v: a TERM-ignoring sock was never killed", r.Elapsed)
 	}
@@ -1043,7 +1039,7 @@ func TestExistingHookLogIsMadePrivate(t *testing.T) {
 	if err := os.Chmod(log, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": "/usr/bin:/bin"}, State: state}, "x")
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": "/usr/bin:/bin"}, State: state}, "--permission")
 	fi, err := os.Stat(log)
 	if err != nil {
 		t.Fatal(err)
@@ -1056,7 +1052,7 @@ func TestExistingHookLogIsMadePrivate(t *testing.T) {
 func TestNULBytesInSockStderrNeverReachTheLog(t *testing.T) {
 	s := newStub(t)
 	bin := fakeSock(t, "printf 'bad\\000news\\001' >&2; exit 4")
-	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": bin + ":" + hookPathTail, "SOCK_HOOK_TIMEOUT": fakeSockTimeout}}, "x")
+	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": bin + ":" + hookPathTail, "SOCK_HOOK_TIMEOUT": fakeSockTimeout}}, "--permission")
 	if strings.ContainsRune(r.Log, 0) || !strings.Contains(r.Log, "badnews") {
 		t.Fatalf("log %q", r.Log)
 	}
@@ -1089,8 +1085,32 @@ cat > "$rec/text"
 	return fakeSock(t, body), rec
 }
 
+// codexPluginEnv is a Codex plugin hook's environment. Codex sets
+// CLAUDE_PLUGIN_ROOT beside PLUGIN_ROOT for compatibility
+// (learn.chatgpt.com/docs/hooks, "Plugin-bundled hooks"), so it cannot tell
+// the routes apart; the input's turn_id, a Codex-only field, does.
 func codexPluginEnv(bin string) map[string]string {
-	return map[string]string{"PATH": bin + ":" + hookPathTail, "SOCK_TOKEN": "", "PLUGIN_ROOT": "/x/plugin", "CLAUDE_PROJECT_DIR": "/x/proj", "SOCK_ACCESS_GATE": "gate-secret", "SOCK_HOOK_TIMEOUT": fakeSockTimeout}
+	return map[string]string{"PATH": bin + ":" + hookPathTail, "SOCK_TOKEN": "", "PLUGIN_ROOT": "/x/plugin", "CLAUDE_PLUGIN_ROOT": "/x/plugin", "CLAUDE_PROJECT_DIR": "/x/proj", "SOCK_ACCESS_GATE": "gate-secret", "SOCK_HOOK_TIMEOUT": fakeSockTimeout}
+}
+
+// codexPermission is a Codex PermissionRequest input: no message, a turn_id.
+var codexPermission = hookJSON(map[string]any{"hook_event_name": "PermissionRequest", "turn_id": "t1", "tool_name": "Bash"})
+
+// codexStopInput is stopInput as Codex sends it, with a turn_id.
+func codexStopInput(session, last string) string {
+	return hookJSON(map[string]any{"session_id": session, "turn_id": "t1", "hook_event_name": "Stop", "last_assistant_message": last, "stop_hook_active": false})
+}
+
+// Without a turn_id the input is Claude Code's, whatever PLUGIN_ROOT holds.
+func TestPluginRootWithoutATurnIDIsNotTheCodexRoute(t *testing.T) {
+	s := newStub(t)
+	bin, rec := fakeSockAsPuppet(t, false)
+	env := codexPluginEnv(bin)
+	env["SOCK_TOKEN"] = token
+	runHook(t, s.URL, hookEnv{Env: env, Stdin: stopInput("z2", "Ship it?")}, "--stop", "--ask-now")
+	if got := readRec(t, rec, "args"); strings.Contains(got, "--as-puppet") || !strings.HasSuffix(got, "send") {
+		t.Fatalf("argv %q, want the env token route", got)
+	}
 }
 
 // With no SOCK_TOKEN the hook sends as the puppet the plugin's sock-mcp
@@ -1098,7 +1118,7 @@ func codexPluginEnv(bin string) map[string]string {
 func TestCodexPluginRouteSendsAsThePluginPuppet(t *testing.T) {
 	s := newStub(t)
 	bin, rec := fakeSockAsPuppet(t, false)
-	r := runHook(t, s.URL, hookEnv{Env: codexPluginEnv(bin), Stdin: stopInput("z1", "Ship it?")}, "--stop", "--ask-now")
+	r := runHook(t, s.URL, hookEnv{Env: codexPluginEnv(bin), Stdin: codexStopInput("z1", "Ship it?")}, "--stop", "--ask-now")
 	if got := readRec(t, rec, "args"); got != "send\n--as-puppet\n--project\n/x/plugin" {
 		t.Fatalf("argv %q", got)
 	}
@@ -1119,7 +1139,7 @@ func TestCodexPluginRouteSendsAsThePluginPuppet(t *testing.T) {
 func TestCodexPluginRouteRefusalIsLoggedAndNothingElse(t *testing.T) {
 	s := newStub(t)
 	bin, rec := fakeSockAsPuppet(t, true)
-	r := runHook(t, s.URL, hookEnv{Env: codexPluginEnv(bin)}, "needs permission")
+	r := runHook(t, s.URL, hookEnv{Env: codexPluginEnv(bin), Stdin: codexPermission}, "--permission")
 	if r.Code != 0 {
 		t.Fatalf("exit %d", r.Code)
 	}
@@ -1141,7 +1161,7 @@ func TestCodexPluginRouteIgnoresAnExportedSockToken(t *testing.T) {
 	bin, rec := fakeSockAsPuppet(t, false)
 	env := codexPluginEnv(bin)
 	env["SOCK_TOKEN"] = token
-	runHook(t, s.URL, hookEnv{Env: env}, "x")
+	runHook(t, s.URL, hookEnv{Env: env, Stdin: codexPermission}, "--permission")
 	if got := readRec(t, rec, "args"); got != "send\n--as-puppet\n--project\n/x/plugin" {
 		t.Fatalf("argv %q", got)
 	}
@@ -1155,7 +1175,7 @@ func TestCodexPluginRouteIgnoresAnExportedSockToken(t *testing.T) {
 
 func TestClaudePluginWithPluginRootIsUnchanged(t *testing.T) {
 	s := newStub(t)
-	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_ROOT": "/x/cplugin", "PLUGIN_ROOT": "/x/plugin", "SOCK_TOKEN": "", "CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_other_other", "CLAUDE_PLUGIN_OPTION_SOCK_URL": s.URL}}, "x")
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_ROOT": "/x/cplugin", "PLUGIN_ROOT": "/x/plugin", "SOCK_TOKEN": "", "CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_other_other", "CLAUDE_PLUGIN_OPTION_SOCK_URL": s.URL}}, "--permission")
 	if g := s.Requests(); len(g) != 1 || g[0].Auth != "Bearer sock_pt_other_other" {
 		t.Fatalf("%+v", g)
 	}
@@ -1226,7 +1246,7 @@ func TestLoggedStderrRedactsUnknownTokens(t *testing.T) {
 			for k, v := range extra {
 				env[k] = v
 			}
-			r := runHook(t, s.URL, hookEnv{Env: env}, "x")
+			r := runHook(t, s.URL, hookEnv{Env: env, Stdin: codexPermission}, "--permission")
 			if strings.Contains(r.Log, "sock_pt_0") || !strings.Contains(r.Log, "[redacted]") {
 				t.Fatalf("log %q", r.Log)
 			}
@@ -1238,7 +1258,7 @@ func TestLoggedStderrRedactsUnknownTokens(t *testing.T) {
 func TestLogStripsC1Controls(t *testing.T) {
 	s := newStub(t)
 	bin := fakeSock(t, `cat >/dev/null; printf 'c1:\302\2332J raw:\2332J keep:\303\251\342\202\254\360\237\230\200' >&2; exit 1`)
-	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": bin + ":" + hookPathTail, "SOCK_HOOK_TIMEOUT": fakeSockTimeout}}, "x")
+	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": bin + ":" + hookPathTail, "SOCK_HOOK_TIMEOUT": fakeSockTimeout}}, "--permission")
 	if !strings.Contains(r.Log, "c1:2J raw:2J keep:é€😀") || !utf8.ValidString(r.Log) {
 		t.Fatalf("log %q", r.Log)
 	}
@@ -1280,7 +1300,7 @@ func TestCodexRouteIgnoresAnAmbientPluginOption(t *testing.T) {
 	bin, rec := fakeSockAsPuppet(t, false)
 	env := codexPluginEnv(bin)
 	env["CLAUDE_PLUGIN_OPTION_SOCK_TOKEN"] = "sock_pt_other_other"
-	runHook(t, s.URL, hookEnv{Env: env}, "x")
+	runHook(t, s.URL, hookEnv{Env: env, Stdin: codexPermission}, "--permission")
 	if got := readRec(t, rec, "args"); got != "send\n--as-puppet\n--project\n/x/plugin" {
 		t.Fatalf("argv %q", got)
 	}
@@ -1356,8 +1376,16 @@ func TestBackgroundSessionsAreQuiet(t *testing.T) {
 		{"claude -p", func(*testing.T) map[string]string {
 			return map[string]string{"CLAUDE_CODE_SESSION_ATTENDED": "0", "CLAUDE_CODE_SESSION_ID": "s1", "CLAUDE_CODE_ENTRYPOINT": "sdk-cli"}
 		}, func(*testing.T) string { return stopInput("s1", quietAsk) }, []string{"--stop", "--ask-now"}},
-		{"claude subagent permission prompt", nil, func(*testing.T) string {
+		{"claude subagent ask", nil, func(*testing.T) string {
+			return hookJSON(map[string]any{"session_id": "s1", "agent_id": "a79f", "agent_type": "general-purpose", "hook_event_name": "Stop", "last_assistant_message": quietAsk})
+		}, []string{"--stop", "--ask-now"}},
+		{"claude teammate or bg permission prompt", func(*testing.T) map[string]string {
+			return map[string]string{"CLAUDE_CODE_SESSION_ATTENDED": "0", "CLAUDE_CODE_SESSION_ID": "s1"}
+		}, func(*testing.T) string {
 			return permissionInput("s1", map[string]any{"agent_id": "a79f", "agent_type": "general-purpose"})
+		}, []string{"--permission"}},
+		{"codex subagent permission prompt", func(*testing.T) map[string]string { return noClaude(nil) }, func(t *testing.T) string {
+			return permissionInput("c1", map[string]any{"agent_id": "a79f", "turn_id": "t1", "transcript_path": codexTranscript(t, "c1", "cli")})
 		}, []string{"--permission"}},
 		{"codex exec", func(*testing.T) map[string]string { return noClaude(nil) }, func(t *testing.T) string {
 			return codexStop("c1", codexTranscript(t, "c1", "exec"))
@@ -1423,6 +1451,23 @@ func TestUnknownSessionIsQuiet(t *testing.T) {
 	r = runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": binWithoutJq(t)}, Stdin: permissionInput(testSession, nil)}, "--permission")
 	if g := s.Requests(); len(g) != 0 || !strings.Contains(r.Log, "quiet: unknown session") {
 		t.Fatalf("no jq: sent %+v, log %q", g, r.Log)
+	}
+}
+
+// A subagent's permission prompt holds up the owner's attended session, so it
+// may send, under the same hourly budget.
+func TestSubagentPermissionPromptInAnAttendedSessionSends(t *testing.T) {
+	s := newStub(t)
+	state := t.TempDir()
+	env := map[string]string{"CLAUDE_PROJECT_DIR": "/x/proj"}
+	in := permissionInput("s1", map[string]any{"agent_id": "a79f", "agent_type": "general-purpose"})
+	runHook(t, s.URL, hookEnv{Env: env, Stdin: in, State: state}, "--permission")
+	if g := s.Requests(); len(g) != 1 || g[0].Text != "proj: Claude needs your permission to use Bash" {
+		t.Fatalf("%+v", g)
+	}
+	r := runHook(t, s.URL, hookEnv{Env: env, Stdin: in, State: state}, "--permission")
+	if g := s.Requests(); len(g) != 1 || !strings.Contains(r.Log, "quiet: throttled") {
+		t.Fatalf("second prompt inside the hour: %+v, log %q", g, r.Log)
 	}
 }
 

@@ -21,7 +21,7 @@ state=$(mktemp -d)
 trap 'rm -rf "$state"' EXIT
 log=$state/sock-integrations/hook.log
 printf '{"session_id":"smoke"}' | XDG_STATE_HOME=$state CLAUDE_CODE_SESSION_ATTENDED=1 CLAUDE_CODE_SESSION_ID=smoke CLAUDE_PROJECT_DIR=/x/smoke \
-	"$here/claude-code/hooks/notify.sh" "needs permission"
+	"$here/claude-code/hooks/notify.sh" --permission
 if [ -s "$log" ]; then
 	echo "hook log grew ($log):" >&2
 	cat "$log" >&2

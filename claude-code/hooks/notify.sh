@@ -5,13 +5,14 @@
 #                  text, which names the tool ("needs permission" when it has none)
 #   --stop         a Stop: records the ask in the last assistant message (the
 #                  trailing question or decision, code blocks dropped) for
-#                  --idle; sends nothing unless notify_on_stop is on
+#                  --idle; sends nothing
 #   --stop --ask-now  the same, and sends the ask at once (hosts with no idle
 #                  event, such as Codex)
 #   --idle         a Notification idle_prompt: sends the recorded ask once; a
 #                  session with nothing pending sends nothing, and the same ask
 #                  is never reposted
-#   <phrase>       sends "<project>: <phrase>" (the v1 shape, kept for callers)
+# Anything else sends nothing: only the ask and permission prompts reach the
+# owner.
 # The owner asked for the ask itself in these messages (2026-10-13), which is
 # why assistant text now leaves the machine; it is capped and stripped of code.
 # Only a session the hook can show is interactive sends, and at most once an
@@ -21,15 +22,14 @@ set -u
 
 mode=
 ask_now=0
-phrase=
 while [ $# -gt 0 ]; do
 	case $1 in
 	--permission | --idle | --stop) mode=${1#--} ;;
 	--ask-now) ask_now=1 ;;
-	*) phrase=$1 ;;
 	esac
 	shift
 done
+[ -n "$mode" ] || exit 0
 
 state_dir=${XDG_STATE_HOME:-${HOME:-/nonexistent}/.local/state}/sock-integrations
 # The CLI prints cleaned paths, so a trailing slash on XDG_STATE_HOME or HOME
@@ -51,16 +51,6 @@ if [ -n "${CLAUDE_PLUGIN_OPTION_SOCK_TOKEN:-}" ]; then
 else
 	token=${SOCK_TOKEN:-}
 	url=${SOCK_URL:-}
-fi
-# The Codex plugin route (PLUGIN_ROOT set, CLAUDE_PLUGIN_ROOT unset: Claude
-# Code sets the latter for its plugin hooks): the plugin's sock-mcp runs in
-# PLUGIN_ROOT, never sees SOCK_TOKEN and resolves its credential from the
-# config file, so the CLI resolves the same one (`sock send --as-puppet`,
-# sock-cli v0.2.5), never the login token. An exported SOCK_TOKEN or plugin
-# option is ignored here; $token keeps it only for redaction.
-as_puppet=0
-if [ -n "${PLUGIN_ROOT:-}" ] && [ -z "${CLAUDE_PLUGIN_ROOT:-}" ]; then
-	as_puppet=1
 fi
 # No child inherits the credential: each sock call gets the one it needs. A
 # machine key in particular must reach only `sock puppets ensure`.
@@ -132,6 +122,18 @@ project=$(printf '%s' "${project_dir##*/}" | LC_ALL=C tr -cd 'A-Za-z0-9._ -' | L
 session=$(field session_id | LC_ALL=C tr -cd 'A-Za-z0-9_-' | LC_ALL=C cut -c1-64)
 [ -n "$session" ] || session=$(printf '%s' "${CLAUDE_PROJECT_DIR:-$PWD}" | LC_ALL=C tr -cd 'A-Za-z0-9_-' | LC_ALL=C cut -c1-64)
 [ -n "$session" ] || session=project
+
+# The Codex plugin route: PLUGIN_ROOT set and a turn_id in the input, which
+# only Codex sends. CLAUDE_PLUGIN_ROOT cannot tell the routes apart, since
+# Codex sets it for plugin hooks too. The plugin's sock-mcp runs in
+# PLUGIN_ROOT, never sees SOCK_TOKEN and resolves its credential from the
+# config file, so the CLI resolves the same one (`sock send --as-puppet`,
+# sock-cli v0.2.5), never the login token. An exported SOCK_TOKEN or plugin
+# option is ignored here; $token keeps it only for redaction.
+as_puppet=0
+if [ -n "${PLUGIN_ROOT:-}" ] && [ -n "$(field turn_id)" ]; then
+	as_puppet=1
+fi
 
 # utf8_cap prints stdin cut to $1 bytes, less a UTF-8 sequence the cut left
 # incomplete: the CLI refuses text that is not valid UTF-8.
@@ -311,7 +313,8 @@ send_as_puppet() {
 #   Codex        the transcript's session_meta for this session_id has source
 #                "cli" (the TUI) or "vscode" (the app); "exec" and a subagent
 #                object are background
-# agent_id in the input (a subagent) and SOCK_HEADLESS (set by sock-runner) are
+# agent_id in the input (a subagent) is background, except a permission prompt
+# in an attended Claude Code session. SOCK_HEADLESS (set by sock-runner) is
 # background; anything else is unknown.
 session_kind() {
 	if [ -n "${SOCK_HEADLESS:-}" ]; then
@@ -324,16 +327,20 @@ session_kind() {
 		echo unknown
 		return
 	fi
-	if [ -n "$(field agent_id)" ]; then
-		echo background
-		return
-	fi
+	local agent
+	agent=$(field agent_id)
 	if [ "${CLAUDE_CODE_SESSION_ID:-}" = "$sid" ]; then
 		case ${CLAUDE_CODE_SESSION_ATTENDED:-} in
-		1) echo interactive ;;
+		# A subagent's permission prompt holds up the attended session; its
+		# other sends stay quiet.
+		1) if [ -z "$agent" ] || [ "$mode" = permission ]; then echo interactive; else echo background; fi ;;
 		0) echo background ;;
 		*) echo unknown ;;
 		esac
+		return
+	fi
+	if [ -n "$agent" ]; then
+		echo background
 		return
 	fi
 	local transcript source=
@@ -567,9 +574,6 @@ stop)
 	# forgotten rather than sent later.
 	remember_ask "$ask"
 	if [ "$ask_now" = 1 ]; then send_ask "$ask"; fi
-	case "${CLAUDE_PLUGIN_OPTION_NOTIFY_ON_STOP:-}:${SOCK_NOTIFY_ON_STOP:-}" in
-	true:* | *:1) send_owner "finished a turn" ;;
-	esac
 	exit 0
 	;;
 idle)
@@ -594,8 +598,3 @@ idle)
 	exit 0
 	;;
 esac
-
-# No mode: the v1 shape, a fixed phrase.
-[ -n "$phrase" ] || exit 0
-send_owner "$phrase"
-exit 0
