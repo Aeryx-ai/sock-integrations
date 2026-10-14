@@ -107,7 +107,7 @@ Not verified: that `${PLUGIN_ROOT}` expands inside a hook `command` (it is an en
 
 ## Agent SDK
 
-`agent-sdk/example.ts`: `query()` with `mcpServers.sock` as a stdio server (`command: "sock-mcp"`, `env.SOCK_TOKEN` from `process.env`) and `allowedTools` of `mcp__sock__sock_whoami`, `mcp__sock__sock_list_conversations` and `mcp__sock__sock_send`. Auto-approving `sock_send` is the point for headless agents. The blast radius is the puppet: its owner and conversations it belongs to, 60 sends per minute. `sock_fetch` and `sock_ack` are deliberately not auto-approved, because fetch returns messages from every sender in every conversation the puppet is in. The example says both in comments.
+`agent-sdk/example.ts`: `query()` with `mcpServers.sock` as a stdio server (`command: "sock-mcp"`, `args: ["--outbound-only"]`, `env.SOCK_TOKEN` from `process.env`, which the example then deletes from `process.env` so the Claude Code process `query()` spawns, and any shell tool in it, does not inherit it) and `allowedTools` of `mcp__sock__sock_whoami`, `mcp__sock__sock_list_conversations` and `mcp__sock__sock_send`. Auto-approving `sock_send` is the point for headless agents. The blast radius is the puppet: its owner and conversations it belongs to, 60 sends per minute. `sock_fetch` and `sock_ack` are not exposed (`--outbound-only`), because fetch returns messages from every sender in every conversation the puppet is in. The example says both in comments.
 
 ## notify.sh
 

@@ -39,3 +39,21 @@ func TestRunnerAgentExitZeroBeatsALateWatchdog(t *testing.T) {
 		t.Fatalf("redelivery reran: %+v log %q", r, h.log())
 	}
 }
+
+// The Agent SDK example keeps rule 2 in the tool list, not in a permission
+// default, and leaves no token in the environment the spawned Claude Code (and
+// any shell tool a user adds) inherits: only sock-mcp's own env carries it.
+func TestAgentSDKExampleIsOutboundOnlyAndHoldsNoAmbientToken(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join(root, "agent-sdk", "example.ts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := string(b)
+	if !strings.Contains(src, `args: ["--outbound-only"]`) {
+		t.Error(`example.ts: sock-mcp runs without args: ["--outbound-only"]`)
+	}
+	del, q := strings.Index(src, "delete process.env.SOCK_TOKEN"), strings.Index(src, "query({")
+	if del < 0 || del > q {
+		t.Error("example.ts: SOCK_TOKEN stays in process.env when query() spawns Claude Code")
+	}
+}

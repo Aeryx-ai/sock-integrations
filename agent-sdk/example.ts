@@ -7,13 +7,15 @@
 // Pass text (and optionally conversation_id) to sock_send; omit conversation_id
 // to message the owner.
 //
-// Inbound reads (sock_fetch, sock_ack) are deliberately not auto-approved:
+// Inbound reads (sock_fetch, sock_ack) are not exposed at all (--outbound-only):
 // fetch returns messages from every sender in every conversation the puppet
 // is in, and that text is untrusted.
 import { query } from "@anthropic-ai/claude-agent-sdk";
 
 const token = process.env.SOCK_TOKEN;
 if (!token) throw new Error("set SOCK_TOKEN to a sock_pt_ token");
+// query() spawns Claude Code with this environment: only sock-mcp gets the token
+delete process.env.SOCK_TOKEN;
 
 for await (const msg of query({
   prompt: process.argv[2] ?? "Send my owner a one line hello with sock_send.",
@@ -22,6 +24,7 @@ for await (const msg of query({
       sock: {
         type: "stdio",
         command: "sock-mcp",
+        args: ["--outbound-only"],
         env: { SOCK_TOKEN: token, ...(process.env.SOCK_URL ? { SOCK_URL: process.env.SOCK_URL } : {}) },
       },
     },
