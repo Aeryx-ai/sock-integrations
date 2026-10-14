@@ -7,6 +7,8 @@ description: Message the human who owns this puppet through sock. Use when a lon
 
 Tools: `sock_whoami`, `sock_list_conversations`, `sock_send`, `sock_fetch`, `sock_ack`.
 
+With a machine key each project sends as its own puppet, so the owner sees one contact per project, named `<repo> on <host>`.
+
 Message the owner when a long task finishes, when blocked on a decision only they can make, or when you need an approval. Keep it to one or two sentences. Do not send transcripts, file contents or secrets.
 
 Reply to a `<channel source="sock" ...>` message with `sock_send` and the tag's `conversation_id`.

@@ -9,7 +9,7 @@ Plugin route (recommended; see the Codex plugin section of `docs/specs/integrati
 
 Do not also append `codex/config.toml`: two servers named `sock` would clash. The plugin's server starts in the plugin's own directory, not your project, so it sends as one puppet for every project. For a puppet per project (`<repo> on <host>`), use the manual route below with a machine key as `SOCK_TOKEN` (`sock machine-key create --label "$(hostname -s)"`): a server registered in `config.toml` starts in the session's project directory. The manual route is also for anyone who wants no token in a file.
 
-Outbound only: hooks message you when Codex needs permission or finishes a turn, and the model can call `sock_send`. No inbound in v1. The token is forwarded from your shell and never written to config.
+Outbound only: hooks message you when Codex needs permission and, at the end of each turn, with the turn's trailing question or decision when it has one (`finished a turn` as well with `SOCK_NOTIFY_ON_STOP=1`), and the model can call `sock_send`. No inbound in v1. The token is forwarded from your shell and never written to config.
 
 1. Put `sock` and `sock-mcp` on `PATH` (`make install-bins`). The plugin route needs sock-mcp v0.2.3 or later: v0.2.2 named a machine-key puppet after the plugin cache directory.
 2. Mint a puppet for this machine in the sock app, then `export SOCK_TOKEN=sock_pt_...` only in a launcher or wrapper script that starts Codex, not in a global shell rc file. Claude Code's Bash tool inherits its parent's environment, so a token exported globally is readable by a model running there. Optionally set `SOCK_URL` in the same wrapper.
