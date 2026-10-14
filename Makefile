@@ -17,7 +17,7 @@ test: deps
 	cd test && go test -race -count=1 ./...
 
 lint:
-	shellcheck claude-code/hooks/notify.sh scripts/smoke.sh runner/sock-runner
+	shellcheck -x claude-code/hooks/notify.sh scripts/smoke.sh runner/sock-runner runner/lib.sh
 	cd test && golangci-lint run ./...
 
 check: build lint test

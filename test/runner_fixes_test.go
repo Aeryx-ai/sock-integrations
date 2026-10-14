@@ -97,7 +97,7 @@ func TestRunnerCodexConfigApprovesOnlyTheSendingTools(t *testing.T) {
 }
 
 func TestRunnerStartTimeIsComparedUnderAPinnedLocaleAndZone(t *testing.T) {
-	runner := string(readFile(t, filepath.Join(root, "runner", "sock-runner")))
+	runner := string(readFile(t, filepath.Join(root, "runner", "lib.sh")))
 	if !strings.Contains(runner, "LC_ALL=C TZ=UTC ps -o lstart=") {
 		t.Fatal("start_of does not pin LC_ALL and TZ for ps")
 	}

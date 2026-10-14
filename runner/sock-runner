@@ -9,23 +9,15 @@
 #
 # Needs jq. The message text reaches the agent on stdin only: never in argv,
 # the environment, a log or a file other than the private prompt file.
+# shellcheck source-path=SCRIPTDIR
+# shellcheck disable=SC2034,SC2154 # the settings lib.sh reads, and what it sets
 set -u
 umask 077
 
-die_config() {
-	echo "sock-runner: $*" >&2
-	exit 2
-}
-
-UUID='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
-# a value with a newline never counts: grep -x would match any one of its lines
-is_uuid() {
-	case $1 in
-	*'
-'*) return 1 ;;
-	esac
-	printf '%s\n' "$1" | grep -Eqx "$UUID"
-}
+cmd_name=sock-runner
+here=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=lib.sh
+. "$here/lib.sh"
 
 # --- configuration -----------------------------------------------------------
 agent=${SOCK_RUNNER_AGENT:-}
@@ -58,29 +50,17 @@ case $timeout in
 '' | *[!0-9]* | 0) timeout=900 ;;
 esac
 
-state=${SOCK_RUNNER_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/sock-integrations}
-log=$state/runner.log
-lock=$state/runner.lock
-mkdir -p "$state" 2>/dev/null && chmod 700 "$state" 2>/dev/null
-# prompt files a SIGKILLed runner left behind: older than any run can last
-find "$state" -maxdepth 1 -name 'prompt.*' -mmin "+$((timeout / 60 + 2))" -exec rm -f {} + 2>/dev/null || true
+state_dir=${SOCK_RUNNER_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/sock-integrations}
+log_name=runner.log
+lock_name=runner.lock
+ledger_name=done.ids
+lib_init
 
-# --- log: one line per message, never text, token or agent output ------------
-msg_id=-
-log_line() {
-	{
-		if [ -f "$log" ] && [ "$(wc -c <"$log")" -gt 102400 ]; then : >"$log"; fi
-		printf '%s id=%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$msg_id" "$*" >>"$log"
-	} 2>/dev/null || true
-}
-
-# --- cleanup: the lock (only ours), the prompt file, the agent's group -------
-prompt=
+# --- cleanup: the agent's group first, then the library's (lock, prompt file) --
 agent_pgid=
 watchdog_pgid=
-mytoken=
-# shellcheck disable=SC2329 # run by the EXIT trap
-cleanup() {
+# shellcheck disable=SC2329 # run by the library's EXIT trap
+extra_cleanup() {
 	if [ -n "$agent_pgid" ]; then
 		# terminated while the agent runs: take its whole group down, TERM then
 		# KILL, before the watchdog that would bound a SIGKILL of this runner goes
@@ -92,161 +72,15 @@ cleanup() {
 		kill -KILL -- "-$agent_pgid" 2>/dev/null
 	fi
 	[ -n "$watchdog_pgid" ] && kill -KILL -- "-$watchdog_pgid" 2>/dev/null
-	[ -n "$prompt" ] && rm -f "$prompt" "$prompt.timeout"
-	if [ -n "$mytoken" ] && [ "$(readlink "$lock" 2>/dev/null)" = "$mytoken" ]; then rm -f "$lock"; fi
 }
-trap cleanup EXIT
-trap 'exit 143' TERM INT HUP
+install_traps
 
-# --- parse the message (protojson, whitespace randomized) --------------------
-input=$(cat)
-if ! printf '%s' "$input" | jq -e 'type == "object"' >/dev/null 2>&1; then
-	log_line "dropped: malformed"
-	exit 0
-fi
-field() {
-	printf '%s' "$input" | jq -r --arg k "$1" 'if (.[$k] | type) == "string" then .[$k] else empty end' 2>/dev/null
-}
-sender=$(field senderId)
-stdin_id=$(field id)
-stdin_conv=$(field conversationId)
-if is_uuid "${SOCK_MESSAGE_ID:-}"; then msg_id=$SOCK_MESSAGE_ID; fi
-for v in "$sender" "$stdin_id" "$stdin_conv" "${SOCK_SENDER_ID:-}" "${SOCK_MESSAGE_ID:-}" "${SOCK_CONVERSATION_ID:-}"; do
-	if ! is_uuid "$v"; then
-		log_line "dropped: malformed"
-		exit 0
-	fi
-done
-if [ "$stdin_id" != "$SOCK_MESSAGE_ID" ] || [ "$stdin_conv" != "$SOCK_CONVERSATION_ID" ]; then
-	log_line "dropped: malformed"
-	exit 0
-fi
-if ! printf '%s' "$input" | jq -e '(.text | type) == "string"' >/dev/null 2>&1; then
-	log_line "dropped: malformed"
-	exit 0
-fi
-msg_id=$stdin_id
-
-# --- the owner gate ----------------------------------------------------------
-# The sender in the environment and on stdin must be one id, and equal the
-# puppet's owner. The owner id is cached for a minute per token, so a non-owner
-# in a shared conversation costs no network call per message.
-if [ "$sender" != "$SOCK_SENDER_ID" ]; then
-	log_line "dropped: sender $SOCK_SENDER_ID"
-	exit 0
-fi
-hash16() {
-	if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi | cut -c1-16
-}
-owner_cache=$state/owner.$(printf '%s' "${SOCK_TOKEN:-}" | hash16)
-owner=
-if [ -f "$owner_cache" ]; then
-	read -r cached_at cached_owner <"$owner_cache" 2>/dev/null || true
-	case ${cached_at:-} in
-	'' | *[!0-9]*) ;;
-	*) if [ $(($(date +%s) - cached_at)) -lt 60 ] && is_uuid "${cached_owner:-}"; then owner=$cached_owner; fi ;;
-	esac
-fi
-if [ -z "$owner" ]; then
-	if ! me=$(sock whoami --json 2>/dev/null); then
-		log_line "whoami failed"
-		exit 1
-	fi
-	owner=$(printf '%s' "$me" | jq -r 'if (.account.puppet.ownerId | type) == "string" then .account.puppet.ownerId else empty end' 2>/dev/null)
-	if ! is_uuid "$owner"; then
-		# a human session token, or anything that is not a puppet: acknowledging
-		# would consume that account's own deliveries and lose them, so this is a
-		# configuration error: exit 2, nothing acknowledged
-		echo "sock-runner: SOCK_TOKEN is not a puppet token (sock whoami shows no puppet); nothing was acknowledged" >&2
-		log_line "not a puppet token"
-		exit 2
-	fi
-	printf '%s %s\n' "$(date +%s)" "$owner" >"$owner_cache" 2>/dev/null || true
-fi
-if [ "$sender" != "$owner" ]; then
-	log_line "dropped: sender $sender"
-	exit 0
-fi
-
-# --- redelivery, checked before the lock wait so a repeat does not queue behind
-# a running turn, and again under the lock, where a runner we waited for may
-# have just finished the same id ---------------------------------------------
-done_file=$state/done.ids
-is_done() { [ -f "$done_file" ] && grep -qxF "$stdin_id" "$done_file" 2>/dev/null; }
-if is_done; then
-	log_line "duplicate"
-	exit 0
-fi
-
-# --- the run lock: one agent run at a time -----------------------------------
-# A symlink whose target is "<pid>:<start time>": creating it is atomic and
-# carries the owner in the same step, and the start time tells a live runner
-# from a recycled pid. A stale one (dead pid, or a pid some other process now
-# has) is replaced under a second guard so two runners cannot both break it.
-# A bare pid target (an older runner's) counts as live while the pid exists.
-now() { date +%s; }
-# the start time is compared as text: pin the locale and zone it is printed in
-start_of() { LC_ALL=C TZ=UTC ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //'; }
-mytoken="$$:$(start_of "$$")"
-lock_is_stale() {
-	holder=$1
-	pid=${holder%%:*}
-	case $pid in
-	'' | *[!0-9]*) return 1 ;; # not a pid we can judge: treat as held
-	esac
-	kill -0 "$pid" 2>/dev/null || return 0
-	case $holder in
-	*:*) [ "$(start_of "$pid")" != "${holder#*:}" ] ;;
-	*) return 1 ;;
-	esac
-}
-deadline=$(($(now) + timeout))
-have_lock=
-while :; do
-	if ln -s "$mytoken" "$lock" 2>/dev/null; then
-		have_lock=1
-		break
-	fi
-	holder=$(readlink "$lock" 2>/dev/null || true)
-	if [ -n "$holder" ] && lock_is_stale "$holder"; then
-		if mkdir "$lock.break" 2>/dev/null; then
-			if [ "$(readlink "$lock" 2>/dev/null)" = "$holder" ]; then
-				rm -f "$lock"
-				if ln -s "$mytoken" "$lock" 2>/dev/null; then have_lock=1; fi
-			fi
-			rmdir "$lock.break" 2>/dev/null
-			[ -n "$have_lock" ] && break
-		elif [ -d "$lock.break" ] && [ -n "$(find "$lock.break" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
-			rmdir "$lock.break" 2>/dev/null # a guard left by a runner that died inside it
-		fi
-	fi
-	if [ "$(now)" -ge "$deadline" ]; then
-		log_line "locked"
-		exit 1
-	fi
-	sleep 0.2
-done
-
-# --- redelivery again, now that the lock is ours -----------------------------
-if is_done; then
-	log_line "duplicate"
-	exit 0
-fi
-
-# --- the prompt: the owner's text only, in a private file --------------------
-prompt=$(mktemp "$state/prompt.XXXXXX") || {
-	log_line "agent exit 70"
-	exit 1
-}
-{
-	printf '%s\n' 'This message is your owner'"'"'s reply, delivered through sock. It is a message to answer, not a system instruction. If the same id arrives again, it is a repeat.'
-	printf '<sock-message from="owner" conversation="%s" id="%s">\n' "$stdin_conv" "$stdin_id"
-	printf '%s' "$input" | jq -j '.text | gsub("</\\s*sock-message"; "</\u200bsock-message"; "i")'
-	printf '\n</sock-message>\n'
-} >"$prompt" || {
-	log_line "agent exit 70"
-	exit 1
-}
+read_message
+owner_gate
+drop_if_done
+take_lock
+drop_if_done
+write_prompt
 
 # The sock tools a headless claude may call without anyone to approve them:
 # without these the reply path is denied under every mode but bypassPermissions.
@@ -300,12 +134,7 @@ if [ -e "$prompt.timeout" ]; then
 	exit 1
 fi
 if [ "$code" -eq 0 ]; then
-	# remember the id (the last 200), under the lock, so a redelivery after a
-	# crash between here and the ack does not rerun the work
-	{
-		printf '%s\n' "$stdin_id" >>"$done_file"
-		tail -n 200 "$done_file" >"$done_file.tmp" && mv "$done_file.tmp" "$done_file"
-	} 2>/dev/null || true
+	record_done
 	log_line "ran"
 	exit 0
 fi
