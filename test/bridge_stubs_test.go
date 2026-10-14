@@ -61,6 +61,7 @@ type fakeMA struct {
 	dropSend int                // POSTs to record and then answer by closing the connection
 	flood    int                // inert events played before the script
 	pre      []any              // events played as soon as the stream opens, before the send: another turn's
+	noEcho   bool               // the stream does not echo the posted user.message
 }
 
 func newFakeMA(t *testing.T) *fakeMA {
@@ -189,13 +190,16 @@ func (f *fakeMA) play(w http.ResponseWriter, r *http.Request) {
 	if idx < len(f.events) {
 		evs = f.events[idx]
 	}
-	hold, split, flood := f.hold, f.split, f.flood
+	hold, split, flood, noEcho := f.hold, f.split, f.flood, f.noEcho
 	var body struct {
 		Events []map[string]any `json:"events"`
 	}
 	_ = json.Unmarshal([]byte(f.sent[idx]), &body)
 	f.mu.Unlock()
 	for _, e := range body.Events {
+		if noEcho {
+			break
+		}
 		e["id"] = fmt.Sprintf("evt_user%d", idx)
 		b, _ := json.Marshal(e)
 		_, _ = fmt.Fprintf(w, "event: message\ndata: %s\n\n", b)

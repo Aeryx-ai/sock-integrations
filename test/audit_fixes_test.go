@@ -526,10 +526,40 @@ func TestBridgeStreamAndCatchUpAgree(t *testing.T) {
 	}
 }
 
+// historyAfterSend serves, once the user.message is posted, a history of an
+// earlier turn and then this one: the posted prompt, bnAnswer and an idle.
+func (h *bnHarness) historyAfterSend() {
+	done := make(chan struct{})
+	h.t.Cleanup(func() { close(done) })
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			case <-time.After(20 * time.Millisecond):
+			}
+			if len(h.api.sentBodies()) > 0 {
+				hist := []map[string]any{
+					textEvent("user.message", "evt_u0", "an earlier message"),
+					textEvent("agent.message", "old1", "PREVIOUS TURN ANSWER"),
+					{"type": "session.status_idle", "id": "evt_i0", "stop_reason": map[string]any{"type": "end_turn"}},
+					textEvent("user.message", "evt_u1", h.sentPrompt()),
+					textEvent("agent.message", "evt_a1", bnAnswer),
+					{"type": "session.status_idle", "id": "evt_i1", "stop_reason": map[string]any{"type": "end_turn"}},
+				}
+				h.api.set(func(f *fakeMA) { f.history = hist })
+				return
+			}
+		}
+	}()
+}
+
 // sec 1: events on the stream before this run's own user.message belong to
-// another turn: its answer and its idle are not this message's
+// another turn: its answer and its idle are not this message's. Whether the
+// stream or the history ends it depends on how the events fall into polls.
 func TestBridgeStreamIgnoresAnotherTurnsEvents(t *testing.T) {
 	h := newBridgeHarness(t)
+	h.historyAfterSend()
 	h.api.set(func(f *fakeMA) {
 		f.pre = []any{textEvent("agent.message", "old1", "PREVIOUS TURN ANSWER"), idle("end_turn")}
 	})
@@ -538,5 +568,36 @@ func TestBridgeStreamIgnoresAnotherTurnsEvents(t *testing.T) {
 	s := h.sends()
 	if r.Code != 0 || len(s) != 1 || s[0].Text != bnAnswer {
 		t.Fatalf("exit %d, sends %v", r.Code, s)
+	}
+}
+
+// A stream that does not echo this run's user.message cannot anchor the turn:
+// at an idle it finishes from history, which holds the user.message, instead of
+// posting from the stream. One that echoes posts from the stream.
+func TestBridgeUnanchoredStreamFinishesFromHistory(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		noEcho bool
+		pre    []any
+		log    bool
+	}{
+		{"echoes", false, nil, false},
+		{"never echoes, an earlier turn's idle first", true, []any{textEvent("agent.message", "old1", "PREVIOUS TURN ANSWER"), idle("end_turn")}, true},
+		{"never echoes", true, nil, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newBridgeHarness(t)
+			h.api.set(func(f *fakeMA) { f.noEcho = c.noEcho; f.pre = c.pre })
+			h.script(agentMsg(bnAnswer), idle("end_turn"))
+			h.historyAfterSend()
+			r := h.run(rnOpts{})
+			s := h.sends()
+			if r.Code != 0 || len(s) != 1 || s[0].Text != bnAnswer || len(h.api.sentBodies()) != 1 {
+				t.Fatalf("exit %d, sends %v, user.messages %d, log %q", r.Code, s, len(h.api.sentBodies()), h.bridgeLog())
+			}
+			if got := strings.Count(h.bridgeLog(), "stream unanchored"); got != map[bool]int{true: 1, false: 0}[c.log] {
+				t.Fatalf("log %q", h.bridgeLog())
+			}
+		})
 	}
 }

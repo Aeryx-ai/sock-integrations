@@ -327,14 +327,16 @@ mark_sent() {
 # not a string of 1 to 256 characters without a control character (a number,
 # one holding a newline) is refused; one with no id is kept. The end is the
 # first session.status_idle, with its stop reason (end_turn when it gives none),
-# or session.error.
+# or session.error. An end seen before the turn started sets unanchored: on the
+# stream, that is an end the bridge cannot place.
 # shellcheck disable=SC2016 # jq's variables, not the shell's
 turn_jq='
 def texts: [.content[]? | objects | select(.type == "text") | .text | strings];
 def okid: if .id == null then "" elif (.id | type) == "string" and (.id | test("^[^\u0000-\u001f\u007f]{1,256}$")) then .id else null end;
 def step($e; $tag):
 	if $e.type == "user.message" and (($e | texts | join("") | split("\n"))[1] == $tag) then {started: true, ids: {}, texts: [], reason: null}
-	elif (.started | not) or .reason != null then .
+	elif (.started | not) then (if $e.type == "session.status_idle" or $e.type == "session.error" then .unanchored = true else . end)
+	elif .reason != null then .
 	elif $e.type == "agent.message" then
 		($e | okid) as $k
 		| if $k == null or ($k != "" and .ids[$k]) then .
@@ -382,22 +384,29 @@ catch_up() {
 	finished=$(printf '%s' "$verdict" | jq -r '.done // false')
 }
 
-# --- a redelivery of a message whose user.message already went in --------------
-if [ -f "$sent_file" ] && grep -qxF "$stdin_id" "$sent_file" 2>/dev/null; then
+# from_history polls the history until this message's turn is done, then
+# finishes. When the message is not there: "send" returns, so the caller sends
+# it; "wait" keeps polling (it was posted, and the history may lag).
+from_history() {
 	while :; do
 		catch_up
 		if [ "$found" = true ] && [ "$finished" = true ]; then
 			finish "$(printf '%s' "$verdict" | jq -r '.reason // "error"')" "$(printf '%s' "$verdict" | jq -r '.text // ""')"
 		fi
-		# not there at all: the post never landed, so it goes out below. There,
-		# but the agent is still working: wait for it
-		[ "$found" = true ] || break
+		[ "$found" = true ] || [ "$1" = wait ] || return 0
 		if [ "$(now)" -ge "$deadline" ]; then
 			log_line "timeout"
 			exit 1
 		fi
 		nap 2
 	done
+}
+
+# --- a redelivery of a message whose user.message already went in --------------
+# not there at all: the post never landed, so it goes out below. There, but the
+# agent is still working: wait for it
+if [ -f "$sent_file" ] && grep -qxF "$stdin_id" "$sent_file" 2>/dev/null; then
+	from_history send
 fi
 
 # --- a fresh turn: stream first, then send, then follow the stream -----------
@@ -468,6 +477,15 @@ while [ -z "$reason" ]; do
 				mv "$turnn" "$turn"
 			reason=$(jq -r '.reason // empty' "$turn" 2>/dev/null)
 			[ -n "$reason" ] && break
+			# an end before this run's own user.message showed: a stream that does
+			# not echo it, or one that played another turn's end first. Nothing from
+			# it is posted: the history holds the user.message and places the turn.
+			if [ "$(jq -r '.unanchored // false' "$turn" 2>/dev/null)" = true ]; then
+				kill "$stream_pid" 2>/dev/null
+				stream_pid=
+				log_line "stream unanchored"
+				from_history wait
+			fi
 		fi
 	fi
 	if ! kill -0 "$stream_pid" 2>/dev/null; then
