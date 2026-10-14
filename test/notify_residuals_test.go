@@ -197,3 +197,34 @@ func withSed(t *testing.T, env map[string]string, sed string) {
 	}
 	env["PATH"] = bin + ":" + hookPathTail
 }
+
+// A send that failed outright, or never ran sock, did not land: the next idle
+// of the same turn sends the ask. Only a send the watchdog killed is held back.
+func TestAnAskWhoseSendFailedOutrightIsSentAgain(t *testing.T) {
+	state := t.TempDir()
+	rec := filepath.Join(t.TempDir(), "attempts")
+	bin := fakeSock(t, "cat >/dev/null\necho x >>"+rec+"\nexit 1")
+	env := map[string]string{"PATH": bin + ":" + hookPathTail}
+	runHook(t, "http://127.0.0.1:9", hookEnv{Env: env, Stdin: stopInput("s27", "Proceed?"), State: state}, "--stop")
+	runHook(t, "http://127.0.0.1:9", hookEnv{Env: env, Stdin: idleInput("s27"), State: state}, "--idle")
+	runHook(t, "http://127.0.0.1:9", hookEnv{Env: env, Stdin: idleInput("s27"), State: state}, "--idle")
+	b, _ := os.ReadFile(rec)
+	if n := strings.Count(string(b), "x"); n != 2 {
+		t.Fatalf("%d send attempts, want 2: a failed send held the ask back", n)
+	}
+}
+
+func TestAnAskThatNeverReachedSockIsSentAgain(t *testing.T) {
+	state := t.TempDir()
+	rec := filepath.Join(t.TempDir(), "attempts")
+	bin := fakeSock(t, "cat >/dev/null\necho x >>"+rec)
+	env := map[string]string{"PATH": bin + ":" + hookPathTail}
+	runHook(t, "http://127.0.0.1:9", hookEnv{Env: env, Stdin: stopInput("s28", "Proceed?"), State: state}, "--stop")
+	noToken := map[string]string{"PATH": env["PATH"], "SOCK_TOKEN": ""}
+	runHook(t, "http://127.0.0.1:9", hookEnv{Env: noToken, Stdin: idleInput("s28"), State: state}, "--idle")
+	runHook(t, "http://127.0.0.1:9", hookEnv{Env: env, Stdin: idleInput("s28"), State: state}, "--idle")
+	b, _ := os.ReadFile(rec)
+	if n := strings.Count(string(b), "x"); n != 1 {
+		t.Fatalf("%d send attempts, want 1: a send that never ran sock held the ask back", n)
+	}
+}

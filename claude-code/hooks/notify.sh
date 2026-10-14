@@ -335,6 +335,7 @@ send_as_puppet() {
 	bounded "$work/text" /dev/null "$work/send.err" \
 		env -u SOCK_TOKEN -u SOCK_URL -u SOCK_ACCESS_GATE -u CLAUDE_PROJECT_DIR sock send --as-puppet --project "$PLUGIN_ROOT"
 	rc=$?
+	send_rc=$rc
 	if [ "$rc" -ne 0 ]; then
 		log_line "sock send exit $rc: $(scrubbed "$work/send.err")"
 	fi
@@ -474,12 +475,21 @@ send_owner() {
 		) 2>/dev/null
 	fi
 	send_text "$1" && return 0
+	# Only a send the watchdog killed (TERM 143, KILL 137) may have landed; any
+	# other failure, or one before sock ran, leaves the ask to send again.
+	case $send_rc in
+	143 | 137) ;;
+	*) [ -z "${2:-}" ] || rm -f "$asks/$session.sent" ;;
+	esac
 	release_hour
 	return 1
 }
 
+# send_rc is the status of the last `sock send`, empty when none ran.
+send_rc=
 send_text() {
 	# $1 is the message body; the project name is prefixed here.
+	send_rc=
 	local text
 	text="$project: $(redact "$1")"
 	if [ "$as_puppet" = 1 ]; then
@@ -563,6 +573,7 @@ send_text() {
 	SOCK_TOKEN=$send_token bounded "$work/text" /dev/null "$work/send.err" \
 		sock ${url_args[@]+"${url_args[@]}"} send
 	rc=$?
+	send_rc=$rc
 	if [ "$rc" -ne 0 ]; then
 		log_line "sock send exit $rc: $(scrubbed "$work/send.err" "$token" "$send_token")"
 	fi
