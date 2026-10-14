@@ -24,6 +24,9 @@ here=$(cd "$(dirname "$0")" && pwd)
 session=${SOCK_BRIDGE_SESSION:-}
 key=${ANTHROPIC_API_KEY:-}
 api=${SOCK_BRIDGE_API:-https://api.anthropic.com}
+# the key goes to this URL: https, or http to a loopback address (the tests)
+printf '%s\n' "$api" | grep -Eqx 'https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?|http://(localhost|127\.0\.0\.1)(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?' ||
+	die_config "SOCK_BRIDGE_API must be an https URL, or http to localhost or 127.0.0.1"
 printf '%s\n' "$session" | grep -Eqx '[A-Za-z0-9_][A-Za-z0-9_-]{0,127}' ||
 	die_config "SOCK_BRIDGE_SESSION must be 1 to 128 characters of A-Z a-z 0-9 _ -, not starting with -"
 printf '%s\n' "$key" | grep -Eqx '[A-Za-z0-9_.-]{8,200}' || die_config "ANTHROPIC_API_KEY is missing or has characters an API key does not"
@@ -175,7 +178,8 @@ awk_cut='
 		while (n > 0 && (ord[substr(line, n + 1, 1)] >= 128 && ord[substr(line, n + 1, 1)] < 192)) n--
 		return n
 	}'
-post_one() { sock send -- "$1" >/dev/null 2>&1; }
+# the text goes on stdin: argv is visible in ps to the same user
+post_one() { printf '%s' "$1" | sock send >/dev/null 2>&1; }
 clean_text() { LC_ALL=C tr -d '\000-\010\013\014\016-\037\177'; }
 post_text() {
 	mkdir -p "$parts" || exit 1
@@ -196,7 +200,16 @@ post_text() {
 		}'
 	count=$(find "$parts" -name 'part.*' | wc -l | tr -d ' ')
 	[ "$count" -gt 0 ] || { printf '%s\n' "$1" >"$parts/part.1"; count=1; }
+	# parts of this message already posted by an earlier run stay posted
 	i=1
+	posted_file=$state_dir/posted.part
+	if [ -f "$posted_file" ] && [ "$(cut -d' ' -f1 "$posted_file")" = "$stdin_id" ]; then
+		n=$(cut -d' ' -f2 "$posted_file")
+		case $n in
+		'' | *[!0-9]*) n=0 ;;
+		esac
+		i=$((n + 1))
+	fi
 	while [ "$i" -le "$count" ] && [ "$i" -le 5 ]; do
 		part=$(cat "$parts/part.$i")
 		if [ "$i" -eq 5 ] && [ "$count" -gt 5 ]; then
@@ -208,6 +221,7 @@ post_text() {
 			log_line "send failed"
 			exit 1
 		}
+		printf '%s %s\n' "$stdin_id" "$i" >"$posted_file" 2>/dev/null || true
 		i=$((i + 1))
 	done
 	rm -rf "$parts"
@@ -233,7 +247,9 @@ finish() {
 		;;
 	*)
 		text="the agent hit an error"
-		out="agent error"
+		# name what the API said, if it looks like a stop reason
+		why=$(printf '%s\n' "$reason" | grep -Ex '[a-z_]{1,40}' || echo unknown)
+		out="agent error ($why)"
 		;;
 	esac
 	post_text "$text"

@@ -68,6 +68,8 @@ lib_init() {
 	mkdir -p "$state_dir" 2>/dev/null && chmod 700 "$state_dir" 2>/dev/null
 	# prompt files older than any run can last
 	find "$state_dir" -maxdepth 1 -name 'prompt.*' -mmin "+$((timeout / 60 + 2))" -exec rm -f {} + 2>/dev/null || true
+	# the bridge's curl config holds the API key: an old one goes whatever its pid
+	find "$state_dir" -maxdepth 1 -name 'curl.*' -mmin "+$((timeout / 60 + 2))" -exec rm -f {} + 2>/dev/null || true
 	sweep_dead
 	msg_id=-
 	prompt=

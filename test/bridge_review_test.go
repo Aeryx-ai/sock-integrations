@@ -1,6 +1,7 @@
 package test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -256,5 +257,110 @@ func TestBridgeCurlNeverSeesTheKeyInItsArguments(t *testing.T) {
 	argv, _ := os.ReadFile(filepath.Join(h.rec, "curl.argv"))
 	if r.Code != 0 || len(argv) == 0 || strings.Contains(string(argv), bnKey) || strings.Contains(string(argv), "x-api-key") {
 		t.Fatalf("exit %d, curl argv %q", r.Code, argv)
+	}
+}
+
+// brg 1: the key only goes to https, or to a loopback address for tests
+func TestBridgeRefusesToSendTheKeyToAnUnsafeURL(t *testing.T) {
+	for _, u := range []string{"http://evil.example", "http://127.0.0.1.evil.example", "ftp://x", "https://", "api.anthropic.com", "http://localhost@evil.example", "https://x/ y"} {
+		t.Run(u, func(t *testing.T) {
+			h := newBridgeHarness(t)
+			r := h.run(rnOpts{Env: map[string]string{"SOCK_BRIDGE_API": u}})
+			if r.Code != 2 || len(h.api.kinds()) != 0 {
+				t.Fatalf("exit %d, %d requests", r.Code, len(h.api.kinds()))
+			}
+		})
+	}
+	for _, u := range []string{"http://localhost:1", "http://127.0.0.1:1", "https://api.example.test"} {
+		t.Run("accepts "+u, func(t *testing.T) {
+			h := newBridgeHarness(t)
+			r := h.run(rnOpts{Env: map[string]string{"SOCK_BRIDGE_API": u, "SOCK_BRIDGE_TIMEOUT": "3"}})
+			if r.Code == 2 {
+				t.Fatalf("refused %s: %q", u, r.Stderr)
+			}
+		})
+	}
+}
+
+// brg 2: a part that failed is retried alone; the parts already posted stay posted
+func TestBridgeRetryPostsOnlyTheRemainingParts(t *testing.T) {
+	h := newBridgeHarness(t)
+	var b strings.Builder
+	for i := range 2000 {
+		fmt.Fprintf(&b, "line %05d %s\n", i, strings.Repeat("x", 45)) // two parts of different text
+	}
+	long := b.String()
+	h.script(agentMsg(long), idle("end_turn"))
+	r := h.run(rnOpts{Env: map[string]string{"STUB_SEND_FAIL_N": "1"}})
+	if r.Code != 1 || len(h.sends()) != 2 {
+		t.Fatalf("first run: exit %d, %d sends", r.Code, len(h.sends()))
+	}
+	tag := `id="` + rnMsgID + `"`
+	h.api.set(func(f *fakeMA) {
+		f.history = []map[string]any{
+			{"type": "user.message", "id": "evt_u1", "content": []any{map[string]any{"type": "text", "text": "<sock-message " + tag + ">x</sock-message>"}}},
+			{"type": "agent.message", "id": "evt_a1", "content": []any{map[string]any{"type": "text", "text": long}}},
+			{"type": "session.status_idle", "id": "evt_i1", "stop_reason": map[string]any{"type": "end_turn"}},
+		}
+	})
+	r = h.run(rnOpts{})
+	s := h.sends()
+	// part 1 (posted), part 2 (failed), then only part 2 again
+	if r.Code != 0 || len(s) != 3 || s[2].Text != s[1].Text || s[2].Text == s[0].Text {
+		t.Fatalf("retry: exit %d, %d sends", r.Code, len(s))
+	}
+}
+
+// brg 3: an unknown stop reason is named in the log
+func TestBridgeLogsAnUnknownStopReason(t *testing.T) {
+	h := newBridgeHarness(t)
+	h.script(idle("model_context_window_exceeded"))
+	h.run(rnOpts{})
+	if !strings.Contains(h.bridgeLog(), "agent error (model_context_window_exceeded)") {
+		t.Fatalf("log %q", h.bridgeLog())
+	}
+}
+
+func TestBridgeDoesNotLogAnOddStopReason(t *testing.T) {
+	h := newBridgeHarness(t)
+	h.script(idle("x; rm -rf / \x1b[31m"))
+	h.run(rnOpts{})
+	if strings.Contains(h.bridgeLog(), "rm -rf") || strings.ContainsRune(h.bridgeLog(), 0x1b) || !strings.Contains(h.bridgeLog(), "agent error (unknown)") {
+		t.Fatalf("log %q", h.bridgeLog())
+	}
+}
+
+// brg 4: the answer reaches `sock send` on stdin, not in argv (visible in ps)
+func TestBridgeSendsTheAnswerOnStdin(t *testing.T) {
+	h := newBridgeHarness(t)
+	h.script(agentMsg(bnAnswer), idle("end_turn"))
+	h.run(rnOpts{})
+	argv, err := os.ReadFile(filepath.Join(h.rec, "send.0", "argv"))
+	if err != nil || strings.Contains(string(argv), "ANSWERSENTINEL") {
+		t.Fatalf("argv %q (%v)", argv, err)
+	}
+	if s := h.sends(); len(s) != 1 || !strings.Contains(s[0].Text, "ANSWERSENTINEL") {
+		t.Fatalf("sends %v", s)
+	}
+}
+
+// brg 5: the curl config holds the key, so an old one goes even if its pid is alive again
+func TestBridgeSweepsAnOldCurlConfigWhateverItsPid(t *testing.T) {
+	h := newBridgeHarness(t)
+	if err := os.MkdirAll(h.state, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := filepath.Join(h.state, "curl."+strconv.Itoa(rnLivePid(t)))
+	if err := os.WriteFile(old, []byte("x-api-key: "+bnKey), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	when := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(old, when, when); err != nil {
+		t.Fatal(err)
+	}
+	h.script(agentMsg(bnAnswer), idle("end_turn"))
+	h.run(rnOpts{})
+	if _, err := os.Stat(old); err == nil {
+		t.Fatal("an hour-old curl config was kept")
 	}
 }

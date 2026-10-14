@@ -32,9 +32,11 @@ send)
   n=$(ls "$STUB_DIR" | grep -c '^send\.')
   d="$STUB_DIR/send.$n"; mkdir "$d"
   shift; [ "$1" = "--" ] && shift
-  printf '%s' "$1" > "$d/text"
+  printf '%s\n' "$@" > "$d/argv"
+  if [ $# -gt 0 ]; then printf '%s' "$1" > "$d/text"; else cat > "$d/text"; fi
   env > "$d/env"
-  printf '%s\n' "$@" > "$d/argv" ;;
+  [ "$STUB_SEND_FAIL_N" = "$n" ] && exit 1
+  exit 0 ;;
 *) exit 64 ;;
 esac
 `
