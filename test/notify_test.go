@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
+	"unicode/utf8"
 )
 
 // failedSend matches the log line for a sock send that exited nonzero. The
@@ -582,5 +584,108 @@ func TestWithoutJqPermissionKeepsThePhraseAndIdleStaysQuiet(t *testing.T) {
 	runHook(t, s.URL, hookEnv{Env: env, Stdin: idleInput("s8")}, "--idle")
 	if g := s.Requests(); len(g) != 1 {
 		t.Fatalf("idle without jq sent: %+v", g)
+	}
+}
+
+// --- findings of the fresh-context security review of 9e8a549 -------------
+
+func TestIdleFallbackSkipsToolOnlyEntries(t *testing.T) {
+	s := newStub(t)
+	tmp := t.TempDir()
+	transcript := filepath.Join(tmp, "s9.jsonl")
+	lines := []string{
+		hookJSON(map[string]any{"type": "assistant", "message": map[string]any{"content": []map[string]any{{"type": "text", "text": "Deploy now?"}}}}),
+		hookJSON(map[string]any{"type": "assistant", "message": map[string]any{"content": []map[string]any{{"type": "tool_use", "name": "Bash"}}}}),
+	}
+	if err := os.WriteFile(transcript, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	in := hookJSON(map[string]any{"session_id": "s9", "hook_event_name": "Notification", "notification_type": "idle_prompt", "transcript_path": transcript})
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PROJECT_DIR": "/x/proj"}, Stdin: in}, "--idle")
+	if g := s.Requests(); len(g) != 1 || g[0].Text != "proj: Deploy now?" {
+		t.Fatalf("%+v", g)
+	}
+}
+
+func TestANewTurnWithTheSameAskIsSentAgain(t *testing.T) {
+	s := newStub(t)
+	state := t.TempDir()
+	for range 2 {
+		runHook(t, s.URL, hookEnv{Stdin: stopInput("s10", "Proceed?"), State: state}, "--stop")
+		runHook(t, s.URL, hookEnv{Stdin: idleInput("s10"), State: state}, "--idle")
+		runHook(t, s.URL, hookEnv{Stdin: idleInput("s10"), State: state}, "--idle")
+	}
+	if g := s.Requests(); len(g) != 2 {
+		t.Fatalf("two turns asked the same thing, %d sent: %+v", len(g), g)
+	}
+}
+
+func TestWithoutAHashToolNothingIsSuppressed(t *testing.T) {
+	s := newStub(t)
+	dir := binWithoutJq(t)
+	for _, name := range []string{"shasum", "sha256sum"} {
+		_ = os.Remove(filepath.Join(dir, name))
+	}
+	for _, d := range []string{"/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"} {
+		if _, err := os.Stat(filepath.Join(d, "jq")); err == nil {
+			if err := os.Symlink(filepath.Join(d, "jq"), filepath.Join(dir, "jq")); err != nil {
+				t.Fatal(err)
+			}
+			break
+		}
+	}
+	state := t.TempDir()
+	env := map[string]string{"PATH": dir}
+	runHook(t, s.URL, hookEnv{Env: env, Stdin: stopInput("s11", "First?"), State: state}, "--stop", "--ask-now")
+	runHook(t, s.URL, hookEnv{Env: env, Stdin: stopInput("s11", "Second?"), State: state}, "--stop", "--ask-now")
+	if g := s.Requests(); len(g) != 2 {
+		t.Fatalf("%+v", g)
+	}
+}
+
+func TestSecretsAreRedactedBeforeSending(t *testing.T) {
+	s := newStub(t)
+	msg := "Here is what I found: the token is " + token + " and AWS_SECRET_ACCESS_KEY=zzz9 plus ghp_abcdefghijklmnop and https://b.s3/x?X-Amz-Signature=deadbeef. Proceed?"
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PROJECT_DIR": "/x/proj"}, Stdin: stopInput("s12", msg)}, "--stop", "--ask-now")
+	g := s.Requests()
+	if len(g) != 1 {
+		t.Fatalf("%+v", g)
+	}
+	for _, bad := range []string{token, "zzz9", "ghp_abcdefghijklmnop", "deadbeef"} {
+		if strings.Contains(g[0].Text, bad) {
+			t.Fatalf("%q reached the message: %q", bad, g[0].Text)
+		}
+	}
+	if !strings.HasSuffix(g[0].Text, "Proceed?") {
+		t.Fatalf("the ask itself was lost: %q", g[0].Text)
+	}
+}
+
+func TestOtherFenceShapesAreDropped(t *testing.T) {
+	s := newStub(t)
+	msg := "Logs:\n\n~~~\nTILDE_SECRET=1\n~~~\n\n````md\n```\nNESTED_SECRET=2\n```\n````\n\nRetry the deploy?"
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PROJECT_DIR": "/x/proj"}, Stdin: stopInput("s13", msg)}, "--stop", "--ask-now")
+	g := s.Requests()
+	if len(g) != 1 || strings.Contains(g[0].Text, "TILDE_SECRET") || strings.Contains(g[0].Text, "NESTED_SECRET") || !strings.HasSuffix(g[0].Text, "Retry the deploy?") {
+		t.Fatalf("%+v", g)
+	}
+}
+
+func TestCapKeepsValidUTF8(t *testing.T) {
+	s := newStub(t)
+	msg := "Ok? " + strings.Repeat("é", 400)
+	runHook(t, s.URL, hookEnv{Stdin: stopInput("s14", msg)}, "--stop", "--ask-now")
+	g := s.Requests()
+	if len(g) != 1 || !utf8.ValidString(g[0].Text) || len(g[0].Text) > 606 {
+		t.Fatalf("len %d valid %v", len(g[0].Text), utf8.ValidString(g[0].Text))
+	}
+}
+
+func TestIdleIgnoresATranscriptThatIsNotARegularFile(t *testing.T) {
+	s := newStub(t)
+	in := hookJSON(map[string]any{"session_id": "s15", "hook_event_name": "Notification", "notification_type": "idle_prompt", "transcript_path": "/dev/zero"})
+	r := runHook(t, s.URL, hookEnv{Stdin: in}, "--idle")
+	if g := s.Requests(); len(g) != 0 || r.Elapsed > 5*time.Second {
+		t.Fatalf("%+v %v", g, r.Elapsed)
 	}
 }

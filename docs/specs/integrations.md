@@ -25,7 +25,7 @@ Out, tracked in bd:
 1. One puppet per binding (platform plus machine). A leaked token costs one binding, and the server rate limit (60 sends per minute) is per puppet.
 2. One consumer per puppet. The channel and any `sock_fetch` or `sock_ack` caller consume the same deliveries, so a puppet with the channel on is never used for fetch or ack.
 3. The token comes from the environment or the plugin's secure `userConfig`. No checked-in file holds it.
-4. Hooks never forward transcript or notification free text. The message is a fixed phrase plus the project directory name.
+4. Hooks forward what the owner needs to act on and nothing more: the notification text for a permission prompt, and the trailing ask of the last assistant message (fenced code dropped, secret shapes redacted, 600 bytes) when a session is waiting. Nothing is sent when nothing is pending. Until 2026-10-13 this rule said hooks never forward free text; the owner reversed it ("Is something waiting on me, then tell me what I need to do in the sock message") and accepted that text the assistant echoed can leave the machine.
 5. Hooks always exit 0 and never retry. A second call gets a second idempotency key and can double post. The CLI already retries one call internally with one key.
 6. Message text received from sock is untrusted. The channel gates on the owner id; nothing here widens that gate.
 
@@ -100,7 +100,7 @@ Rules that carry over, and where the plugin cannot keep them:
 
 - The token never lives in a file: the plugin has none, and `config.toml` forwards it by name.
 - Only the sending tools are exposed to Codex (rule 2): `codex/config.toml` `enabled_tools`. The skill also says not to call `sock_fetch` or `sock_ack`, which is advice.
-- Hooks send a fixed phrase plus the project name, never transcript text: `notify.sh` unchanged.
+- Hooks follow rule 4 through the shared `notify.sh`: `PermissionRequest` runs `--permission` (Codex's input carries no `message`, so it sends `needs permission`) and `Stop` runs `--stop --ask-now`, since Codex has no idle event.
 
 Not verified: that `${PLUGIN_ROOT}` expands inside a hook `command` (it is an environment variable the plugin's processes get), and `policy.authentication` values.
 
@@ -112,11 +112,12 @@ Not verified: that `${PLUGIN_ROOT}` expands inside a hook `command` (it is an en
 
 Shared by Claude Code and Codex. Behavior:
 
-1. Drain stdin, bounded to 2 seconds so a held-open stdin cannot hang the hook. Ignore its content.
+1. Read the hook JSON from stdin, bounded to 2 seconds so a held-open stdin cannot hang the hook, and parse it with `jq`. The mode is the first argument: `--permission`, `--stop` (optionally `--ask-now`), `--idle`, or none, in which case the argument is a fixed phrase (the v1 shape).
+1a. `--stop` extracts the ask from `last_assistant_message`: fenced blocks (backtick or tilde) dropped, then from the last paragraph holding a `?` to the end, or the paragraph before a trailing numbered list; nothing when there is neither. It records the ask per session (`asks/<session>.ask`, written atomically) and clears the session's sent marker, so each turn starts fresh. `--idle` sends the recorded ask once per turn (`asks/<session>.sent` holds its SHA-256; skipped when no hash tool exists). Without a recorded ask, `--idle` reads the last 2 MiB of `transcript_path`, only when it is a regular file, and takes the last assistant entry that carries text. `--permission` sends the notification's `message`. Every outgoing text has the token and common secret shapes replaced with `[redacted]` (sock tokens, AWS key ids, GitHub and `sk-` keys, bearer values, `NAME=value` where NAME names a key, token, secret or password, URL query strings).
 2. Resolve token: `CLAUDE_PLUGIN_OPTION_SOCK_TOKEN` (set only under the plugin), else `SOCK_TOKEN`. The plugin token wins because `.mcp.json` always gives sock-mcp the plugin token, and an ambient `SOCK_TOKEN` exported for Codex must not make Claude Code hooks post as the Codex puppet. The URL comes from the same source as the token: `CLAUDE_PLUGIN_OPTION_SOCK_URL` for the plugin token, `SOCK_URL` for the env token, never the other. A URL from the matching source is passed as `sock --url`, so a config file cannot override it; with none, `SOCK_URL` is unset for the child, no `--url` is passed and the CLI default or config applies. Missing token: log one line and exit 0.
-3. With `--stop` (first argument), exit 0 unless `CLAUDE_PLUGIN_OPTION_NOTIFY_ON_STOP` is `true` or `SOCK_NOTIFY_ON_STOP` is `1`.
-4. Text is `<name>: <phrase>`, where `<name>` is the basename of `CLAUDE_PROJECT_DIR`, else `PWD`. Under `LC_ALL=C` the name keeps only `[A-Za-z0-9._ -]`, is cut to 100 characters, and becomes `project` when nothing remains.
-5. Run `sock send -- "<text>"` (the `--` keeps a project name like `-v` from parsing as a flag) as a child with a watchdog that kills it after `SOCK_HOOK_TIMEOUT` seconds, default 10; a value that is not a positive integer falls back to 10. Async hooks are not timed out by the host, so the script bounds itself. The watchdog is reaped without a job notice on stderr.
+3. `--stop` also sends `finished a turn` when `CLAUDE_PLUGIN_OPTION_NOTIFY_ON_STOP` is `true` or `SOCK_NOTIFY_ON_STOP` is `1`.
+4. Text is `<name>: <body>`, where `<name>` is the basename of `CLAUDE_PROJECT_DIR`, else `PWD`. Under `LC_ALL=C` the name keeps only `[A-Za-z0-9._ -]`, is cut to 100 characters, and becomes `project` when nothing remains.
+5. Run `sock send` with the text on stdin, never in argv, so another user's `ps` cannot read it, as a child with a watchdog that kills it after `SOCK_HOOK_TIMEOUT` seconds, default 10; a value that is not a positive integer falls back to 10. Async hooks are not timed out by the host, so the script bounds itself. The watchdog is reaped without a job notice on stderr.
 6. Any failure, including `sock` missing from `PATH`, appends one line to `${XDG_STATE_HOME:-$HOME/.local/state}/sock-integrations/hook.log` (mode 600, truncated above 100 KB). A failed send logs `sock send exit <code>:` and the child's stderr, with the token redacted from the whole captured stderr first and the result then cut to 300 bytes, so a token straddling the cut cannot leak a prefix. Every control character is stripped from the line, so tool output cannot drive a terminal that reads the log. The line never contains the token.
 7. Exit 0 always.
 

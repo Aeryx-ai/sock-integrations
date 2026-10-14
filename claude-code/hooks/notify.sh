@@ -121,9 +121,28 @@ extract_ask() {
 		}' | awk 'NF { blank = 0 } !NF { if (blank) next; blank = 1 } { print }' | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' | LC_ALL=C head -c 600
 }
 
+# redact replaces the plugin token and common secret shapes with [redacted]:
+# sock tokens, AWS access key ids, GitHub and OpenAI style keys, bearer
+# values, NAME=value where NAME names a key, token, secret or password, and
+# the query string of any URL. It narrows what an echoed secret can leak; it
+# does not close it.
+redact() {
+	local s=$1
+	if [ -n "$token" ]; then s=${s//"$token"/[redacted]}; fi
+	printf '%s' "$s" | sed -E \
+		-e 's/sock_(pt|st|ot|mk|rt|ct)_[A-Za-z0-9_-]+/[redacted]/g' \
+		-e 's/AKIA[0-9A-Z]{16}/[redacted]/g' \
+		-e 's/(ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]+/[redacted]/g' \
+		-e 's/sk-[A-Za-z0-9_-]{16,}/[redacted]/g' \
+		-e 's/[Bb]earer [A-Za-z0-9._~+\/=-]+/Bearer [redacted]/g' \
+		-e 's/([A-Za-z0-9_]*([Kk][Ee][Yy]|[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd])[A-Za-z0-9_]*)=[^[:space:]]+/\1=[redacted]/g' \
+		-e 's#(https?://[^[:space:]?]*)\?[^[:space:]]*#\1?[redacted]#g'
+}
+
 send_text() {
 	# $1 is the message body; the project name is prefixed here.
-	local text="$project: $1"
+	local text
+	text="$project: $(redact "$1")"
 	if [ -z "$token" ]; then
 		log_line "no token: set SOCK_TOKEN or the plugin's sock_token option"
 		return 1
@@ -155,7 +174,8 @@ send_text() {
 	'' | *[!0-9]*) timeout=10 ;;
 	*) [ "$timeout" -gt 0 ] || timeout=10 ;;
 	esac
-	sock ${url_args[@]+"${url_args[@]}"} send -- "$text" >/dev/null 2>"$errf" </dev/null &
+	# The text goes on stdin, not argv, so another user's `ps` cannot read it.
+	printf '%s' "$text" | sock ${url_args[@]+"${url_args[@]}"} send >/dev/null 2>"$errf" &
 	local pid=$!
 	(
 		sleep "$timeout"
@@ -182,30 +202,43 @@ send_text() {
 	[ "$rc" -eq 0 ]
 }
 
-# send_ask sends an ask unless this session already sent the same one.
+# send_ask sends an ask unless it was already sent since this session's last
+# Stop. Each Stop starts a new turn and clears the record, so the same short
+# question in a later turn ("Proceed?") is sent again. With no hash tool the
+# dedupe is skipped rather than suppressing everything.
 send_ask() {
-	local ask=$1 hash
+	local ask=$1 hash=
 	[ -n "$ask" ] || return 0
-	hash=$(printf '%s' "$ask" | shasum -a 256 2>/dev/null | cut -c1-64)
-	[ -n "$hash" ] || hash=$(printf '%s' "$ask" | sha256sum 2>/dev/null | cut -c1-64)
-	if [ -f "$asks/$session.sent" ] && [ "$(cat "$asks/$session.sent" 2>/dev/null)" = "$hash" ]; then
+	if command -v shasum >/dev/null 2>&1; then
+		hash=$(printf '%s' "$ask" | shasum -a 256 | cut -c1-64)
+	elif command -v sha256sum >/dev/null 2>&1; then
+		hash=$(printf '%s' "$ask" | sha256sum | cut -c1-64)
+	fi
+	if [ -n "$hash" ] && [ -f "$asks/$session.sent" ] && [ "$(cat "$asks/$session.sent" 2>/dev/null)" = "$hash" ]; then
 		return 0
 	fi
-	if send_text "$ask"; then
+	if send_text "$ask" && [ -n "$hash" ]; then
 		(
 			umask 077
-			mkdir -p "$asks" && printf '%s\n' "$hash" >"$asks/$session.sent"
+			mkdir -p "$asks" && printf '%s\n' "$hash" >"$asks/$session.sent.$$" && mv "$asks/$session.sent.$$" "$asks/$session.sent"
 		) 2>/dev/null
 	fi
 	return 0
 }
 
+# remember_ask records this turn's ask (or that there is none) atomically and
+# starts the turn's dedupe afresh.
 remember_ask() {
 	(
 		umask 077
 		mkdir -p "$asks" || exit 0
 		find "$asks" -type f -mtime +7 -delete 2>/dev/null
-		if [ -n "$1" ]; then printf '%s' "$1" >"$asks/$session.ask"; else rm -f "$asks/$session.ask"; fi
+		rm -f "$asks/$session.sent"
+		if [ -n "$1" ]; then
+			printf '%s' "$1" >"$asks/$session.ask.$$" && mv "$asks/$session.ask.$$" "$asks/$session.ask"
+		else
+			rm -f "$asks/$session.ask"
+		fi
 	) 2>/dev/null
 	return 0
 }
@@ -226,9 +259,11 @@ stop)
 	ask=
 	if [ "$have_jq" = 1 ]; then
 		ask=$(extract_ask "$(field last_assistant_message)")
-		remember_ask "$ask"
-		if [ "$ask_now" = 1 ]; then send_ask "$ask"; fi
 	fi
+	# Without jq the turn still starts: a stale ask from an earlier turn is
+	# forgotten rather than sent later.
+	remember_ask "$ask"
+	if [ "$ask_now" = 1 ]; then send_ask "$ask"; fi
 	case "${CLAUDE_PLUGIN_OPTION_NOTIFY_ON_STOP:-}:${SOCK_NOTIFY_ON_STOP:-}" in
 	true:* | *:1) send_text "finished a turn" ;;
 	esac
@@ -244,9 +279,11 @@ idle)
 		ask=$(cat "$asks/$session.ask" 2>/dev/null)
 	else
 		# Stop never ran for this session: the transcript's last assistant text.
+		# Only a regular file, only its last 2 MiB, read on stdin (a path that
+		# starts with "-" is never an option), and only entries that carry text.
 		transcript=$(field transcript_path)
-		if [ -n "$transcript" ] && [ -r "$transcript" ]; then
-			last=$(jq -R -c 'fromjson? | select(.type == "assistant") | [.message.content[]? | select(.type == "text") | .text] | join("\n")' "$transcript" 2>/dev/null | tail -n 1 | jq -r '.' 2>/dev/null)
+		if [ -n "$transcript" ] && [ -f "$transcript" ] && [ -r "$transcript" ]; then
+			last=$(tail -c 2097152 -- "$transcript" | jq -R -c 'fromjson? | select(.type == "assistant") | [.message.content[]? | select(.type == "text") | .text] | join("\n") | select(length > 0)' 2>/dev/null | tail -n 1 | jq -r '.' 2>/dev/null)
 			ask=$(extract_ask "$last")
 		fi
 	fi
