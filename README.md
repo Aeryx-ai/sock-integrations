@@ -41,6 +41,8 @@ Hooks never fail the agent. They log one line per failure to `${XDG_STATE_HOME:-
 - No token: the plugin option is unset, or `SOCK_TOKEN` is not exported where the hook runs.
 - `sock` or `sock-mcp` is not on the `PATH` of the Claude Code process, for example installed to `~/go/bin` which that `PATH` lacks.
 - The server rejected the request: a revoked or mistyped token, or a URL that does not match the token's server.
+- Tools work but a reply from the app says `Channel messages from "plugin:sock:sock" are unavailable: this connection's protocol version has no channel delivery path`: Claude Code 2.1.292 and later negotiate MCP revision 2026-07-28 with local servers, and on that revision it registers no channel. `sock-mcp` 0.1.1 declines that revision when `--channel` is set; on an older `sock-mcp`, start Claude Code with `MCP_PROTOCOL_NEGOTIATION=legacy` in its environment.
+- Several Claude Code sessions on one machine share the plugin's puppet and compete for its replies (`integrations-bof`); until that is fixed, reply to the session you want from the conversation it last messaged you in, and expect misses.
 
 ## Make targets
 
