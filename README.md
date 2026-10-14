@@ -5,7 +5,7 @@ Integrations that let coding agents talk to a sock server through a puppet accou
 ## Claude Code
 
 ```
-/plugin marketplace add guygrigsby/sock-integrations
+/plugin marketplace add aeryx-ai/sock-integrations
 /plugin install sock@sock-integrations
 ```
 
