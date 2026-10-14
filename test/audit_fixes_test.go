@@ -331,3 +331,36 @@ func TestBridgeCleansBidiControlsAndSeparators(t *testing.T) {
 		t.Fatalf("posted %q, want %q", s[0].Text, want)
 	}
 }
+
+// sec 2: no curlrc reaches curl (a `location` or `trace-ascii` there would
+// carry the key off), and only the API's own scheme is spoken, redirects too
+func TestBridgeCurlIgnoresCurlrcAndPinsTheProtocol(t *testing.T) {
+	h := newBridgeHarness(t)
+	home := h.env["HOME"]
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	trace := filepath.Join(h.dir, "trace.txt")
+	if err := os.WriteFile(filepath.Join(home, ".curlrc"), []byte("trace-ascii = \""+trace+"\"\nlocation\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// one line per curl call: its arguments, space separated
+	wrapper := "#!/bin/sh\necho \"$*\" >> \"$STUB_DIR/curl.calls\"\nexec /usr/bin/curl \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(h.stubs, "curl"), []byte(wrapper), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h.script(agentMsg(bnAnswer), idle("end_turn"))
+	r := h.run(rnOpts{})
+	if r.Code != 0 || len(h.sends()) != 1 {
+		t.Fatalf("exit %d, %d sends", r.Code, len(h.sends()))
+	}
+	if _, err := os.Stat(trace); err == nil {
+		t.Fatal("curl read ~/.curlrc: the trace file holds the key")
+	}
+	calls := strings.Split(strings.TrimSpace(string(readFile(t, filepath.Join(h.rec, "curl.calls")))), "\n")
+	for _, c := range calls {
+		if !strings.HasPrefix(c, "-q ") || !strings.Contains(c, " --proto =http,https ") || !strings.Contains(c, " --proto-redir =http,https ") || !strings.Contains(c, " --max-redirs 0 ") {
+			t.Fatalf("curl call %q", c)
+		}
+	}
+}

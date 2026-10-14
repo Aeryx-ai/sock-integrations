@@ -32,6 +32,13 @@ api=${SOCK_BRIDGE_API:-https://api.anthropic.com}
 # the key goes to this URL: https, or http to a loopback address (the tests)
 printf '%s\n' "$api" | grep -Eqx 'https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?|http://(localhost|127\.0\.0\.1)(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?' ||
 	die_config "SOCK_BRIDGE_API must be an https URL, or http to localhost or 127.0.0.1"
+# every curl gets -q first, so no curlrc is read (a `location` there would follow
+# a redirect with the key, a `trace-ascii` would write it down), and speaks only
+# the API's scheme, following no redirect
+case $api in
+http://*) proto='=http,https' ;;
+*) proto='=https' ;;
+esac
 printf '%s\n' "$session" | grep -Eqx '[A-Za-z0-9_][A-Za-z0-9_-]{0,127}' ||
 	die_config "SOCK_BRIDGE_SESSION must be 1 to 128 characters of A-Z a-z 0-9 _ -, not starting with -"
 printf '%s\n' "$key" | grep -Eqx '[A-Za-z0-9_.-]{8,200}' || die_config "ANTHROPIC_API_KEY is missing or has characters an API key does not"
@@ -177,7 +184,7 @@ api() {
 			log_line "timeout"
 			exit 1
 		fi
-		set -- -sS --config "$cfg" -X "$method" -o "$resp" -D "$hdr" -w '%{http_code}' --connect-timeout 10 --max-time "$left"
+		set -- -q -sS --proto "$proto" --proto-redir "$proto" --max-redirs 0 --config "$cfg" -X "$method" -o "$resp" -D "$hdr" -w '%{http_code}' --connect-timeout 10 --max-time "$left"
 		[ -n "$data" ] && set -- "$@" --data-binary "@$data"
 		code=$(curl "$@" "$url" 2>/dev/null) || code=000
 		case $code in
@@ -389,7 +396,7 @@ while :; do
 	fi
 	: >"$stream_file"
 	: >"$stream_hdr"
-	curl -sS -N --config "$cfg" -H 'accept: text/event-stream' -o "$stream_file" -D "$stream_hdr" \
+	curl -q -sS --proto "$proto" --proto-redir "$proto" --max-redirs 0 -N --config "$cfg" -H 'accept: text/event-stream' -o "$stream_file" -D "$stream_hdr" \
 		--connect-timeout 10 --max-time "$left" "$base/stream?beta=true" >/dev/null 2>&1 &
 	stream_pid=$!
 	# the stream shows only events after it opens: wait for its status line
