@@ -286,3 +286,18 @@ func TestBridgeSplitsOnBlankLinesFirst(t *testing.T) {
 		t.Fatalf("part 2 starts %q", b[:min(80, len(b))])
 	}
 }
+
+// L5: a stop reason holding a newline is unknown, not a second log line
+func TestBridgeAStopReasonWithANewlineIsUnknown(t *testing.T) {
+	for _, reason := range []string{"x\nran", "budget\nran\nx", strings.Repeat("a", 41)} {
+		t.Run(strconv.Quote(reason), func(t *testing.T) {
+			h := newBridgeHarness(t)
+			h.script(idle(reason))
+			h.run(rnOpts{})
+			log := h.bridgeLog()
+			if strings.Count(log, "\n") != 1 || !strings.Contains(log, "agent error (unknown)") {
+				t.Fatalf("log %q", log)
+			}
+		})
+	}
+}

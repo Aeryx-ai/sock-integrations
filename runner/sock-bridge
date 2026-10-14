@@ -279,7 +279,11 @@ finish() {
 	*)
 		text="the agent hit an error"
 		# name what the API said, if it looks like a stop reason
-		why=$(printf '%s\n' "$reason" | grep -Ex '[a-z_]{1,40}' || echo unknown)
+		# as a whole string: grep -x would pass one line of a value with a newline
+		case $reason in
+		'' | *[!abcdefghijklmnopqrstuvwxyz_]*) why=unknown ;;
+		*) if [ "${#reason}" -le 40 ]; then why=$reason; else why=unknown; fi ;;
+		esac
 		out="agent error ($why)"
 		;;
 	esac
