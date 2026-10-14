@@ -689,3 +689,94 @@ func TestIdleIgnoresATranscriptThatIsNotARegularFile(t *testing.T) {
 		t.Fatalf("%+v %v", g, r.Elapsed)
 	}
 }
+
+// --- machine key: each project sends as its own puppet (ADR 10) -----------
+
+const machineKey = "sock_mk_11111111-1111-4111-8111-111111111111_" + "MACHINEKEYSENTINELxxxxxxxxxxxxxxxxxxxxxxxx"
+
+// fakeSockForKeys answers `sock puppets ensure <dir>` by writing a puppet token
+// file and printing its path, and records what `sock send` was called with.
+func fakeSockForKeys(t *testing.T, ensureFails bool) (dir, rec string) {
+	t.Helper()
+	dir = t.TempDir()
+	rec = filepath.Join(dir, "rec")
+	if err := os.MkdirAll(rec, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fail := "0"
+	if ensureFails {
+		fail = "1"
+	}
+	script := `#!/bin/sh
+rec="` + rec + `"
+for a in "$@"; do last=$a; done
+case "$*" in
+*"puppets ensure"*)
+	printf '%s\n' "$SOCK_TOKEN" > "$rec/ensure-token"
+	printf '%s\n' "$last" > "$rec/ensure-dir"
+	if [ "` + fail + `" = 1 ]; then echo "ensure failed for $SOCK_TOKEN" >&2; exit 3; fi
+	printf 'sock_pt_projectpuppet_secret\n' > "$rec/puppet-token"
+	printf '%s\n' "$rec/puppet-token"
+	;;
+*send*)
+	printf '%s\n' "$SOCK_TOKEN" > "$rec/send-token"
+	cat > "$rec/send-text"
+	;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(dir, "sock"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir, rec
+}
+
+func readRec(t *testing.T, rec, name string) string {
+	t.Helper()
+	b, _ := os.ReadFile(filepath.Join(rec, name))
+	return strings.TrimSpace(string(b))
+}
+
+func TestMachineKeySendsAsTheProjectPuppet(t *testing.T) {
+	s := newStub(t)
+	bin, rec := fakeSockForKeys(t, false)
+	env := map[string]string{"PATH": bin + ":" + hookPathTail, "SOCK_TOKEN": machineKey, "CLAUDE_PROJECT_DIR": "/x/proj"}
+	runHook(t, s.URL, hookEnv{Env: env, Stdin: stopInput("k1", "Ship it?")}, "--stop", "--ask-now")
+	if got := readRec(t, rec, "ensure-token"); got != machineKey {
+		t.Fatalf("ensure ran with %q", got)
+	}
+	if got := readRec(t, rec, "ensure-dir"); got != "/x/proj" {
+		t.Fatalf("ensure dir %q", got)
+	}
+	if got := readRec(t, rec, "send-token"); got != "sock_pt_projectpuppet_secret" {
+		t.Fatalf("send ran with %q, want the project puppet's token", got)
+	}
+	if got := readRec(t, rec, "send-text"); got != "proj: Ship it?" {
+		t.Fatalf("sent %q", got)
+	}
+}
+
+func TestMachineKeyEnsureFailureSendsNothingAndHidesTheKey(t *testing.T) {
+	s := newStub(t)
+	bin, rec := fakeSockForKeys(t, true)
+	env := map[string]string{"PATH": bin + ":" + hookPathTail, "SOCK_TOKEN": machineKey}
+	r := runHook(t, s.URL, hookEnv{Env: env, Stdin: stopInput("k2", "Ship it?")}, "--stop", "--ask-now")
+	if _, err := os.Stat(filepath.Join(rec, "send-token")); err == nil {
+		t.Fatal("sent after ensure failed")
+	}
+	if !strings.Contains(r.Log, "puppets ensure") || strings.Contains(r.Log, "MACHINEKEYSENTINEL") {
+		t.Fatalf("log %q", r.Log)
+	}
+	if r.Code != 0 {
+		t.Fatalf("exit %d", r.Code)
+	}
+}
+
+func TestPluginOptionMachineKeyWorksToo(t *testing.T) {
+	s := newStub(t)
+	bin, rec := fakeSockForKeys(t, false)
+	env := map[string]string{"PATH": bin + ":" + hookPathTail, "SOCK_TOKEN": "", "CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": machineKey, "CLAUDE_PLUGIN_OPTION_SOCK_URL": s.URL, "CLAUDE_PROJECT_DIR": "/x/proj"}
+	runHook(t, s.URL, hookEnv{Env: env, Stdin: hookJSON(map[string]any{"hook_event_name": "Notification", "notification_type": "permission_prompt", "message": "Claude needs your permission to use Bash"})}, "--permission")
+	if got := readRec(t, rec, "send-token"); got != "sock_pt_projectpuppet_secret" {
+		t.Fatalf("send ran with %q", got)
+	}
+}

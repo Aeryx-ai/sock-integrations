@@ -151,7 +151,6 @@ send_text() {
 		log_line "sock not found on PATH"
 		return 1
 	fi
-	export SOCK_TOKEN=$token
 	# Never inherit a URL from another source. With no URL of our own, the CLI
 	# default or config file applies. An explicit --url beats a config file.
 	unset SOCK_URL
@@ -164,6 +163,26 @@ send_text() {
 			export XDG_CONFIG_HOME=${TMPDIR:-/tmp}/sock-hook-noconfig.$$
 		fi
 	fi
+	local send_token=$token
+	# A machine key (ADR 10) sends as this project's own puppet: the CLI makes or
+	# reuses it and prints the path of its token file; the key itself only ever
+	# reaches the hub to make puppets.
+	case $token in
+	sock_mk_*)
+		local tokfile
+		tokfile=$(SOCK_TOKEN=$token sock ${url_args[@]+"${url_args[@]}"} puppets ensure -- "${CLAUDE_PROJECT_DIR:-$PWD}" 2>/dev/null </dev/null | head -n 1)
+		if [ -z "$tokfile" ] || [ ! -f "$tokfile" ]; then
+			log_line "sock puppets ensure failed: no project puppet, nothing sent"
+			return 1
+		fi
+		IFS= read -r send_token <"$tokfile" || true
+		if [ -z "$send_token" ]; then
+			log_line "sock puppets ensure: the token file is empty, nothing sent"
+			return 1
+		fi
+		;;
+	esac
+	export SOCK_TOKEN=$send_token
 	local errf
 	errf=$(mktemp "${TMPDIR:-/tmp}/sock-hook.XXXXXX") || {
 		log_line "mktemp failed"
@@ -194,6 +213,9 @@ send_text() {
 		detail=$(head -c 65536 "$errf" | LC_ALL=C tr -d '[:cntrl:]')
 		if [ -n "$token" ]; then
 			detail=${detail//"$token"/[redacted]}
+		fi
+		if [ -n "$send_token" ] && [ "$send_token" != "$token" ]; then
+			detail=${detail//"$send_token"/[redacted]}
 		fi
 		detail=$(printf '%s' "$detail" | head -c 300)
 		log_line "sock send exit $rc: $detail"

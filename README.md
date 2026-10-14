@@ -9,9 +9,10 @@ Integrations that let coding agents talk to a sock server through a puppet accou
 /plugin install sock@sock-integrations
 ```
 
-That line works once the repo is pushed. Until then, from a local checkout run `make install`.
+Set the credential when the plugin prompts for it. It is stored in the plugin's secure userConfig.
 
-Set the puppet token when the plugin prompts for it. It is stored in the plugin's secure userConfig. If the prompt never appeared or you need to change the value, run `claude plugin configure sock@sock-integrations`. `sock` and `sock-mcp` must both be on the `PATH` of the Claude Code process. `make install-bins` installs them to `$(go env GOPATH)/bin` (usually `~/go/bin`), which Claude Code's `PATH` often lacks.
+- A machine key, the default: run `sock login` once, then `sock machine-key create --label "$(hostname -s)"` and paste the `sock_mk_` value. Every project then gets its own puppet the first time a session runs in it, named `<project> on <host>`, so each message shows which project sent it and you reply in that puppet's thread. Worktrees of one repository share its puppet. A repository that is moved or deleted loses its puppet at the next start. Tokens are cached in `${XDG_STATE_HOME:-~/.local/state}/sock-integrations/puppets` (mode 600). The key itself can only make and erase the puppets it made: it cannot read or send your messages.
+- A puppet token (`sock_pt_`): every session on the machine shares that one puppet, and replies race between sessions. If the prompt never appeared or you need to change the value, run `claude plugin configure sock@sock-integrations`. `sock` and `sock-mcp` must both be on the `PATH` of the Claude Code process. `make install-bins` installs them to `$(go env GOPATH)/bin` (usually `~/go/bin`), which Claude Code's `PATH` often lacks.
 
 Inbound messages (channel) need the development channel flag:
 
@@ -31,7 +32,7 @@ See `agent-sdk/example.ts`.
 
 ## Rules
 
-- One puppet per binding. Do not share a puppet token between agents or machines.
+- One puppet per binding. With a machine key that is one per project per machine, made for you; do not share a puppet token between agents or machines.
 - One consumer per puppet. Channel mode and a `sock_fetch`/`sock_ack` caller consume the same deliveries, so run only one against a given puppet.
 
 ## Troubleshooting
@@ -42,7 +43,7 @@ Hooks never fail the agent. They log one line per failure to `${XDG_STATE_HOME:-
 - `sock` or `sock-mcp` is not on the `PATH` of the Claude Code process, for example installed to `~/go/bin` which that `PATH` lacks.
 - The server rejected the request: a revoked or mistyped token, or a URL that does not match the token's server.
 - Tools work but a reply from the app says `Channel messages from "plugin:sock:sock" are unavailable: this connection's protocol version has no channel delivery path`: Claude Code 2.1.292 and later negotiate MCP revision 2026-07-28 with local servers, and on that revision it registers no channel. `sock-mcp` 0.1.1 declines that revision when `--channel` is set; on an older `sock-mcp`, start Claude Code with `MCP_PROTOCOL_NEGOTIATION=legacy` in its environment.
-- Several Claude Code sessions on one machine share the plugin's puppet and compete for its replies (`integrations-bof`); until that is fixed, reply to the session you want from the conversation it last messaged you in, and expect misses.
+- Several Claude Code sessions in one project share that project's puppet. With a puppet token instead of a machine key, every session on the machine shares one puppet and replies race between them.
 
 ## Make targets
 

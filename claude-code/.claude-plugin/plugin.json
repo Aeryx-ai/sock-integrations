@@ -1,14 +1,14 @@
 {
   "name": "sock",
   "description": "Message your human through sock: hooks for permission and idle prompts, the sock-mcp tools and the Claude Code channel.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": { "name": "Guy Grigsby" },
   "license": "MIT",
   "userConfig": {
     "sock_token": {
       "type": "string",
-      "title": "sock puppet token",
-      "description": "A sock_pt_ token for a puppet you own. One puppet per machine.",
+      "title": "sock machine key or puppet token",
+      "description": "A sock_mk_ machine key (sock machine-key create): every project gets its own puppet, named <project> on <host>. Or a sock_pt_ puppet token: one puppet for every session on this machine.",
       "sensitive": true,
       "required": true
     },
