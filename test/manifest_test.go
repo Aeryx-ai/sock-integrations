@@ -89,10 +89,12 @@ func TestPluginManifest(t *testing.T) {
 	if c := p.UserConfig["sock_token"]; !c.Sensitive || !c.Required {
 		t.Fatalf("sock_token must be sensitive and required: %+v", c)
 	}
-	for _, k := range []string{"sock_url", "notify_on_stop"} {
-		if _, ok := p.UserConfig[k]; !ok {
-			t.Fatalf("missing userConfig %s", k)
-		}
+	if _, ok := p.UserConfig["sock_url"]; !ok {
+		t.Fatal("missing userConfig sock_url")
+	}
+	// The hooks send only the ask and permission prompts, never a message per turn.
+	if _, ok := p.UserConfig["notify_on_stop"]; ok {
+		t.Fatal("userConfig notify_on_stop is back, but nothing reads it")
 	}
 	if d := p.UserConfig["sock_url"].Default; d != any("https://api.sock.aeryx.ai") {
 		t.Fatalf("sock_url default %q", d)

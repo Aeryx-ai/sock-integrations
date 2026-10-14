@@ -1,7 +1,7 @@
 {
   "name": "sock",
   "description": "Message your human through sock: hooks for permission and idle prompts, the sock-mcp tools and the Claude Code channel.",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "author": { "name": "Guy Grigsby" },
   "license": "MIT",
   "userConfig": {
@@ -17,12 +17,6 @@
       "title": "sock server URL",
       "description": "Leave as is unless you run your own server.",
       "default": "https://api.sock.aeryx.ai"
-    },
-    "notify_on_stop": {
-      "type": "boolean",
-      "title": "Message at the end of every turn",
-      "description": "Send a sock message each time Claude finishes a turn. Off by default.",
-      "default": false
     }
   },
   "channels": [{ "server": "sock" }]

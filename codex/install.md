@@ -9,7 +9,7 @@ Plugin route (recommended; see the Codex plugin section of `docs/specs/integrati
 
 Do not also append `codex/config.toml`: two servers named `sock` would clash. The plugin's server starts in the plugin's own directory, not your project, so it sends as one puppet for every project. For a puppet per project (`<repo> on <host>`), use the manual route below with a machine key as `SOCK_TOKEN` (`sock machine-key create --label "$(hostname -s)"`): a server registered in `config.toml` starts in the session's project directory. The manual route is also for anyone who wants no token in a file.
 
-Outbound only: hooks message you when Codex needs permission and, at the end of each turn, with the turn's trailing question or decision when it has one (`finished a turn` as well with `SOCK_NOTIFY_ON_STOP=1`), and the model can call `sock_send`. No inbound in v1. The token is forwarded from your shell and never written to config.
+Outbound only: hooks message you when Codex needs permission and, at the end of each turn, with the turn's trailing question or decision when it has one, and the model can call `sock_send`. No inbound in v1. The token is forwarded from your shell and never written to config.
 
 Hooks send only from the TUI or the Codex app, at most once an hour per project: `codex exec` and subagents never message you, and a `sock_send` reply is never held back (`docs/specs/integrations.md`, notify.sh rule 8).
 
@@ -34,7 +34,6 @@ Hooks send only from the TUI or the Codex app, at most once an hour per project:
    - First install, no `~/.codex/hooks.json` yet: `cp "$hooks" ~/.codex/hooks.json`.
    - Existing `~/.codex/hooks.json`: merge by hand. Add the `PermissionRequest` and `Stop` entries from the file at `$hooks` to the arrays under `hooks` (create the array if the event is absent). All matching hooks run, so merging is additive. Remove the temp file afterwards: `rm -f "$hooks"`.
 5. Run `/hooks` in Codex, then review and trust both hooks. Codex skips an untrusted hook, and editing `notify.sh` requires trusting again.
-6. Optional: `export SOCK_NOTIFY_ON_STOP=1` to get a message at the end of each turn.
 
 ## Headless replies (sock-runner)
 
