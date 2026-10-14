@@ -192,7 +192,7 @@ export SOCK_BRIDGE_SESSION=sesn_...       # an existing session, required
 sock listen --exec /path/to/runner/sock-bridge
 ```
 
-Optional: `SOCK_BRIDGE_TIMEOUT` (seconds one turn may take, default 900; not a positive integer falls back), `SOCK_BRIDGE_API` (default `https://api.anthropic.com`; the key goes there, so it must be an https URL or http to `localhost` or `127.0.0.1`, else exit 2), `SOCK_BRIDGE_MAX_STREAM` (bytes the event stream may hold, default 32 MiB), `SOCK_BRIDGE_STATE` (default `${XDG_STATE_HOME:-$HOME/.local/state}/sock-integrations-bridge`; one per bridge). `SOCK_BRIDGE_API` (default `https://api.anthropic.com`) exists for tests and is not for production use. The bridge does not create sessions, set the agent's tools or choose its permission policy: those live in the agent and environment definitions on Anthropic's side, and the owner of the session chooses them.
+Optional: `SOCK_BRIDGE_TIMEOUT` (seconds one turn may take, default 900; not a positive integer falls back), `SOCK_BRIDGE_API` (default `https://api.anthropic.com`; the key goes there, so it must be an https URL or http to `localhost` or `127.0.0.1`, else exit 2), `SOCK_BRIDGE_MAX_STREAM` (bytes the event stream may hold, default 32 MiB), `SOCK_BRIDGE_STATE` (default `${XDG_STATE_HOME:-$HOME/.local/state}/sock-integrations-bridge`; one per bridge). `SOCK_BRIDGE_API` (default `https://api.anthropic.com`) exists for tests and is not for production use. The bridge does not create sessions, set the agent's tools or choose its permission policy: those live in the agent and environment definitions on Anthropic's side, and the owner of the session chooses them. Creating sessions from configuration is designed below, not built.
 
 ### Interface
 
@@ -206,7 +206,7 @@ stdin, env and exit codes are `sock-runner`'s (the `sock listen --exec` contract
 4. Open the event stream first (`GET /v1/sessions/$SESSION/events/stream?beta=true`, `accept: text/event-stream`); a stream shows only events after it opens, so it is open before the send. Then send the owner's reply: `POST /v1/sessions/$SESSION/events?beta=true` with `{"events":[{"type":"user.message","content":[{"type":"text","text":"<prompt>"}]}]}`. The prompt is the runner's: a one-line preface and `<sock-message from="owner" conversation=... id=...>` around the text, closing tags broken, so the id is in the session's history and a redelivery can find it.
 5. Follow the stream until the turn ends. The turn starts at this run's own `user.message`, the one whose second line is this message's tag: the stream opened before the send, so events before it (a turn still running, its answer and its idle) are another turn's and ignored. The docs do not say the stream echoes a `user.message`, so the bridge works either way: a `session.status_idle` or `session.error` that arrives before this run's own `user.message` means the stream cannot place the turn. Nothing from it is posted; the bridge closes the stream, logs `stream unanchored` and finishes from history (step 7, the same reducer), polling every 2 seconds until the turn is done or the deadline. Only whole lines are events: the stream file is read by byte offset and a trailing line without its newline waits for the rest. Keep the text blocks of `agent.message` events (buffered events, one per model request) in order, once per event id (an event whose id is not a string of 1 to 256 characters without a control character is refused, one with no id kept), and ignore everything else, thinking and tool events included: tool inputs and outputs can hold secrets and never reach sock. The file is bounded (`SOCK_BRIDGE_MAX_STREAM`; past it the bridge exits 1, `stream too large`) and each poll reads only the new bytes in one `jq` pass, so a flood costs linear time and the deadline is checked every poll. The turn ends at `session.status_idle` with `stop_reason.type`:
    - `end_turn`: post the collected text to the owner (an empty or whitespace-only answer posts `the agent finished without a reply`), exit 0.
-   - `requires_action`: a tool call needs an answer the bridge cannot give. Post the fixed text `the agent is waiting for approval of a tool call` (no tool name, no input) and exit 0; the owner answers in the Managed Agents console. Brokering confirmations through sock replies is a follow-up.
+   - `requires_action`: a tool call needs an answer the bridge cannot give. Post the fixed text `the agent is waiting for approval of a tool call` (no tool name, no input) and exit 0; the owner answers in the Managed Agents console. Brokering confirmations through sock replies is designed below, not built.
    - `budget_reached`: post `the agent's budget is used up`, exit 0.
    - `session.error`: post `the agent hit an error`, exit 0. A stream that ends without idle exits 1 (`stream dropped`), so the retry finishes from history.
 6. Posting: `sock send` with the text on stdin (the puppet's `NotifyOwner`; argv is visible in `ps`), control characters other than newline and tab removed, C1 and CR among them, and the bidi controls (U+202A to U+202E, U+2066 to U+2069) and U+2028 and U+2029 (an agent's answer can hold terminal escapes, or text that reorders what the owner's client shows), at most 60000 bytes per message, split on blank lines, then lines, then bytes, never inside a UTF-8 character; at most 5 parts, the last saying the rest was cut. After each part the bridge writes `<id> <n>` to `posted.part`, so a retry of a message whose part n failed posts only the remaining parts. Record `replied` (`done.ids`) after the last part, then exit 0. `posted.part` makes a redelivery skip every part already posted, so a crash between the last part and `replied` posts nothing again.
@@ -227,6 +227,103 @@ stdin, env and exit codes are `sock-runner`'s (the `sock listen --exec` contract
 Under `test/`, with a fake Managed Agents server (Go `httptest`, speaking the stream and events endpoints) and stub `sock` and `curl` where the harness needs them: the stream is open before the send; the request has the headers `x-api-key`, `anthropic-version` and `anthropic-beta: managed-agents-2026-04-01` and the `user.message` body; text blocks of `agent.message` are posted once at `end_turn` and thinking and tool events never are; `requires_action`, `budget_reached` and `session.error` post only their fixed texts; a dropped stream exits 1 and the retry finishes from history without a second `user.message`; a `replied` id is a duplicate; a long answer is split and bounded; 429 with `Retry-After` is honored and 5xx retried then exit 1; 401, 403 and 404 exit 2; the key is in no argv, child environment, log or file other than the private curl config, which is removed; the owner gate, the lock and the input hygiene hold as in the runner's tests (shared cases run against both commands).
 
 Security review before merge, as the review gate below: sender spoofing and the gate, injection through the text into the tag or the API body, the key's exposure (argv, environment, logs, files, `curl` config), the lock and ledger races, and a hostile or malformed event stream (very large events, a flood of `agent.message`, events that never reach idle).
+
+### Follow-up: a session per conversation (integrations-kzk)
+
+Designed, not built. The bridge creates a Managed Agents session the first time a conversation reaches it, from an agent and an environment in its configuration, instead of requiring `SOCK_BRIDGE_SESSION`. One session per sock conversation, not one per bridge: a conversation is the unit of context the owner sees, and the rule that one writer drives a session then holds by construction. Sources: [sessions](https://platform.claude.com/docs/en/managed-agents/sessions), [session operations](https://platform.claude.com/docs/en/managed-agents/session-operations), [create](https://platform.claude.com/docs/en/api/beta/sessions/create) and [list](https://platform.claude.com/docs/en/api/beta/sessions/list) in the API reference, [rate limits](https://platform.claude.com/docs/en/managed-agents/reference#rate-limits).
+
+Configuration, checked before the message is read, any failure exit 2:
+
+- `SOCK_BRIDGE_AGENT`: the agent id, `agent_[A-Za-z0-9]{1,120}`. Setting it selects this mode. Set together with `SOCK_BRIDGE_SESSION`: exit 2, the two modes do not mix.
+- `SOCK_BRIDGE_ENVIRONMENT`: required with the agent, `env_[A-Za-z0-9]{1,120}`.
+- `SOCK_BRIDGE_AGENT_VERSION`: optional, a positive integer of at most 9 digits; set, the session pins `{"type":"agent","id":...,"version":N}`, unset it takes the agent's latest version.
+- `SOCK_BRIDGE_BUDGET`: optional, whole US cents as digits without a leading zero, at most 9 digits. A budget can only be attached at creation, so a bridge that creates sessions on its own is where the cap belongs; unset means no cap, as the API's default.
+
+The tools, MCP servers, vaults and permission policies stay the agent's and the environment's, chosen by their owner on Anthropic's side, as now.
+
+API calls, all with the existing headers (`x-api-key` from the private curl config, `anthropic-version: 2023-06-01`, `anthropic-beta: managed-agents-2026-04-01`, `User-Agent: sock-bridge`) and the existing retry classes (a GET retries 429, 5xx and network failures; a POST retries only 429; 401 and 403 exit 2):
+
+| Call | Method and path | Idempotency | On failure |
+|---|---|---|---|
+| Find | `GET /v1/sessions?beta=true&agent_id=$AGENT&order=desc&limit=100`, following `next_page`, at most 10 pages | Read | GET class |
+| Create | `POST /v1/sessions?beta=true` with `agent`, `environment_id`, `title` `sock <first 8 of conversationId>`, `metadata` `{"bridge_conversation": <conversationId>, "bridge_puppet": <account.id>}`, `budget` when set; no `initial_events` | None: the API takes no idempotency key, so a create that may have landed is never repeated (exit 1) and the retry finds it | 400 or 404: exit 2 (the agent or environment is wrong or archived) |
+| Check | `GET /v1/sessions/$SESSION?beta=true` | Read | GET class |
+
+The created session starts `idle` and its sandbox provisions at once; the existing turn (stream, then `user.message`) follows unchanged. No `initial_events`: the stream must be open before the first event, and it cannot open before the session exists.
+
+State: `sessions` in the state directory, one line `<conversationId> <session id>` per conversation, mode 600, read and rewritten only under the existing run lock (`bridge.lock`), written to `sessions.tmp` and renamed, so a crash leaves the old file or the new one. The lock already serializes every turn of a bridge, so the map needs no lock of its own. The session id from a create response must match `[A-Za-z0-9_][A-Za-z0-9_-]{0,127}`, as `SOCK_BRIDGE_SESSION` does, or the bridge exits 1 without recording it.
+
+Resolution, under the lock, before the `sent.ids` catch-up (which needs the session):
+
+1. The conversation is in `sessions`: use it.
+2. It is not: Find, and adopt the newest session whose `metadata.bridge_conversation` and `metadata.bridge_puppet` both match and whose `archived_at` is null (`session adopted`). This one path covers a crash between Create and the record, and a lost state directory. The list has no metadata filter, so the match is client side and bounded by the page cap; past the cap the bridge creates.
+3. None found: Create, record, `session created`.
+
+A mapped session that answers 404, or a Check that shows `terminated` or a non-null `archived_at`, is gone: drop the line, resolve again from step 2 (which skips it), post the fixed text `the agent's earlier session ended; this reply started a new one`, then send. The owner learns that context was lost. With `SOCK_BRIDGE_SESSION`, 404 still exits 2: that session is the owner's, not the bridge's to replace.
+
+Trust: `bridge_puppet` is the bridge puppet's own `account.id` from the `whoami` the gate already runs, so two bridges on one agent never adopt each other's sessions. Metadata is plain text at Anthropic: it carries ids, never the token or a hash of it, and never message text. The title carries 8 hex characters of the conversation id and nothing else.
+
+Failure modes: a create that may have landed exits 1 and the retry adopts it (no duplicate session unless the list does not yet show it, see the open questions); a crash between Create and the `user.message` leaves an idle session that the retry adopts; a lost state directory costs one Find per conversation and loses nothing; two conversations racing cannot both create, because the lock serializes them. Each session is billed on its own (runtime and its sandbox), so one per conversation costs more than one per bridge; the owner archives sessions in the console, and the bridge never archives or deletes.
+
+### Follow-up: owner-brokered tool confirmations (integrations-0ga)
+
+Designed, not built. Today `requires_action` posts a fixed text and the owner answers in the console. This lets the owner answer from sock. Sources: [permission policies](https://platform.claude.com/docs/en/managed-agents/permission-policies) ("Respond to confirmation requests", "See how each call was evaluated"), [events and streaming](https://platform.claude.com/docs/en/managed-agents/events-and-streaming) ("Answer tool calls that pause the session", "Confirm a tool call").
+
+The API's side: a call evaluated `ask` (an `always_ask` policy, or `auto` with no determination) is emitted as `agent.tool_use` or `agent.mcp_tool_use` with `evaluated_permission: "ask"`; the session goes idle with `stop_reason.type: requires_action` and the blocking ids in `stop_reason.event_ids`, and waits indefinitely. The answer is `POST /v1/sessions/$SESSION/events?beta=true` with `{"events":[{"type":"user.tool_confirmation","tool_use_id":<event id>,"result":"allow"|"deny","deny_message":<text>}]}`; several confirmations may go in one request. A confirmation for a call not evaluated `ask` is a 400, so the bridge can never override a server `deny`. When every blocking call is answered the session runs again.
+
+The rule: a call is approved only by a whole owner message of the form `approve <code>`, where the code is one the bridge made for that call and the session never saw. Text that merely reads as approval approves nothing.
+
+Asking:
+
+1. While following a turn, keep each `agent.tool_use`, `agent.mcp_tool_use` and `agent.custom_tool_use` event by id (type, `name`, `mcp_server_name`, `evaluated_permission`), beside the `agent.message` text. Nothing else of them is kept.
+2. At `requires_action`, for each id in `stop_reason.event_ids`: an `agent.custom_tool_use`, or an id the bridge did not see in the stream or history, cannot be answered from sock, so the turn ends as today with the fixed text and nothing pending. Otherwise each call with `evaluated_permission: "ask"` gets a code: 6 characters from `a-km-z2-9` read from `/dev/urandom`, unique among pending codes.
+3. Record each in `confirm.pending` under the lock (mode 600, tmp and rename): `<code> <conversationId> <session id> <tool_use_id> pending`. At most 50 lines; the oldest go first.
+4. Post the agent's text so far (as `end_turn` would, when there is any), then one fixed-shape message per call: `the agent wants to run <tool>` (plus ` from <server>` for an MCP call). `reply "approve <code>" or "deny <code> <optional reason>"`. The tool name and server name are shown only when they match `[A-Za-z0-9_.-]{1,64}`, else `a tool`. The input is not shown (it can hold secrets, as everywhere in the bridge); see the open questions.
+5. Record the message `replied` (`done.ids`), log `approval requested`, exit 0.
+
+Answering, for an owner message that passed the gate:
+
+1. Parse the text, trimmed of surrounding whitespace, against `(approve|deny) ([a-km-z2-9]{6})` at the start, case-insensitive on the verb only. `approve` must be the whole message. `deny` may be followed by whitespace and a reason, cleaned of control characters other than newline and tab and cut to 1000 bytes on a character boundary.
+2. A message that does not parse is an ordinary reply. While a confirmation is pending in its conversation, the session will not take a turn, so the bridge does not send it: it posts `a tool call is waiting: reply "approve <code>" or "deny <code>"` with the pending codes, records the message `replied`, exits 0 (`approval pending`).
+3. A message that parses but whose code is not in `confirm.pending` for this conversation posts `no approval is pending with that code` and exits 0 (`approval not pending`). The code binds to one conversation, one session and one tool call.
+4. A pending code: mark it `sent` before the POST (the `sent.ids` rule), open the stream, POST the confirmation (`deny_message` only for a reason given), and drop the line once the POST returns 2xx. When other calls of the same idle are still pending, post `recorded; <n> more waiting` and exit 0; otherwise follow the stream as a turn (step 5 of Behavior), which can end in another `requires_action`.
+5. A code marked `sent` on a redelivery: list history (step 7) for a `user.tool_confirmation` with that `tool_use_id`. Found: follow the turn from history. Not found: POST it.
+6. A 400 on the confirmation (already answered in the console, or the session moved on): drop the line, post `that approval is no longer pending`, exit 0 (`approval refused`).
+
+Trust boundaries:
+
+- Only the owner: the existing gate, unchanged. The agent's own text cannot approve: it reaches sock only as the bridge puppet's messages, and the puppet is never the owner. An MCP server on the session that could message sock as some account still fails the gate.
+- Not text that looks like approval: the code is made by the bridge, held only in the state directory and in the message to the owner, and never sent into the session, so neither the agent nor anything it reads can produce a valid one. A forged confirmation request in the agent's answer carries a code that is not pending, and step 3 refuses it.
+- Replay: a redelivered `approve` is a `duplicate` by `done.ids`; a reused code is gone from `confirm.pending` once answered; an approval for a call that was answered elsewhere is a 400 from the API.
+- The deny reason is owner text that reaches the agent as a tool result. It is data, like a `user.message`, but it is not wrapped in the `<sock-message>` tag, because the API places it; the cut and the cleaning bound it.
+- The log names the outcome and the code's existence, never the code, the tool name or the reason.
+
+Failure modes: a crash after the POST and before dropping the line repeats nothing (step 5 finds it in history); a crash after posting the request and before `replied` posts the request again with new codes, and the first codes stay pending until answered or pushed out; a lost state directory loses the codes, so an `approve` is refused and the owner answers in the console (fail closed); a confirmation that never comes leaves the session waiting, as the API allows, and costs nothing while idle.
+
+Out of scope: confirmations raised while the session stays `running` (a workflow run's calls, which carry `evaluated_permission: "ask"` without an idle); the bridge waits for idle and times out. Custom tools: the bridge has none to run.
+
+### Follow-up: webhook delivery (integrations-lcn)
+
+Won't build. Managed Agents does have webhooks ([webhooks](https://platform.claude.com/docs/en/managed-agents/webhooks)), but they do not fit a `sock listen --exec` command, and what they would replace (one stream held for one turn) is cheap.
+
+What the API offers: an endpoint registered in the Console per workspace, not per session; HTTPS on port 443 with a publicly resolvable hostname (a non-public address disables it); events such as `session.status_idled` that carry only `type` and the session `id`, so the receiver must still GET the session and list its events; `webhook-id`, `webhook-timestamp` and `webhook-signature` headers with a `whsec_` secret, verified by the SDK's `unwrap()` with a 5 minute freshness check; at least once, unordered, at most three attempts over about two minutes, then dropped with no signal; nothing is replayed while an endpoint is disabled.
+
+Why not:
+
+- Shape. `sock listen --exec` runs a command per sock message. A webhook needs a long-lived HTTP receiver on a public HTTPS name: a daemon, TLS, a tunnel or a host, a second secret to store and a process to keep alive. That is a service, the thing this bridge exists to avoid (rookery scaffold, deploy, monitoring), on a user's machine that is usually behind NAT.
+- Ack. Today the ack is the exit code after the answer is posted. With webhooks the command would exit after the `user.message` and the answer would arrive later in another process, so a dropped webhook (three tries, then silence) loses the answer unless something lists sessions to reconcile. That reconcile is a poll on a clock, and it is the history catch-up the bridge already has.
+- Gain. The stream costs one open connection for the length of a turn, inside the timeout. Webhooks would free the `listen` stream during long turns, which the queue on Anthropic's side and the timeout already bound.
+
+If revisited (the bridge hosted next to `sock-mcpd`, which has a public HTTPS name and runs as a service), the receiver would: verify the signature over the raw body with the SDK, in constant time, refusing a stale timestamp; deduplicate on `webhook-id`; bind each event by checking `data.workspace_id` against the configured workspace and `data.id` against the bridge's own session map, dropping anything else; never trust payload content, only GET the session and its events; and keep the history catch-up as the source of truth for any idle it missed. Not designed further.
+
+### Follow-up: open questions
+
+- Open: whether `GET /v1/sessions` lists a session immediately after its create returns. If not, a crash right after Create can make a second session; the bridge would need a short Find retry before creating.
+- Open: whether a `user.message` sent while the session waits on `requires_action` is rejected or queued. The design refuses to send one (Answering, step 2); if the API queues it, forwarding with a note is an alternative.
+- Open: whether the owner sees the tool input in a confirmation request. Withheld by default because inputs can hold secrets and leave Anthropic only for sock; an opt-in (`SOCK_BRIDGE_SHOW_TOOL_INPUT=1`, cleaned and cut to 2000 bytes) would make the approval informed. The owner decides.
+- Open: whether `user.tool_confirmation` events appear in the listed history with their `tool_use_id`, which Answering step 5 relies on. To check against the live API before building.
+- Open: whether `approve all` for a turn with several pending calls is worth its risk (one message approving calls the owner did not read).
+- Open: archiving. Sessions created per conversation accumulate; the bridge never archives. An idle sweep would be a clock; leaving it to the owner is the current answer.
 
 ## Tests
 
