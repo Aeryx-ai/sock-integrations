@@ -211,7 +211,7 @@ func TestBridgeCleansTheAnswerItPosts(t *testing.T) {
 	h.run(rnOpts{})
 	s := h.sends()
 	if len(s) != 1 || strings.ContainsAny(s[0].Text, "\x1b\x07") {
-		t.Fatalf("sends %q", s)
+		t.Fatalf("sends %q stderr %q log %q", s, "", h.bridgeLog())
 	}
 }
 

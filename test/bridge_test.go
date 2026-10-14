@@ -108,7 +108,7 @@ func TestBridgeAnEmptyAnswerSaysSo(t *testing.T) {
 	h.script(idle("end_turn"))
 	r := h.run(rnOpts{})
 	if s := h.sends(); r.Code != 0 || len(s) != 1 || s[0].Text != "the agent finished without a reply" {
-		t.Fatalf("exit %d sends %v", r.Code, s)
+		t.Fatalf("exit %d sends %v stderr %q log %q", r.Code, s, r.Stderr, h.bridgeLog())
 	}
 }
 

@@ -397,7 +397,9 @@ while [ -z "$reason" ]; do
 		fi
 	fi
 	if ! kill -0 "$stream_pid" 2>/dev/null; then
-		# the stream is over: read what is left once more, then give up
+		# the stream is over: it may have ended after $size was read, so measure
+		# again and read what is left once more, then give up
+		size=$(wc -c <"$stream_file" | tr -d ' ')
 		[ "$size" -gt "$off" ] && [ "$(tail -c 1 "$stream_file" | wc -l | tr -d ' ')" = 1 ] && continue
 		log_line "stream dropped"
 		exit 1
