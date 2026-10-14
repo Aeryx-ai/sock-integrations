@@ -74,7 +74,7 @@ Entity, owned by `Connection`. A platform's webhook registration for one event o
 | `id` | UUID | Returned to the platform; `X-MCP-Subscription-Id` on every delivery |
 | `grantId` | UUID | |
 | `event` | `EventName` | `owner.reply`, the only event in v1 |
-| `webhookUrl` | string | `https` on port 443 only (no other port, no userinfo), public address only (checked at subscribe time and again before each delivery), at most 2048 characters as stored: the normalized URL, which percent-encodes what the raw one carried bare, is checked before the verification POST |
+| `webhookUrl` | string | `https` on port 443 only (no other port, no userinfo), public address only (checked at subscribe time and again before each delivery), at most 2048 characters as stored: the normalized URL, which percent-encodes what the raw one carried bare, is checked before the verification POST. Stored only as ciphertext, encrypted like the puppet token with `suburl:<id>` as additional data, beside its HMAC-SHA256 over the grant id, a zero byte and the URL, under a key derived from `SOCK_MCPD_TOKEN_KEY` (HKDF-SHA256, info `sock-mcpd webhook-url mac v1`). Subscribe and unsubscribe match on that hash, which shows no reader whether two grants share a callback: the query can be a platform credential. |
 | `secretCiphertext` | bytes | The platform's `whsec_` secret (24 to 64 bytes decoded), encrypted like the puppet token with `sub:<id>` as additional data; signs every delivery |
 | `cursor` | int64 | The number of events this subscription delivered and the platform accepted, 0 at creation; returned on subscribe and re-subscribe. It is a progress count, not a replay position: the hub queue is the replay mechanism (an undelivered message comes back on the next stream), and a cursor sent on subscribe is accepted and ignored, whatever its type (OpenAI's events page gives it none) |
 | `createdAt` | Timestamp | |
@@ -210,7 +210,7 @@ The three sending tools, linked from `sock-mcp` as a library in outbound-only fo
 
 ## State
 
-Postgres, schema `connector`, Postgres types, numbered migrations. No JSON columns. The two secrets at rest are ciphertext under `SOCK_MCPD_TOKEN_KEY` (32 bytes, from the deployment's secret store, never in the database), each bound to its row with additional data (`conn:<grantId>`, `sub:<subscriptionId>`): a ciphertext copied into another row does not open.
+Postgres, schema `connector`, Postgres types, numbered migrations. No JSON columns. The three secrets at rest (the puppet token, the webhook secret and the webhook URL) are ciphertext under `SOCK_MCPD_TOKEN_KEY` (32 bytes, from the deployment's secret store, never in the database), each bound to its row with additional data (`conn:<grantId>`, `sub:<subscriptionId>`, `suburl:<subscriptionId>`): a ciphertext copied into another row does not open. A webhook URL is found by its HMAC-SHA256, bound to its grant, under a key derived from `SOCK_MCPD_TOKEN_KEY` by HKDF-SHA256, never by its plaintext. Migration 00008 closes `deliveryFailed` any row whose URL is over 2048 bytes, possible before the bound counted bytes, rather than fail.
 
 ```sql
 CREATE SCHEMA connector;
@@ -231,7 +231,9 @@ CREATE TABLE connector.event_subscriptions (
     grant_id           uuid        NOT NULL REFERENCES connector.connections (grant_id) ON DELETE CASCADE,
         -- migration 00004 points it at connector.grants
     event              text        NOT NULL REFERENCES connector.event_names (name) ON DELETE RESTRICT,
-    webhook_url        text        NOT NULL CHECK (char_length(webhook_url) BETWEEN 9 AND 2048 AND webhook_url LIKE 'https://%'),
+    -- migration 00008 replaced webhook_url
+    webhook_url_hash       bytea NOT NULL CHECK (octet_length(webhook_url_hash) = 32),
+    webhook_url_ciphertext bytea NOT NULL CHECK (octet_length(webhook_url_ciphertext) BETWEEN 37 AND 2076),
     secret_ciphertext  bytea       NOT NULL CHECK (octet_length(secret_ciphertext) BETWEEN 29 AND 128),
     cursor             bigint      NOT NULL DEFAULT 0 CHECK (cursor >= 0),
     created_at         timestamptz NOT NULL DEFAULT now()
@@ -318,7 +320,7 @@ Unclosed is derived: no closure row. Live is derived: unclosed and its grant has
 
 ## Security
 
-Review gate before anything ships, fresh context, verified by reproduction: token confusion (`aud` of another resource, `iss` of staging against production, an unsigned or `none` algorithm token, an expired token), scope handling, the sender gate (a non-owner member of a group the connector puppet is in must never produce an event), SSRF on webhook URLs (`https` only, public addresses re-resolved before every POST, no redirects followed), webhook secret and puppet token at rest (ciphertext only; the key never in logs or the database), cross-grant leakage (an event never reaches another connection's subscription; `events/unsubscribe` across connections is `-32004`), replay of webhook verification, request limits per grant, and the `ALREADY_ISSUED` recovery path (`RevokeConnectorDevice` then a second issue, never a loop).
+Review gate before anything ships, fresh context, verified by reproduction: token confusion (`aud` of another resource, `iss` of staging against production, an unsigned or `none` algorithm token, an expired token), scope handling, the sender gate (a non-owner member of a group the connector puppet is in must never produce an event), SSRF on webhook URLs (`https` only, public addresses re-resolved before every POST, no redirects followed), webhook secret, webhook URL and puppet token at rest (ciphertext only; the key never in logs or the database), cross-grant leakage (an event never reaches another connection's subscription; `events/unsubscribe` across connections is `-32004`), replay of webhook verification, request limits per grant, and the `ALREADY_ISSUED` recovery path (`RevokeConnectorDevice` then a second issue, never a loop).
 
 Logging: grant id, subscription id, event id and outcomes; never a token, a secret, a URL's query string or the text.
 
