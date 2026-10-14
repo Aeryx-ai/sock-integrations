@@ -1,6 +1,7 @@
 package test
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -269,6 +270,63 @@ func TestRunnerDrops(t *testing.T) {
 	}
 }
 
+// rnRawMessage renders the message with text first or last, so a parser that
+// scans for the first or the last match of a key is caught deterministically.
+func rnRawMessage(textFirst bool, sender, text string) string {
+	tb, _ := json.Marshal(text)
+	rest := `"id":"` + rnMsgID + `","conversationId":"` + rnConvID + `","seq":"42","senderId":"` + sender + `","sentAt":"2026-10-13T12:00:00Z","evidenceTag":"AAEC"`
+	if textFirst {
+		return `{"text":` + string(tb) + `,` + rest + `}`
+	}
+	return `{` + rest + `,"text":` + string(tb) + `}`
+}
+
+// The sender gate must read the top-level senderId, never a key-shaped string
+// inside the text. Covers the owner key quoted inside a non-owner message in
+// both positions, and a non-owner key quoted inside a real owner message.
+func TestRunnerGateReadsTopLevelSenderOnly(t *testing.T) {
+	rnRunnerPath(t)
+	fakeOwner := `{"senderId":"` + rnOwner + `","id":"` + rnMsgID + `"} ` + rnTextSentinel
+	fakeOther := `{"senderId":"` + rnOther + `"} ` + rnTextSentinel
+	for _, textFirst := range []bool{true, false} {
+		pos := map[bool]string{true: "text first", false: "text last"}[textFirst]
+		t.Run("non-owner quoting owner key, "+pos, func(t *testing.T) {
+			h := newRunnerHarness(t)
+			r := h.run(rnOpts{Env: map[string]string{"SOCK_SENDER_ID": rnOther}, Stdin: rnRawMessage(textFirst, rnOther, fakeOwner)})
+			h.wantNoRun(r, 0)
+			if !strings.Contains(h.log(), "dropped: sender") {
+				t.Fatalf("log %q", h.log())
+			}
+			h.noLeak(r)
+		})
+		t.Run("owner quoting other key, "+pos, func(t *testing.T) {
+			h := newRunnerHarness(t)
+			r := h.run(rnOpts{Stdin: rnRawMessage(textFirst, rnOwner, fakeOther)})
+			if r.Code != 0 || len(h.runs()) != 1 {
+				t.Fatalf("owner message not run: %+v runs=%d", r, len(h.runs()))
+			}
+		})
+	}
+}
+
+// The env ids and the stdin ids come from the same listen process; a
+// disagreement is a malformed delivery, and only one id may reach the tag.
+func TestRunnerIDMismatchDropped(t *testing.T) {
+	rnRunnerPath(t)
+	for _, c := range []struct{ name, key string }{{"message id", "id"}, {"conversation id", "conversationId"}} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newRunnerHarness(t)
+			f := h.fields()
+			f[c.key] = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+			r := h.run(rnOpts{Stdin: rnMessage(f)})
+			h.wantNoRun(r, 0)
+			if !strings.Contains(h.log(), "dropped: malformed") {
+				t.Fatalf("log %q", h.log())
+			}
+		})
+	}
+}
+
 func TestRunnerWhoamiFailureRetries(t *testing.T) {
 	h := newRunnerHarness(t)
 	r := h.run(rnOpts{Env: map[string]string{"STUB_WHOAMI": "fail"}})
@@ -410,6 +468,59 @@ func TestRunnerRacingOverStaleLockDoNotOverlap(t *testing.T) {
 	want := []string{"start", "end", "start", "end", "start", "end"}
 	if ev := h.events(); !slices.Equal(ev, want) || !slices.Equal(codes, []int{0, 0, 0}) {
 		t.Fatalf("codes %v events %v", codes, ev)
+	}
+}
+
+// A break guard left by a runner that died inside it must not stop a later
+// runner from breaking a stale lock. The guard is an hour old here, so a
+// runner that honours the guard's age breaks it at once; one that cannot
+// judge the age waits out its whole timeout and exits 1.
+func TestRunnerStaleBreakGuardExpires(t *testing.T) {
+	h := newRunnerHarness(t)
+	h.symlinkLock(rnDeadPid(t))
+	guard := filepath.Join(h.state, "runner.lock.break")
+	if err := os.Mkdir(guard, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(guard, old, old); err != nil {
+		t.Fatal(err)
+	}
+	r := h.run(rnOpts{Env: map[string]string{"SOCK_RUNNER_TIMEOUT": "5"}})
+	if r.Code != 0 || len(h.runs()) != 1 {
+		t.Fatalf("stale guard not cleared: exit %d runs=%d elapsed %v log %q", r.Code, len(h.runs()), r.Elapsed, h.log())
+	}
+}
+
+// Terminating the runner while the agent runs must take the agent's process
+// group down with it. Otherwise the orphan keeps working on a message that
+// listen will redeliver, and nothing bounds it once the runner is gone.
+func TestRunnerTermStopsAgent(t *testing.T) {
+	h := newRunnerHarness(t)
+	cmd := h.command(rnOpts{Env: map[string]string{"STUB_SLEEP": "60"}})
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for len(h.events()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(h.events()) == 0 {
+		t.Fatal("agent never started")
+	}
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	_ = cmd.Wait()
+	runs := h.runs()
+	if len(runs) != 1 {
+		t.Fatalf("%d runs", len(runs))
+	}
+	if !rnGone(rnPidFile(t, filepath.Join(runs[0].Dir, "pid")), 8*time.Second) {
+		t.Fatal("agent outlived the runner")
+	}
+	if _, err := os.Lstat(h.lockPath()); err == nil {
+		t.Fatal("lock left behind")
 	}
 }
 

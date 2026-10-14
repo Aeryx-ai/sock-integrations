@@ -184,7 +184,9 @@ type rnRes struct {
 	Stdout, Stderr string
 }
 
-func (h *rnHarness) run(o rnOpts) rnRes {
+// command builds the runner invocation without starting it. Stdout and
+// stderr are collected in buffers reachable through the Cmd.
+func (h *rnHarness) command(o rnOpts) *exec.Cmd {
 	h.t.Helper()
 	env := map[string]string{}
 	for k, v := range h.env {
@@ -207,10 +209,16 @@ func (h *rnHarness) run(o rnOpts) rnRes {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
 	cmd.Stdin = strings.NewReader(in)
-	var so, se bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &so, &se
+	cmd.Stdout, cmd.Stderr = &bytes.Buffer{}, &bytes.Buffer{}
+	return cmd
+}
+
+func (h *rnHarness) run(o rnOpts) rnRes {
+	h.t.Helper()
+	cmd := h.command(o)
 	start := time.Now()
 	err := cmd.Run()
+	so, se := cmd.Stdout.(*bytes.Buffer), cmd.Stderr.(*bytes.Buffer)
 	r := rnRes{Elapsed: time.Since(start), Stdout: so.String(), Stderr: se.String()}
 	if ee := (*exec.ExitError)(nil); errors.As(err, &ee) {
 		r.Code = ee.ExitCode()
