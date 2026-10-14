@@ -14,6 +14,12 @@
 # shellcheck disable=SC2034,SC2154 # the settings lib.sh reads, and what it sets
 set -u
 umask 077
+# the key leaves the environment before any child runs: from here on it is a
+# shell variable only (unset first: one inherited from the environment would
+# stay exported), and goes nowhere but the curl config
+unset key
+key=${ANTHROPIC_API_KEY:-}
+unset ANTHROPIC_API_KEY
 
 cmd_name=sock-bridge
 here=$(cd "$(dirname "$0")" && pwd)
@@ -22,7 +28,6 @@ here=$(cd "$(dirname "$0")" && pwd)
 
 # --- configuration -----------------------------------------------------------
 session=${SOCK_BRIDGE_SESSION:-}
-key=${ANTHROPIC_API_KEY:-}
 api=${SOCK_BRIDGE_API:-https://api.anthropic.com}
 # the key goes to this URL: https, or http to a loopback address (the tests)
 printf '%s\n' "$api" | grep -Eqx 'https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?|http://(localhost|127\.0\.0\.1)(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?' ||
@@ -89,7 +94,7 @@ deadline=$(($(now) + timeout))
 	printf '%s\n' 'header = "anthropic-version: 2023-06-01"' 'header = "anthropic-beta: managed-agents-2026-04-01"' \
 		'header = "content-type: application/json"' 'user-agent = "sock-bridge"'
 } >"$cfg" || exit 1
-unset key ANTHROPIC_API_KEY
+unset key
 : >"$ids_file"
 
 base="$api/v1/sessions/$session/events"
