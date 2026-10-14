@@ -9,7 +9,7 @@ Out: the plugin directory listing package and client setup ([integrations](integ
 ```mermaid
 flowchart TB
     subgraph CN["Connector (supporting): sock-mcpd"]
-        Connection; EventSubscription; SubscriptionClosure; OwnerReplyEvent
+        Connection; EventSubscription; SubscriptionClosure; SubscriptionDormancy; OwnerReplyEvent
     end
     subgraph ID["Identity (sockd)"]
         ConnectorGrant
@@ -39,15 +39,15 @@ Entity, aggregate root. `sock-mcpd`'s view of one connector grant: the puppet it
 | `ownerId` | UUID | `account.puppet.ownerId` from the same call: the only sender whose messages become events |
 | `createdAt` | Timestamp | |
 
-Closure is not a field. A connection whose puppet token the hub refuses (`TOKEN_INVALID`: the grant was revoked) is deleted together with its subscriptions, each closed with cause `grantRevoked`; the closure rows go with them (the cascade), so a revoked grant leaves nothing for the 30-day sweep.
+Closure is not a field. A connection whose puppet token the hub refuses is deleted and its live subscriptions go dormant (`SubscriptionDormancy`), not closed: `TOKEN_INVALID` on the stream or a tool call, or a stream the hub ends `ACCOUNT_SUSPENDED`. The refusal cannot say which happened (the owner suspended, the connector device removed, the grant revoked), so the grant's next request asks `IssueConnectorPuppetToken` (ADR 11, implementation notes). A grant revoked for good is deleted with all its subscriptions; nothing of it is kept for the 30-day closure sweep.
 
 ### Behaviors
 
-- `Open(accessToken)` (factory): verifies the JWT, calls `IssueConnectorPuppetToken` with the service token and the JWT, calls `whoami` with the result, stores the ciphertext, puppet id and owner id. On `ALREADY_ISSUED` (a previous instance of this service held it and lost the database) it calls `RevokeConnectorDevice` with the same JWT and issues again, logging the recovery for the operator
+- `Open(accessToken)` (factory): verifies the JWT, calls `IssueConnectorPuppetToken` with the service token and the JWT, calls `whoami` with the result, stores the ciphertext, puppet id and owner id. On `ALREADY_ISSUED` (a previous instance of this service held it and lost the database) it calls `RevokeConnectorDevice` with the same JWT and issues again, logging the recovery for the operator. It runs for a grant's first request and for its first request after a refusal, which is the dormancy probe: a new token resumes the grant's dormant subscriptions in the same transaction that stores it (their cursors kept) and starts the stream; `ACCOUNT_SUSPENDED` leaves them dormant; `NOT_FOUND` (grant revoked, or kept by a revocation) deletes the grant with every subscription, which ends them `grantRevoked`. Concurrent first requests for a grant share one issue
 - `Call(tool, input)`: `sock_whoami`, `sock_list_conversations`, `sock_send` with the puppet token, through the `sock-mcp` tool implementations
 - `Stream()`: one `Subscribe` on the puppet token, reconnecting with the CLI's backoff, held open while the connection has at least one live `EventSubscription`; otherwise not opened (nothing to deliver to), so deliveries wait in the hub's queue. A delivery that fails to be handled (the store unavailable, an ack refused) ends the stream attempt, which backs off and reconnects: the hub then redelivers from its queue in order, so nothing behind the failed delivery is handled before it. A hub message this service cannot read (an id that is not a UUID) is logged, left unacked and skipped while the stream goes on: it can never pass the sender gate, so it never becomes an event, holding the stream for it would stop the grant's deliveries until the hub is fixed and it comes back with every new stream, so the log keeps naming it. One stream per connection with a live subscription, and no cap: the number of streams is bounded by the number of grants and nothing else. Stopping a stream rechecks the subscriptions once it has ended, so a fresh connection that subscribed while the old stream was still running gets its stream
 - `Deliver(delivery)`: the sender gate, then one `OwnerReplyEvent` per live subscription; `Ack` after every subscription accepted it (2xx) or was closed trying
-- `Close(cause)`: closes every subscription with the cause and deletes the connection, in one transaction, only while the stored connection is still the one this `Close` was opened from (same token ciphertext). A stale stream or a slow close never deletes a connection a refresh made since
+- `Dormant()`: makes every live subscription dormant and deletes the connection, in one transaction, only while the stored connection is still the one this `Dormant` was opened from (same token ciphertext). A stale stream or a slow refusal never deletes a connection a refresh made since
 
 ### Invariants
 
@@ -91,7 +91,7 @@ Closure is not a field. A closed subscription has a `SubscriptionClosure` row.
 
 - The secret decrypts only to sign a delivery and is never returned, logged or echoed.
 - Deliveries to one subscription follow the hub stream order, including across a failed handling (the stream attempt ends and the hub redelivers in order); `cursor` increases by one per accepted event and never decreases. `seq` is per conversation and travels in `data`, never as the cursor.
-- A subscription whose connection closed is closed with `grantRevoked` before the connection row goes, then deleted with it.
+- A subscription outlives its connection: it hangs off the grant, goes dormant when the connection is refused and ends only by its own closure or the grant's deletion (`NOT_FOUND` on the probe, or dormant 30 days with no request).
 
 ### States
 
@@ -102,11 +102,16 @@ stateDiagram-v2
     live --> live: Deliver() failed (left pending, redelivered)
     live --> closed: Unsubscribe()
     live --> closed: Deliver() got 410 or 413, or failed after 24 h and 10 failed handlings
-    live --> closed: connection closed (grantRevoked)
+    live --> dormant: connection refused (TOKEN_INVALID, or the stream ended ACCOUNT_SUSPENDED)
+    dormant --> dormant: probe got ACCOUNT_SUSPENDED
+    dormant --> dormant: Subscribe() (secret refreshed)
+    dormant --> live: probe issued a new token (cursor kept)
+    dormant --> closed: Unsubscribe()
+    dormant --> [*]: probe got NOT_FOUND, or dormant 30 days (grantRevoked, deleted)
     closed --> [*]
 ```
 
-Anything not drawn is refused.
+Anything not drawn is refused. Dormant is not live: no stream delivers to it, the hub queues its events, and the live gauge, the boot and the fan-out leave it out. It is not closed either, so subscribe and unsubscribe still find it. A request only reaches them after its `Open` probed the grant, which resumes a dormant subscription before the call runs; a dormant one is met only when a refusal lands between that `Open` and the call. Then `Subscribe()` on its grant, event and URL is a refresh as for a live one (same id and cursor, new secret) and it stays dormant, because the token the request loaded is the refused one and only the next probe can tell; it counts toward the 10, since it resumes. `Unsubscribe()` closes it `unsubscribed`, as it would a live one, since the platform asked to stop.
 
 ### Relationships
 
@@ -125,7 +130,18 @@ Value object, owned by `EventSubscription`, 0 or 1. Why a subscription ended.
 | `cause` | `ClosureCause` | `unsubscribed`, `gone` (410), `tooLarge` (413), `deliveryFailed`, `grantRevoked` |
 | `closedAt` | Timestamp | |
 
-When a subscription closes for `gone`, `tooLarge` or `deliveryFailed`, the connection posts one `NotifyOwner` as its puppet: "<platform> stopped receiving your replies"; the owner reconnects from the platform. Closed rows are kept 30 days for the operator, then swept.
+When a subscription closes for `gone`, `tooLarge` or `deliveryFailed`, the connection posts one `NotifyOwner` as its puppet: "<platform> stopped receiving your replies"; the owner reconnects from the platform. Closed rows are kept 30 days for the operator, then swept. `grantRevoked` is never a row: a revoked grant is deleted with its subscriptions.
+
+## SubscriptionDormancy
+
+Value object, owned by `EventSubscription`, 0 or 1. The grant's puppet token was refused and the hub has not yet said why.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `subscriptionId` | UUID | |
+| `since` | Timestamp | When the connection was refused |
+
+Written by `Connection.Dormant()` for every live subscription of the grant, deleted by the probe's new token. The sweep deletes every grant that has no connection and a subscription dormant over 30 days, as a `NOT_FOUND` would: a revoked grant's platform never calls again, so no probe ever settles it. The sweep runs at startup and whenever a grant's stream ends, never on a clock tick; a grant goes dormant only as its stream ends or on a tool call, so the next stream end or restart finds it.
 
 ## OwnerReplyEvent
 
@@ -154,9 +170,11 @@ The event schema (`payloadSchema` in `events/list`) is this object's `data`, whi
 
 ```mermaid
 erDiagram
-    CONNECTION ||--o{ EVENT_SUBSCRIPTION : holds
+    GRANT ||--o| CONNECTION : "connected by"
+    GRANT ||--o{ EVENT_SUBSCRIPTION : holds
     EVENT_SUBSCRIPTION ||--o| SUBSCRIPTION_CLOSURE : "ended by"
-    CONNECTION }o--|| CONNECTOR_GRANT : "acts for (Identity, by id)"
+    EVENT_SUBSCRIPTION ||--o| SUBSCRIPTION_DORMANCY : "held by"
+    GRANT }o--|| CONNECTOR_GRANT : "is (Identity, by id)"
 ```
 
 ## Transport and auth in
@@ -167,7 +185,7 @@ erDiagram
 - `GET /.well-known/openai-apps-challenge`: the exact token OpenAI's portal gives, as `text/plain`.
 - `GET /healthz`: 200 when the database answers, 503 otherwise, no data. The ping runs under a 2 s timeout and its result is reused for 2 s, so a flood of hits is one ping every 2 s.
 - Every `/mcp` request carries `Authorization: Bearer <access JWT>`. Verified offline against the hub's JWKS (refreshed every hour and on an unknown `kid` at most once a minute, since keyfunc does not honor `Cache-Control`, so a withdrawn key stays trusted up to an hour): ES256, `iss` = `SOCK_MCPD_ISSUER` (the hub's public issuer, which is not the URL this service reaches it on), `aud` = this resource exactly (a single member: a token whose `aud` also names another resource is refused), `exp`, `scope` contains `sock`. Missing or invalid: `401` with `WWW-Authenticate: Bearer resource_metadata="https://mcp.sock.aeryx.ai/.well-known/oauth-protected-resource/mcp"`; a valid token without the scope: `403` with `error="insufficient_scope"`. Nothing else is accepted: no API keys, no puppet tokens, no cookies.
-- The `sub` names the connection. The first request for an unknown `sub` opens it (`Connection.Open`), which is the only call that costs a hub round trip for identity; later requests use the stored ciphertext. A refusal of that issue for a revoked grant or a suspended owner is kept in memory per grant (bounded, the soonest to expire evicted first) until the presenting JWT's `exp` and answered again without a hub call to any JWT of the grant that expires no later, so a client retrying a live JWT costs one call from the connector service's shared 60 a minute, not one per request.
+- The `sub` names the connection. The first request for a `sub` with no stored connection (a new grant, or one refused since) opens it (`Connection.Open`), which is the only call that costs a hub round trip for identity; later requests use the stored ciphertext. A refusal of that issue for a revoked grant or a suspended owner is kept in memory per grant (bounded, the soonest to expire evicted first) until the presenting JWT's `exp` and answered again without a hub call to any JWT of the grant that expires no later, so a client retrying a live JWT costs one call from the connector service's shared 60 a minute, not one per request. A kept suspension therefore outlasts a reinstatement by at most that JWT's hour; the platform's refreshed JWT expires later and issues at once.
 
 ## Tools
 
@@ -178,7 +196,7 @@ The three sending tools, linked from `sock-mcp` as a library in outbound-only fo
 - A batch that carries any `events/*` request holds at most 10 elements; a larger one is answered with one `-32600` for the whole batch. Each events request runs under a 30 s deadline, and every element of a batch together under one 50 s deadline, inside the HTTP server's 60 s write timeout (JSON framing: no long streams on `/mcp`); an element the batch deadline cuts short is answered with an error.
 - Capability `events` in the discovery result. `events/list` returns `owner.reply` with `delivery: ["webhook"]`, the empty `inputSchema` and the `payloadSchema` above. `events/subscribe` and `events/unsubscribe` as `EventSubscription` says. All three on the same authenticated endpoint as the tools; a subscription belongs to the connection the access token names, and `events/unsubscribe` of another connection's subscription is `-32004`.
 - The connection's stream opens with its first live subscription and closes with its last. Each delivery: gate, fan out, ack. The hub holds deliveries up to 30 days and redelivers on reconnect, so a platform outage shorter than that loses nothing.
-- The grant is re-checked by use: a `TOKEN_INVALID` from the hub on the stream or on a tool call closes the connection (`Close` bound to the connection that met it). On a tool call that close also stops the connection's stream, and the request answers `401` with `WWW-Authenticate: Bearer error="invalid_token"`, so the platform authorizes again; the next request opens a fresh connection, or meets the revoked grant.
+- The grant is re-checked by use: a `TOKEN_INVALID` from the hub on the stream (a live one or its first `Subscribe`) or on a tool call, or a stream ended `ACCOUNT_SUSPENDED`, makes the connection dormant (`Dormant` bound to the connection that met it). On a tool call that also stops the connection's stream, and the request answers `401` with `WWW-Authenticate: Bearer error="invalid_token"`, so the platform authorizes again. The next request probes: a fresh connection resumes the subscriptions and their stream, a suspension keeps them dormant (that request fails), a revoked grant deletes them and answers `401`.
 
 ## State
 
@@ -188,7 +206,7 @@ Postgres, schema `connector`, Postgres types, numbered migrations. No JSON colum
 CREATE SCHEMA connector;
 
 CREATE TABLE connector.connections (
-    grant_id                 uuid        PRIMARY KEY,
+    grant_id                 uuid        PRIMARY KEY,  -- REFERENCES connector.grants ON DELETE CASCADE, migration 00004
     puppet_id                uuid        NOT NULL,
     owner_id                 uuid        NOT NULL,
     puppet_token_ciphertext  bytea       NOT NULL CHECK (octet_length(puppet_token_ciphertext) BETWEEN 29 AND 256),
@@ -201,6 +219,7 @@ INSERT INTO connector.event_names VALUES ('owner.reply');
 CREATE TABLE connector.event_subscriptions (
     id                 uuid        PRIMARY KEY DEFAULT uuidv7(),
     grant_id           uuid        NOT NULL REFERENCES connector.connections (grant_id) ON DELETE CASCADE,
+        -- migration 00004 points it at connector.grants
     event              text        NOT NULL REFERENCES connector.event_names (name) ON DELETE RESTRICT,
     webhook_url        text        NOT NULL CHECK (char_length(webhook_url) BETWEEN 9 AND 2048 AND webhook_url LIKE 'https://%'),
     secret_ciphertext  bytea       NOT NULL CHECK (octet_length(secret_ciphertext) BETWEEN 29 AND 128),
@@ -237,9 +256,29 @@ CREATE TABLE connector.subscription_failing (
 -- migration 00003
 ALTER TABLE connector.subscription_failing ADD COLUMN attempts int NOT NULL CHECK (attempts >= 1);
     -- failed handlings since since; a failure closes deliveryFailed once since is 24 h old and attempts is at least 10
+
+-- migration 00004
+CREATE TABLE connector.grants (
+    grant_id  uuid  PRIMARY KEY
+        -- a grant this service holds state for; written with its first connection, deleted on NOT_FOUND
+        -- or by the dormancy sweep, cascading to its connection and subscriptions
+);
+-- filled from connector.connections, then:
+ALTER TABLE connector.connections ADD FOREIGN KEY (grant_id) REFERENCES connector.grants (grant_id) ON DELETE CASCADE;
+ALTER TABLE connector.event_subscriptions DROP CONSTRAINT event_subscriptions_grant_id_fkey,
+    ADD FOREIGN KEY (grant_id) REFERENCES connector.grants (grant_id) ON DELETE CASCADE;
+    -- a subscription outlives its connection, so a refused one can go while its subscriptions wait
+
+CREATE TABLE connector.subscription_dormancy (
+    subscription_id  uuid        PRIMARY KEY REFERENCES connector.event_subscriptions (id) ON DELETE CASCADE,
+    since            timestamptz NOT NULL
+        -- written when the connection is refused, deleted by the next stored connection
+);
+CREATE INDEX subscription_dormancy_since_idx ON connector.subscription_dormancy (since);
+    -- serves the sweep of grants dormant past 30 days
 ```
 
-Live subscription is derived: no closure row. Stream open is replica memory, never stored.
+Unclosed is derived: no closure row. Live is derived: unclosed and no dormancy row. Stream open is replica memory, never stored.
 
 ## Security
 
@@ -266,7 +305,7 @@ Go, in this repository's `test/` module to start, moving with the service into i
 
 - A fake hub (`httptest`): JWKS, `IssueConnectorPuppetToken`, `whoami`, `Subscribe` stream, `Ack`, `NotifyOwner`, `Send`, with scripted deliveries and failures.
 - A fake platform: a webhook receiver that answers the verification challenge, 2xx, 410, 413, 5xx and timeouts, and checks signatures.
-- Cases: every auth refusal above; a connection opened once per grant; tool calls as the puppet; subscribe with a failing callback is refused; a delivery from the owner reaches every live subscription in order, signed, and is acked after the last 2xx; a non-owner delivery is acked and produces no event; 410 and 413 close the subscription and the owner is told once; a failure leaves the delivery pending and the redelivery skips the subscriptions that accepted it; 24 h and 10 failed handlings close it `deliveryFailed`; the platform's wait is capped at 5 min and a subscribe or unsubscribe ends it; `Retry-After` in both forms, garbage, a past date and one over 30 s; the stream opens with the first subscription and closes with the last; a revoked grant closes the connection; cursors resume; the request limit; secrets never appear in logs; the drift test pins the three tools.
+- Cases: every auth refusal above; a connection opened once per grant; tool calls as the puppet; subscribe with a failing callback is refused; a delivery from the owner reaches every live subscription in order, signed, and is acked after the last 2xx; a non-owner delivery is acked and produces no event; 410 and 413 close the subscription and the owner is told once; a failure leaves the delivery pending and the redelivery skips the subscriptions that accepted it; 24 h and 10 failed handlings close it `deliveryFailed`; the platform's wait is capped at 5 min and a subscribe or unsubscribe ends it; `Retry-After` in both forms, garbage, a past date and one over 30 s; the stream opens with the first subscription and closes with the last; a revoked grant closes the connection; cursors resume; a stream ended `ACCOUNT_SUSPENDED` or `TOKEN_INVALID`, and a tool call's `TOKEN_INVALID`, leave the subscriptions dormant, not closed; suspend then reinstate resumes them with the cursor kept, while a kept suspended refusal answers the same JWT without a hub call and a later JWT issues; suspend then revoke deletes them; `TOKEN_INVALID` on the first `Subscribe` (a deleted token at boot) goes dormant and the next request resumes it; concurrent requests during reinstatement share one issue and one stream; the sweep at boot and at a stream end deletes a grant dormant 31 days and keeps a recent one; subscribe and unsubscribe match a dormant subscription; migration 00004 keeps rows from before it; the request limit; secrets never appear in logs; the drift test pins the three tools.
 - Contract tests against staging `sockd` for `IssueConnectorPuppetToken`, the JWKS and the stream, with a staging grant.
 - Live, in order, as [integrations](integrations.md) says: tool discovery over the Secure MCP Tunnel with the stdio server, the staging endpoint as a custom MCP server in ChatGPT and as a claude.ai connector, an owner reply arriving at a dot, then the directory submission.
 
