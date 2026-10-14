@@ -273,10 +273,8 @@ func TestLogHasNoControlCharacters(t *testing.T) {
 	tmp := t.TempDir()
 	fake := filepath.Join(tmp, "sock")
 	script := "#!/bin/sh\nprintf '\\033]0;pwned\\007\\033[2J\\tend\\r' >&2\nexit 1\n"
-	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": tmp + ":/usr/bin:/bin", "SOCK_HOOK_TIMEOUT": "10"}}, "--permission")
+	writeFakeExec(t, fake, script)
+	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": tmp + ":/usr/bin:/bin"}}, "--permission")
 	if !strings.Contains(r.Log, "pwned") {
 		t.Fatalf("no log: %q", r.Log)
 	}
@@ -293,10 +291,8 @@ func TestTokenNeverInLog(t *testing.T) {
 	s := newStub(t)
 	tmp := t.TempDir()
 	fake := filepath.Join(tmp, "sock")
-	if err := os.WriteFile(fake, []byte("#!/bin/sh\necho \"boom token=$SOCK_TOKEN\" >&2\nexit 1\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": tmp + ":/usr/bin:/bin", "SOCK_HOOK_TIMEOUT": "10"}}, "--permission")
+	writeFakeExec(t, fake, "#!/bin/sh\necho \"boom token=$SOCK_TOKEN\" >&2\nexit 1\n")
+	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": tmp + ":/usr/bin:/bin"}}, "--permission")
 	if r.Log == "" || strings.Contains(r.Log, token) {
 		t.Fatalf("log %q", r.Log)
 	}
@@ -390,10 +386,8 @@ func TestTokenStraddlingCutIsRedacted(t *testing.T) {
 	tmp := t.TempDir()
 	fake := filepath.Join(tmp, "sock")
 	script := "#!/bin/sh\nprintf '%0290d' 0 >&2\necho \"$SOCK_TOKEN\" >&2\nexit 1\n"
-	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": tmp + ":/usr/bin:/bin", "SOCK_HOOK_TIMEOUT": "10"}}, "--permission")
+	writeFakeExec(t, fake, script)
+	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": tmp + ":/usr/bin:/bin"}}, "--permission")
 	if r.Log == "" {
 		t.Fatal("no log")
 	}
@@ -409,10 +403,8 @@ func TestTokenSplitByControlByteIsRedacted(t *testing.T) {
 	tmp := t.TempDir()
 	fake := filepath.Join(tmp, "sock")
 	script := "#!/bin/sh\nprintf '%0290d' 0 >&2\nprintf '%s\\001%s\\n' \"${SOCK_TOKEN%????????}\" \"${SOCK_TOKEN#${SOCK_TOKEN%????????}}\" >&2\nexit 1\n"
-	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": tmp + ":/usr/bin:/bin", "SOCK_HOOK_TIMEOUT": "10"}}, "--permission")
+	writeFakeExec(t, fake, script)
+	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": tmp + ":/usr/bin:/bin"}}, "--permission")
 	if r.Log == "" {
 		t.Fatal("no log")
 	}
@@ -834,9 +826,7 @@ case "$*" in
 	;;
 esac
 `
-	if err := os.WriteFile(filepath.Join(dir, "sock"), []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	writeFakeExec(t, filepath.Join(dir, "sock"), script)
 	return dir, rec
 }
 
@@ -867,7 +857,7 @@ func TestMachineKeySendsAsTheProjectPuppet(t *testing.T) {
 func TestMachineKeyEnsureFailureSendsNothingAndHidesTheKey(t *testing.T) {
 	s := newStub(t)
 	bin, rec := fakeSockForKeys(t, "fail")
-	env := map[string]string{"PATH": bin + ":" + hookPathTail, "SOCK_TOKEN": machineKey, "SOCK_HOOK_TIMEOUT": fakeSockTimeout}
+	env := map[string]string{"PATH": bin + ":" + hookPathTail, "SOCK_TOKEN": machineKey}
 	r := runHook(t, s.URL, hookEnv{Env: env, Stdin: stopInput("k2", "Ship it?")}, "--stop", "--ask-now")
 	if _, err := os.Stat(filepath.Join(rec, "send-token")); err == nil {
 		t.Fatal("sent after ensure failed")
@@ -883,19 +873,15 @@ func TestMachineKeyEnsureFailureSendsNothingAndHidesTheKey(t *testing.T) {
 func TestPluginOptionMachineKeyWorksToo(t *testing.T) {
 	s := newStub(t)
 	bin, rec := fakeSockForKeys(t, "")
-	env := map[string]string{"PATH": bin + ":" + hookPathTail, "SOCK_TOKEN": "", "CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": machineKey, "CLAUDE_PLUGIN_OPTION_SOCK_URL": s.URL, "CLAUDE_PROJECT_DIR": "/x/proj", "SOCK_HOOK_TIMEOUT": fakeSockTimeout}
+	env := map[string]string{"PATH": bin + ":" + hookPathTail, "SOCK_TOKEN": "", "CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": machineKey, "CLAUDE_PLUGIN_OPTION_SOCK_URL": s.URL, "CLAUDE_PROJECT_DIR": "/x/proj"}
 	runHook(t, s.URL, hookEnv{Env: env, Stdin: hookJSON(map[string]any{"hook_event_name": "Notification", "notification_type": "permission_prompt", "message": "Claude needs your permission to use Bash"})}, "--permission")
 	if got := readRec(t, rec, "send-token"); got != "sock_pt_projectpuppet_secret" {
 		t.Fatalf("send ran with %q", got)
 	}
 }
 
-// fakeSockTimeout is the watchdog for tests whose sock is a fresh script: its
-// first exec can take seconds on a loaded machine, past runHook's default 2.
-const fakeSockTimeout = "10"
-
 func machineKeyEnv(bin string) map[string]string {
-	return map[string]string{"PATH": bin + ":" + hookPathTail, "SOCK_TOKEN": machineKey, "CLAUDE_PROJECT_DIR": "/x/proj", "SOCK_HOOK_TIMEOUT": fakeSockTimeout}
+	return map[string]string{"PATH": bin + ":" + hookPathTail, "SOCK_TOKEN": machineKey, "CLAUDE_PROJECT_DIR": "/x/proj"}
 }
 
 func sent(rec string) bool {
@@ -1009,9 +995,7 @@ func TestLeadingDashProjectKeepsItsName(t *testing.T) {
 func fakeSock(t *testing.T, body string) string {
 	t.Helper()
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "sock"), []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	writeFakeExec(t, filepath.Join(dir, "sock"), "#!/bin/sh\n"+body+"\n")
 	return dir
 }
 
@@ -1052,7 +1036,7 @@ func TestExistingHookLogIsMadePrivate(t *testing.T) {
 func TestNULBytesInSockStderrNeverReachTheLog(t *testing.T) {
 	s := newStub(t)
 	bin := fakeSock(t, "printf 'bad\\000news\\001' >&2; exit 4")
-	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": bin + ":" + hookPathTail, "SOCK_HOOK_TIMEOUT": fakeSockTimeout}}, "--permission")
+	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": bin + ":" + hookPathTail}}, "--permission")
 	if strings.ContainsRune(r.Log, 0) || !strings.Contains(r.Log, "badnews") {
 		t.Fatalf("log %q", r.Log)
 	}
@@ -1090,7 +1074,7 @@ cat > "$rec/text"
 // (learn.chatgpt.com/docs/hooks, "Plugin-bundled hooks"), so it cannot tell
 // the routes apart; the input's turn_id, a Codex-only field, does.
 func codexPluginEnv(bin string) map[string]string {
-	return map[string]string{"PATH": bin + ":" + hookPathTail, "SOCK_TOKEN": "", "PLUGIN_ROOT": "/x/plugin", "CLAUDE_PLUGIN_ROOT": "/x/plugin", "CLAUDE_PROJECT_DIR": "/x/proj", "SOCK_ACCESS_GATE": "gate-secret", "SOCK_HOOK_TIMEOUT": fakeSockTimeout}
+	return map[string]string{"PATH": bin + ":" + hookPathTail, "SOCK_TOKEN": "", "PLUGIN_ROOT": "/x/plugin", "CLAUDE_PLUGIN_ROOT": "/x/plugin", "CLAUDE_PROJECT_DIR": "/x/proj", "SOCK_ACCESS_GATE": "gate-secret"}
 }
 
 // codexPermission is a Codex PermissionRequest input: no message, a turn_id.
@@ -1242,7 +1226,7 @@ func TestLoggedStderrRedactsUnknownTokens(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			s := newStub(t)
 			bin := fakeSock(t, "cat >/dev/null; echo '"+pad+" "+leak+"' >&2; echo 'boom "+leak+"' >&2; exit 1")
-			env := map[string]string{"PATH": bin + ":" + hookPathTail, "SOCK_HOOK_TIMEOUT": fakeSockTimeout}
+			env := map[string]string{"PATH": bin + ":" + hookPathTail}
 			for k, v := range extra {
 				env[k] = v
 			}
@@ -1258,7 +1242,7 @@ func TestLoggedStderrRedactsUnknownTokens(t *testing.T) {
 func TestLogStripsC1Controls(t *testing.T) {
 	s := newStub(t)
 	bin := fakeSock(t, `cat >/dev/null; printf 'c1:\302\2332J raw:\2332J keep:\303\251\342\202\254\360\237\230\200' >&2; exit 1`)
-	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": bin + ":" + hookPathTail, "SOCK_HOOK_TIMEOUT": fakeSockTimeout}}, "--permission")
+	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": bin + ":" + hookPathTail}}, "--permission")
 	if !strings.Contains(r.Log, "c1:2J raw:2J keep:é€😀") || !utf8.ValidString(r.Log) {
 		t.Fatalf("log %q", r.Log)
 	}

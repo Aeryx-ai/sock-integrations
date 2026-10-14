@@ -87,9 +87,7 @@ func TestMCPSendFailsOnBadResponses(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			fake := filepath.Join(t.TempDir(), "fake-mcp")
 			script := "#!/bin/sh\nread l\necho '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"serverInfo\":{\"name\":\"fake\",\"version\":\"0\"}}}'\nread l\nread l\necho '" + c.resp + "'\nexec sleep 600\n"
-			if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
-				t.Fatal(err)
-			}
+			writeFakeExec(t, fake, script)
 			cmd := exec.Command(os.Args[0], "-test.run=^TestMCPSend$")
 			cmd.Env = append(os.Environ(), "SOCK_MCP_BIN="+fake, "SOCK_SMOKE=")
 			out, err := cmd.CombinedOutput()

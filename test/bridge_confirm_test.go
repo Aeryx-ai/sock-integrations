@@ -686,9 +686,7 @@ func TestConfirmCodesAreInNoArgv(t *testing.T) {
 	h := newBridgeHarness(t)
 	for _, name := range []string{"awk", "sed", "jq", "grep", "tr", "head", "tail", "cut", "cat", "mv", "chmod", "curl", "date", "find", "wc", "rm", "mkdir", "sleep", "seq", "ps", "readlink", "dirname", "ln"} {
 		w := "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done >> \"$STUB_DIR/argvlog\"\nPATH=" + rnPathTail + "\nexport PATH\nexec " + name + " \"$@\"\n"
-		if err := os.WriteFile(filepath.Join(h.stubs, name), []byte(w), 0o755); err != nil {
-			t.Fatal(err)
-		}
+		writeFakeExec(t, filepath.Join(h.stubs, name), w)
 	}
 	h.script(toolUse(cfTool, "agent.tool_use", cfName, "ask"), toolUse(cfTool2, "agent.tool_use", cfName, "ask"), blocked(cfTool, cfTool2))
 	if r := h.run(rnOpts{}); r.Code != 0 {

@@ -20,9 +20,7 @@ func (h *rnHarness) wrapTools(tools ...string) {
 	h.t.Helper()
 	for _, name := range tools {
 		w := "#!/bin/sh\nenv >> \"$STUB_DIR/childenv\"\nPATH=" + rnPathTail + "\nexport PATH\nexec " + name + " \"$@\"\n"
-		if err := os.WriteFile(filepath.Join(h.stubs, name), []byte(w), 0o755); err != nil {
-			h.t.Fatal(err)
-		}
+		writeFakeExec(h.t, filepath.Join(h.stubs, name), w)
 	}
 }
 
@@ -31,9 +29,7 @@ func TestBridgeKeyIsInNoChildEnvironment(t *testing.T) {
 	h := newBridgeHarness(t)
 	h.wrapTools("dirname", "jq", "ps", "find", "cat", "grep", "sed", "tr", "readlink", "curl", "date")
 	sock := strings.Replace(bnSockStub, "#!/bin/sh\n", "#!/bin/sh\nenv >> \"$STUB_DIR/childenv\"\n", 1)
-	if err := os.WriteFile(filepath.Join(h.stubs, "sock"), []byte(sock), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	writeFakeExec(t, filepath.Join(h.stubs, "sock"), sock)
 	h.script(agentMsg(bnAnswer), idle("end_turn"))
 	r := h.run(rnOpts{})
 	if r.Code != 0 || len(h.sends()) != 1 {
@@ -349,9 +345,7 @@ func TestBridgeCurlIgnoresCurlrcAndPinsTheProtocol(t *testing.T) {
 	}
 	// one line per curl call: its arguments, space separated
 	wrapper := "#!/bin/sh\necho \"$*\" >> \"$STUB_DIR/curl.calls\"\nexec /usr/bin/curl \"$@\"\n"
-	if err := os.WriteFile(filepath.Join(h.stubs, "curl"), []byte(wrapper), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	writeFakeExec(t, filepath.Join(h.stubs, "curl"), wrapper)
 	h.script(agentMsg(bnAnswer), idle("end_turn"))
 	r := h.run(rnOpts{})
 	if r.Code != 0 || len(h.sends()) != 1 {

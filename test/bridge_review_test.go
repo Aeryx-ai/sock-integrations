@@ -249,9 +249,7 @@ func TestBridgeUnwritableStateDirFailsFast(t *testing.T) {
 func TestBridgeCurlNeverSeesTheKeyInItsArguments(t *testing.T) {
 	h := newBridgeHarness(t)
 	wrapper := "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$STUB_DIR/curl.argv\"\nexec /usr/bin/curl \"$@\"\n"
-	if err := os.WriteFile(filepath.Join(h.stubs, "curl"), []byte(wrapper), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	writeFakeExec(t, filepath.Join(h.stubs, "curl"), wrapper)
 	h.script(agentMsg(bnAnswer), idle("end_turn"))
 	r := h.run(rnOpts{})
 	argv, _ := os.ReadFile(filepath.Join(h.rec, "curl.argv"))

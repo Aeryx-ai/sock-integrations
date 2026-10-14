@@ -434,9 +434,7 @@ func TestBridgeConversationCreatedIDIsValidated(t *testing.T) {
 func TestBridgeConversationMetadataHoldsNoSecrets(t *testing.T) {
 	h := newConvHarness(t)
 	wrapper := "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$STUB_DIR/curl.argv\"\nexec /usr/bin/curl \"$@\"\n"
-	if err := os.WriteFile(filepath.Join(h.stubs, "curl"), []byte(wrapper), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	writeFakeExec(t, filepath.Join(h.stubs, "curl"), wrapper)
 	h.wrapTools("jq", "sed", "awk", "mv", "chmod")
 	h.script(idle("end_turn"))
 	r := h.run(rnOpts{})

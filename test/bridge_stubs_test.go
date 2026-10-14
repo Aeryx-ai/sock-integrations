@@ -451,9 +451,7 @@ func newBridgeHarnessNoParallel(t *testing.T) *bnHarness {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(h.stubs, "sock"), []byte(bnSockStub), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	writeFakeExec(t, filepath.Join(h.stubs, "sock"), bnSockStub)
 	api := newFakeMA(t)
 	h.env = map[string]string{
 		"PATH":                 h.stubs + ":" + rnPathTail,

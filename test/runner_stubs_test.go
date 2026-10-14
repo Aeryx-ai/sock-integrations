@@ -135,9 +135,7 @@ func newRunnerHarness(t *testing.T) *rnHarness {
 		}
 	}
 	for name, body := range map[string]string{"sock": rnSockStub, "claude": rnAgentStub, "codex": rnAgentStub} {
-		if err := os.WriteFile(filepath.Join(h.stubs, name), []byte(body), 0o755); err != nil {
-			t.Fatal(err)
-		}
+		writeFakeExec(t, filepath.Join(h.stubs, name), body)
 	}
 	h.env = map[string]string{
 		"PATH":                   h.stubs + ":" + rnPathTail,

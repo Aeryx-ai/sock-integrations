@@ -168,15 +168,12 @@ func listTools(t *testing.T, url string) map[string]bool {
 // TestListToolsBoundsSilentServer: a server that stays alive and silent fails
 // the test within mcpTimeout instead of hanging it.
 func TestListToolsBoundsSilentServer(t *testing.T) {
-	fake := filepath.Join(t.TempDir(), "silent")
-	if err := os.WriteFile(fake, []byte("#!/bin/sh\necho booting >&2\nexec sleep 600\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("SOCK_MCP_BIN", fake)
 	if os.Getenv("DRIFT_SILENT_CHILD") == "1" {
-		listTools(t, "http://127.0.0.1:1")
+		listTools(t, "http://127.0.0.1:1") // SOCK_MCP_BIN is the parent's fake
 		return
 	}
+	fake := filepath.Join(t.TempDir(), "silent")
+	writeFakeExec(t, fake, "#!/bin/sh\necho booting >&2\nexec sleep 600\n")
 	cmd := exec.Command(os.Args[0], "-test.run=^TestListToolsBoundsSilentServer$", "-test.v")
 	const childTimeout = time.Second
 	cmd.Env = append(os.Environ(), "DRIFT_SILENT_CHILD=1", "SOCK_MCP_BIN="+fake, "MCP_TEST_TIMEOUT="+childTimeout.String())
