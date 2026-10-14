@@ -27,11 +27,12 @@ func TestRunnerLockWaitShortensTheRun(t *testing.T) {
 // wins, the id is recorded and the message is not rerun.
 func TestRunnerAgentExitZeroBeatsALateWatchdog(t *testing.T) {
 	h := newRunnerHarness(t)
-	agent := "#!/bin/sh\ncat >/dev/null\nmkdir -p \"$STUB_DIR/run.x\"\ntrap 'exit 0' TERM\nsleep 60 &\nwait\n"
+	// the trap comes first and the timeout leaves room for a slow first exec
+	agent := "#!/bin/sh\ntrap 'exit 0' TERM\ncat >/dev/null\nsleep 60 &\nwait\n"
 	if err := os.WriteFile(filepath.Join(h.stubs, "claude"), []byte(agent), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	r := h.run(rnOpts{Env: map[string]string{"SOCK_RUNNER_TIMEOUT": "2"}})
+	r := h.run(rnOpts{Env: map[string]string{"SOCK_RUNNER_TIMEOUT": rnLoadedTimeout}})
 	if r.Code != 0 || !strings.Contains(h.log(), "ran") {
 		t.Fatalf("agent exit 0 after the watchdog fired: %+v log %q", r, h.log())
 	}
