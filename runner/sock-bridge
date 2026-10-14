@@ -487,8 +487,11 @@ from_history() {
 }
 
 # --- the session: SOCK_BRIDGE_SESSION, or this conversation's own -----------
-# map_put SESSION rewrites the map with this conversation's line set to SESSION,
-# or dropped when it is empty: under the run lock, by tmp and rename, mode 600
+# map_put SESSION rewrites the map with this conversation's line set to
+# "<conversation> SESSION <config hash>", or dropped when SESSION is empty: under
+# the run lock, by tmp and rename, mode 600. The hash is of the configuration
+# the bridge created or adopted the session under (halt_hash); a line from
+# before it was recorded has two fields, an unknown hash.
 map_put() {
 	# the other conversations' lines first: a map awk cannot read fails closed
 	# here, before a rename could replace it with this conversation's line alone
@@ -502,7 +505,7 @@ map_put() {
 		: >"$sessions_file.tmp" 2>/dev/null
 	fi
 	{
-		if [ -n "$1" ]; then printf '%s %s\n' "$stdin_conv" "$1" >>"$sessions_file.tmp"; fi &&
+		if [ -n "$1" ]; then printf '%s %s %s\n' "$stdin_conv" "$1" "$halt_hash" >>"$sessions_file.tmp"; fi &&
 			chmod 600 "$sessions_file.tmp" && mv "$sessions_file.tmp" "$sessions_file"
 	} 2>/dev/null || {
 		log_line "sessions not writable"
@@ -616,7 +619,9 @@ halted() {
 	exit 2
 }
 halt_trip() {
-	halt_put pending
+	# a halt already standing for this configuration keeps its posted mark
+	read -r h_hash _ <"$halt_file" 2>/dev/null || h_hash=
+	[ "$h_hash" = "$halt_hash" ] || halt_put pending
 	halted
 	exit 2
 }
@@ -632,7 +637,10 @@ resolve_session() {
 		log_line "sessions not readable"
 		exit 1
 	fi
-	session=$(awk -v c="$stdin_conv" '$1 == c { print $2; exit }' "$sessions_file" 2>/dev/null)
+	line_hash=
+	read -r session line_hash <<EOF
+$(awk -v c="$stdin_conv" '$1 == c { print $2, $3; exit }' "$sessions_file" 2>/dev/null)
+EOF
 	if [ -n "$session" ] && session_ok "$session"; then
 		pass=404
 		if api GET "$api/v1/sessions/$session?beta=true"; then
@@ -642,6 +650,14 @@ resolve_session() {
 				outcome="session gone"
 			elif ! jq -e --arg a "$agent" --arg e "$environment" --arg v "$agent_version" --arg b "$budget" \
 				"$fits_jq"'fits($a; $e; $v; $b)' "$resp" >/dev/null 2>&1; then
+				# made under this exact configuration, yet it no longer fits: the
+				# API now shows it in a shape the bridge cannot read. Replacing it
+				# would repeat on every reply: trip the breaker, keep it unused
+				if [ "$line_hash" = "$halt_hash" ]; then
+					pass=
+					log_line "session drifted"
+					halt_trip
+				fi
 				gone=$session
 				notice="the bridge configuration changed; this reply started a new session"
 				outcome="session config changed"

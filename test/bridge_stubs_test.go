@@ -70,7 +70,8 @@ type fakeMA struct {
 	createID       string           // when set, the id a create answers with
 	findPage       int              // when set, the page size of the session list
 	noAgentFilter  bool
-	createNoBudget bool // a create stores and answers its session without the budget             // the session list ignores agent_id
+	createNoBudget bool
+	checkNoBudget  bool // a Check answers the session without its budget // a create stores and answers its session without the budget             // the session list ignores agent_id
 }
 
 func newFakeMA(t *testing.T) *fakeMA {
@@ -156,7 +157,16 @@ func (f *fakeMA) handle(w http.ResponseWriter, r *http.Request) {
 		f.find(w, r)
 	case "check":
 		f.mu.Lock()
-		b, _ := json.Marshal(f.session(id))
+		sess := f.session(id)
+		if f.checkNoBudget && sess != nil {
+			c := map[string]any{}
+			for k, v := range sess {
+				c[k] = v
+			}
+			delete(c, "budget")
+			sess = c
+		}
+		b, _ := json.Marshal(sess)
 		f.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write(b)
