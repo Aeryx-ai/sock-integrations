@@ -38,6 +38,28 @@ hash16() {
 	if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi | cut -c1-16
 }
 
+# sweep_dead removes the temp files of runs that no longer exist. They are named
+# <prefix>.<pid>, and a run killed with SIGKILL (or a lost power) leaves them,
+# the bridge's curl config with its API key among them.
+sweep_dead() {
+	for f in "$state_dir"/curl.* "$state_dir"/hdr.* "$state_dir"/resp.* "$state_dir"/stream.* "$state_dir"/streamh.* \
+		"$state_dir"/body.* "$state_dir"/answer.* "$state_dir"/parts.* "$state_dir"/prompt.* "$state_dir"/new.* \
+		"$state_dir"/batch.* "$state_dir"/ids.* "$state_dir"/page.* "$state_dir"/hist.*; do
+		[ -e "$f" ] || continue
+		pid=${f##*.}
+		case $pid in
+		'' | *[!0-9]*) continue ;;
+		esac
+		kill -0 "$pid" 2>/dev/null || rm -rf "$f"
+	done
+}
+
+# require_state_dir fails fast, as a configuration error, when the state
+# directory cannot be written: otherwise the lock wait would spin to the timeout.
+require_state_dir() {
+	[ -d "$state_dir" ] && [ -w "$state_dir" ] || die_config "the state directory $state_dir is not writable"
+}
+
 # lib_init makes the state directory and sweeps what a SIGKILLed run left.
 lib_init() {
 	log=$state_dir/$log_name
@@ -46,6 +68,7 @@ lib_init() {
 	mkdir -p "$state_dir" 2>/dev/null && chmod 700 "$state_dir" 2>/dev/null
 	# prompt files older than any run can last
 	find "$state_dir" -maxdepth 1 -name 'prompt.*' -mmin "+$((timeout / 60 + 2))" -exec rm -f {} + 2>/dev/null || true
+	sweep_dead
 	msg_id=-
 	prompt=
 	mytoken=
@@ -213,7 +236,8 @@ take_lock() {
 # --- the prompt: the owner's text only, in a private file --------------------
 # write_prompt sets prompt, or logs and exits 1.
 write_prompt() {
-	prompt=$(mktemp "$state_dir/prompt.XXXXXX") || {
+	prompt=$state_dir/prompt.$$
+	: >"$prompt" || {
 		log_line "prompt file failed"
 		exit 1
 	}

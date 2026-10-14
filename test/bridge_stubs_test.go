@@ -45,15 +45,19 @@ type fakeMA struct {
 	srv *httptest.Server
 
 	mu       sync.Mutex
-	log      []string         // "stream", "send", "list" in arrival order
-	headers  []http.Header    // of each request, in order
-	sent     []string         // user.message bodies
-	streamed chan struct{}    // closed when a stream request arrives
-	events   [][]any          // per send: events the stream plays after it
-	history  []map[string]any // what the list endpoint returns
-	status   map[string][]int // per "stream"/"send"/"list": statuses to return first
-	retryAft string           // Retry-After for the scripted non-200s
-	hold     bool             // after the script, keep the stream open and silent
+	log      []string           // "stream", "send", "list" in arrival order
+	headers  []http.Header      // of each request, in order
+	sent     []string           // user.message bodies
+	streamed chan struct{}      // closed when a stream request arrives
+	events   [][]any            // per send: events the stream plays after it
+	history  []map[string]any   // what the list endpoint returns
+	status   map[string][]int   // per "stream"/"send"/"list": statuses to return first
+	retryAft string             // Retry-After for the scripted non-200s
+	hold     bool               // after the script, keep the stream open and silent
+	pages    [][]map[string]any // when set, the list endpoint serves these pages by cursor
+	split    bool               // write the first scripted event in two halves with a pause
+	dropSend int                // POSTs to record and then answer by closing the connection
+	flood    int                // inert events played before the script
 }
 
 func newFakeMA(t *testing.T) *fakeMA {
@@ -112,21 +116,48 @@ func (f *fakeMA) handle(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		f.mu.Lock()
 		f.sent = append(f.sent, string(b))
+		drop := f.dropSend > 0
+		if drop {
+			f.dropSend--
+		}
 		f.mu.Unlock()
+		if drop {
+			if hj, ok := w.(http.Hijacker); ok {
+				if c, _, err := hj.Hijack(); err == nil {
+					_ = c.Close()
+				}
+			}
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":[]}`))
 	default:
 		f.mu.Lock()
 		h := f.history
+		pages := f.pages
 		f.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"data": h})
+		if len(pages) > 0 {
+			i := 0
+			if c := r.URL.Query().Get("page"); c != "" {
+				_, _ = fmt.Sscanf(c, "p%d", &i)
+			}
+			var next any
+			if i+1 < len(pages) {
+				next = fmt.Sprintf("p%d", i+1)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": pages[i], "next_page": next})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": h, "next_page": nil})
 	}
 }
 
 // play waits for the send, then writes that send's scripted events.
 func (f *fakeMA) play(w http.ResponseWriter, r *http.Request) {
-	idx := f.streamCount() - 1
+	f.mu.Lock()
+	idx := len(f.sent) // this stream plays the script of the next send
+	f.mu.Unlock()
 	deadline := time.After(15 * time.Second)
 	for {
 		f.mu.Lock()
@@ -148,11 +179,24 @@ func (f *fakeMA) play(w http.ResponseWriter, r *http.Request) {
 	if idx < len(f.events) {
 		evs = f.events[idx]
 	}
-	hold := f.hold
+	hold, split, flood := f.hold, f.split, f.flood
 	f.mu.Unlock()
-	for _, e := range evs {
+	for i := range flood {
+		_, _ = fmt.Fprintf(w, "data: {\"type\":\"agent.thinking\",\"id\":\"evt_flood%d\",\"content\":[{\"type\":\"text\",\"text\":\"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"}]}\n\n", i)
+	}
+	if flood > 0 {
+		w.(http.Flusher).Flush()
+	}
+	for i, e := range evs {
 		b, _ := json.Marshal(e)
-		_, _ = fmt.Fprintf(w, "event: message\ndata: %s\n\n", b)
+		if split && i == 0 {
+			_, _ = fmt.Fprintf(w, "event: message\ndata: %s", b[:40])
+			w.(http.Flusher).Flush()
+			time.Sleep(1200 * time.Millisecond)
+			_, _ = fmt.Fprintf(w, "%s\n\n", b[40:])
+		} else {
+			_, _ = fmt.Fprintf(w, "event: message\ndata: %s\n\n", b)
+		}
 		w.(http.Flusher).Flush()
 	}
 	if hold {

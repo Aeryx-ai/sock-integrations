@@ -35,6 +35,11 @@ case $timeout in
 '' | *[!0-9]*) timeout=900 ;;
 esac
 [ "$timeout" -gt 0 ] || timeout=900
+# the most the stream file may hold: a flood stops the turn instead of the disk
+max_stream=${SOCK_BRIDGE_MAX_STREAM:-33554432}
+case $max_stream in
+'' | *[!0-9]*) max_stream=33554432 ;;
+esac
 
 state_dir=${SOCK_BRIDGE_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/sock-integrations-bridge}
 log_name=bridge.log
@@ -43,26 +48,30 @@ ledger_name=done.ids
 lib_init
 sent_file=$state_dir/sent.ids
 
-# --- temp files and the stream: removed on exit ------------------------------
-cfg=
-hdr=
-body=
-resp=
-stream_file=
-stream_hdr=
-answer=
-parts=
+# --- temp files, named <prefix>.<pid> so a SIGKILLed run's are swept by the next
+# (lib.sh sweep_dead), and the stream: removed on exit --------------------------
+cfg=$state_dir/curl.$$
+hdr=$state_dir/hdr.$$
+resp=$state_dir/resp.$$
+stream_file=$state_dir/stream.$$
+stream_hdr=$state_dir/streamh.$$
+body=$state_dir/body.$$
+answer=$state_dir/answer.$$
+new=$state_dir/new.$$
+batch=$state_dir/batch.$$
+ids_file=$state_dir/ids.$$
+page=$state_dir/page.$$
+hist=$state_dir/hist.$$
+parts=$state_dir/parts.$$
 stream_pid=
 # shellcheck disable=SC2329 # run by the library's EXIT trap
 extra_cleanup() {
 	[ -n "$stream_pid" ] && kill "$stream_pid" 2>/dev/null
-	for f in "$cfg" "$hdr" "$body" "$resp" "$stream_file" "$stream_hdr" "$answer"; do
-		[ -n "$f" ] && rm -f "$f"
-	done
-	[ -n "$parts" ] && rm -rf "$parts"
+	rm -rf "$cfg" "$hdr" "$resp" "$stream_file" "$stream_hdr" "$body" "$answer" "$new" "$batch" "$ids_file" "$page" "$hist" "$parts"
 }
 install_traps
 
+require_state_dir
 read_message
 owner_gate
 drop_if_done
@@ -72,35 +81,51 @@ drop_if_done
 deadline=$(($(now) + timeout))
 
 # the key goes to curl in a private config, so it is in no argv or environment
-cfg=$(mktemp "$state_dir/curl.XXXXXX") || exit 1
 {
 	printf 'header = "x-api-key: %s"\n' "$key"
 	printf '%s\n' 'header = "anthropic-version: 2023-06-01"' 'header = "anthropic-beta: managed-agents-2026-04-01"' \
 		'header = "content-type: application/json"' 'user-agent = "sock-bridge"'
-} >"$cfg"
+} >"$cfg" || exit 1
 unset key ANTHROPIC_API_KEY
+: >"$ids_file"
 
 base="$api/v1/sessions/$session/events"
-hdr=$(mktemp "$state_dir/hdr.XXXXXX") || exit 1
-resp=$(mktemp "$state_dir/resp.XXXXXX") || exit 1
 
-# api METHOD URL [body file]: sets code; retries 429, 5xx and network failures
-# a few times, honouring Retry-After (seconds or an HTTP date)
+# retry_wait sets nothing: it sleeps the Retry-After (seconds or an HTTP date),
+# else 1, 2, 4 s, capped at 30 s and at the time left
 retry_wait() {
-	ra=$(sed -n 's/^[Rr]etry-[Aa]fter: *//p' "$hdr" | tr -d '\r' | head -n 1)
+	ra=$(sed -n 's/^[Rr]etry-[Aa]fter: *//p' "$hdr" | tr -d '\r ' | head -n 1)
+	wait=$((1 << attempt))
 	case $ra in
-	'') wait=$((1 << attempt)) ;;
+	'') ;;
 	*[!0-9]*)
 		when=$(date -j -f '%a, %d %b %Y %H:%M:%S GMT' "$ra" +%s 2>/dev/null || date -d "$ra" +%s 2>/dev/null || echo "")
-		if [ -n "$when" ]; then wait=$((when - $(now))); else wait=$((1 << attempt)); fi
+		case $when in
+		'' | *[!0-9]*) ;;
+		*) wait=$((when - $(now))) ;;
+		esac
 		;;
-	*) wait=$ra ;;
+	*)
+		digits=$(printf '%s' "$ra" | sed 's/^0*//')
+		case ${#digits} in
+		0) wait=0 ;;
+		[1-3]) wait=$digits ;;
+		*) wait=30 ;;
+		esac
+		;;
 	esac
 	[ "$wait" -lt 0 ] && wait=0
 	[ "$wait" -gt 30 ] && wait=30
-	jitter=$(awk 'BEGIN { srand(); printf "%.1f", rand() }')
-	sleep "$((wait))$(printf '%s' "$jitter" | sed 's/^0//')" 2>/dev/null || sleep "$wait"
+	left=$((deadline - $(now)))
+	[ "$wait" -gt "$left" ] && wait=$left
+	[ "$wait" -gt 0 ] && sleep "$wait"
+	return 0
 }
+
+# api METHOD URL [body file]: sets code and leaves the answer in $resp. 429 is
+# retried, and 5xx and network failures too for a GET; a POST that failed any
+# other way may have landed, so it is not repeated (the redelivery asks the
+# session's history before it sends again).
 api() {
 	method=$1
 	url=$2
@@ -122,35 +147,47 @@ api() {
 			echo "$cmd_name: the Managed Agents API answered $code: check ANTHROPIC_API_KEY and SOCK_BRIDGE_SESSION" >&2
 			exit 2
 			;;
-		429 | 5?? | 000)
-			attempt=$((attempt + 1))
-			if [ "$attempt" -ge 4 ]; then
-				log_line "http $code"
-				exit 1
-			fi
-			retry_wait
-			;;
+		429) ;;
+		5?? | 000) [ "$method" = GET ] || {
+			log_line "http $code"
+			exit 1
+		} ;;
 		*)
 			log_line "http $code"
 			exit 1
 			;;
 		esac
+		attempt=$((attempt + 1))
+		if [ "$attempt" -ge 4 ]; then
+			log_line "http $code"
+			exit 1
+		fi
+		retry_wait
 	done
 }
 
 # --- posting to the owner: fixed texts or the agent's text, split, bounded ---
+# utf8_cut.awk: cuts a line at most max bytes long, never inside a character
+awk_cut='
+	function ord_init(   i) { for (i = 0; i < 256; i++) ord[sprintf("%c", i)] = i }
+	function cut_at(line, max,   n) {
+		n = max
+		while (n > 0 && (ord[substr(line, n + 1, 1)] >= 128 && ord[substr(line, n + 1, 1)] < 192)) n--
+		return n
+	}'
 post_one() { sock send -- "$1" >/dev/null 2>&1; }
+clean_text() { LC_ALL=C tr -d '\000-\010\013\014\016-\037\177'; }
 post_text() {
-	parts=$(mktemp -d "$state_dir/parts.XXXXXX") || exit 1
-	printf '%s\n' "$1" | LC_ALL=C awk -v max=60000 -v dir="$parts" '
-		function flush() { if (size > 0) { n++; close(out) } }
-		BEGIN { n = 1; size = 0 }
+	mkdir -p "$parts" || exit 1
+	printf '%s\n' "$1" | LC_ALL=C awk -v max=60000 -v dir="$parts" "$awk_cut"'
+		BEGIN { ord_init(); n = 1; size = 0 }
 		{
 			line = $0
 			while (length(line) + 1 > max) {
 				if (size > 0) { n++; size = 0 }
-				print substr(line, 1, max - 1) > (dir "/part." n); close(dir "/part." n)
-				line = substr(line, max)
+				c = cut_at(line, max - 1)
+				print substr(line, 1, c) > (dir "/part." n); close(dir "/part." n)
+				line = substr(line, c + 1)
 				n++; size = 0
 			}
 			if (size + length(line) + 1 > max && size > 0) { n++; size = 0 }
@@ -163,7 +200,8 @@ post_text() {
 	while [ "$i" -le "$count" ] && [ "$i" -le 5 ]; do
 		part=$(cat "$parts/part.$i")
 		if [ "$i" -eq 5 ] && [ "$count" -gt 5 ]; then
-			part="$(printf '%s' "$part" | head -c 59000)
+			part="$(printf '%s' "$part" | LC_ALL=C awk -v max=59000 "$awk_cut"'
+				BEGIN { ord_init() } { buf = buf (NR > 1 ? "\n" : "") $0 } END { print substr(buf, 1, cut_at(buf, max)) }')
 [cut: the rest of the answer was not sent]"
 		fi
 		post_one "$part" || {
@@ -173,16 +211,16 @@ post_text() {
 		i=$((i + 1))
 	done
 	rm -rf "$parts"
-	parts=
 }
 
-# an outcome from a turn's end: stop reason (or "error") and the answer text
+# finish posts the outcome of a turn and acknowledges: reason is the stop reason
+# (or "error"), text the agent's answer
 finish() {
 	reason=$1
-	text=$2
+	text=$(printf '%s' "$2" | clean_text)
 	case $reason in
 	end_turn)
-		[ -n "$text" ] || text="the agent finished without a reply"
+		[ -n "$(printf '%s' "$text" | tr -d ' \t\r\n')" ] || text="the agent finished without a reply"
 		out="ran"
 		;;
 	requires_action)
@@ -204,18 +242,47 @@ finish() {
 	exit 0
 }
 
+# mark_sent records the id in sent.ids BEFORE the user.message is posted: a run
+# killed or failed between the post and the record would otherwise send it again
 mark_sent() {
 	{
-		printf '%s\n' "$stdin_id" >>"$sent_file"
-		tail -n 200 "$sent_file" >"$sent_file.tmp" && mv "$sent_file.tmp" "$sent_file"
-	} 2>/dev/null || true
+		printf '%s\n' "$stdin_id" >>"$sent_file" &&
+			tail -n 200 "$sent_file" >"$sent_file.tmp" && mv "$sent_file.tmp" "$sent_file"
+	} 2>/dev/null
 }
 
 text_of='[.content[]? | select(.type == "text") | .text] | join("")'
 
-# --- catch-up: the user.message is already in the session ---------------------
-if [ -f "$sent_file" ] && grep -qxF "$stdin_id" "$sent_file" 2>/dev/null; then
+# fetch_history leaves every event of the session in $hist as {data: [...]},
+# following next_page (events are in processed_at order, oldest first)
+fetch_history() {
+	: >"$hist.pages"
 	api GET "$base?beta=true"
+	cp "$resp" "$page"
+	n=0
+	while :; do
+		jq -c '.data // []' "$page" >>"$hist.pages" 2>/dev/null || {
+			log_line "http bad history"
+			exit 1
+		}
+		next=$(jq -r '.next_page // empty' "$page" 2>/dev/null)
+		[ -n "$next" ] || break
+		n=$((n + 1))
+		if [ "$n" -ge 200 ]; then
+			log_line "history too long"
+			exit 1
+		fi
+		api GET "$base?beta=true&page=$(jq -rn --arg v "$next" '$v | @uri')"
+		cp "$resp" "$page"
+	done
+	jq -cs '{data: (add // [])}' "$hist.pages" >"$hist"
+	rm -f "$hist.pages"
+}
+
+# catch_up reads the history for this message's turn. It sets found and done,
+# and, when done, reason and text.
+catch_up() {
+	fetch_history
 	verdict=$(jq -c --arg tag "id=\"$stdin_id\"" "
 		.data as \$d
 		| ([range(0; \$d | length) | select(\$d[.].type == \"user.message\" and ((\$d[.].content // []) | map(.text // \"\") | join(\"\") | contains(\$tag)))] | last) as \$i
@@ -225,32 +292,43 @@ if [ -f "$sent_file" ] && grep -qxF "$stdin_id" "$sent_file" 2>/dev/null; then
 		  | if \$j == null then {found: true, done: false}
 		    else {found: true, done: true,
 		      reason: (if \$after[\$j].type == \"session.error\" then \"error\" else \$after[\$j].stop_reason.type end),
-		      text: (\$after[:\$j] | map(select(.type == \"agent.message\") | $text_of) | join(\"\n\n\"))} end end" "$resp" 2>/dev/null) || verdict=
-	if [ "$(printf '%s' "$verdict" | jq -r '.done // false' 2>/dev/null)" != true ]; then
-		log_line "waiting"
-		exit 1
-	fi
-	finish "$(printf '%s' "$verdict" | jq -r '.reason // "error"')" "$(printf '%s' "$verdict" | jq -r '.text // ""')"
+		      text: (\$after[:\$j] | unique_by(.id) | map(select(.type == \"agent.message\") | $text_of) | join(\"\n\n\"))} end end" "$hist" 2>/dev/null) || verdict='{"found":false}'
+	found=$(printf '%s' "$verdict" | jq -r '.found // false')
+	finished=$(printf '%s' "$verdict" | jq -r '.done // false')
+}
+
+# --- a redelivery of a message whose user.message already went in --------------
+if [ -f "$sent_file" ] && grep -qxF "$stdin_id" "$sent_file" 2>/dev/null; then
+	while :; do
+		catch_up
+		if [ "$found" = true ] && [ "$finished" = true ]; then
+			finish "$(printf '%s' "$verdict" | jq -r '.reason // "error"')" "$(printf '%s' "$verdict" | jq -r '.text // ""')"
+		fi
+		# not there at all: the post never landed, so it goes out below. There,
+		# but the agent is still working: wait for it
+		[ "$found" = true ] || break
+		if [ "$(now)" -ge "$deadline" ]; then
+			log_line "timeout"
+			exit 1
+		fi
+		sleep 2
+	done
 fi
 
 # --- a fresh turn: stream first, then send, then follow the stream -----------
 write_prompt
-stream_file=$(mktemp "$state_dir/stream.XXXXXX") || exit 1
-stream_hdr=$(mktemp "$state_dir/stream.XXXXXX") || exit 1
+: >"$stream_file"
+: >"$stream_hdr"
 curl -sS -N --config "$cfg" -H 'accept: text/event-stream' -o "$stream_file" -D "$stream_hdr" \
 	--connect-timeout 10 --max-time "$((deadline - $(now)))" "$base/stream?beta=true" >/dev/null 2>&1 &
 stream_pid=$!
 # the stream shows only events after it opens: wait for its status line
-opened=
 for _ in $(seq 100); do
-	if grep -q '^HTTP/' "$stream_hdr" 2>/dev/null; then
-		opened=1
-		break
-	fi
+	grep -q '^HTTP/' "$stream_hdr" 2>/dev/null && break
 	kill -0 "$stream_pid" 2>/dev/null || break
 	sleep 0.1
 done
-status=$(sed -n 's/^HTTP\/[0-9.]* \([0-9]*\).*/\1/p' "$stream_hdr" | tail -n 1)
+status=$(sed -n 's/^HTTP\/[0-9.]* \([0-9]*\).*/\1/p' "$stream_hdr" 2>/dev/null | tail -n 1)
 case ${status:-} in
 2??) ;;
 401 | 403 | 404)
@@ -264,37 +342,63 @@ case ${status:-} in
 	;;
 esac
 
-body=$(mktemp "$state_dir/body.XXXXXX") || exit 1
 jq -n --rawfile t "$prompt" '{events: [{type: "user.message", content: [{type: "text", text: $t}]}]}' >"$body"
+mark_sent || {
+	log_line "ledger not writable"
+	exit 1
+}
 api POST "$base?beta=true" "$body"
-mark_sent
 
-answer=$(mktemp "$state_dir/answer.XXXXXX") || exit 1
-seen=0
+# Follow the stream. Only whole lines count: curl appends as bytes arrive, and
+# a line cut in the middle is read again once its newline is there.
+: >"$answer"
+off=0
 reason=
 while [ -z "$reason" ]; do
 	if [ "$(now)" -ge "$deadline" ]; then
 		log_line "timeout"
 		exit 1
 	fi
-	total=$(grep -c '^data:' "$stream_file" 2>/dev/null || true)
-	while [ "$seen" -lt "${total:-0}" ] && [ -z "$reason" ]; do
-		seen=$((seen + 1))
-		ev=$(grep '^data:' "$stream_file" | sed -n "${seen}p" | sed 's/^data: *//')
-		case $(printf '%s' "$ev" | jq -r '.type // empty' 2>/dev/null) in
-		agent.message)
-			chunk=$(printf '%s' "$ev" | jq -j "$text_of" 2>/dev/null)
-			if [ -n "$chunk" ]; then
-				[ -s "$answer" ] && printf '\n\n' >>"$answer"
-				printf '%s' "$chunk" >>"$answer"
+	size=$(wc -c <"$stream_file" | tr -d ' ')
+	if [ "$size" -gt "$max_stream" ]; then
+		log_line "stream too large"
+		exit 1
+	fi
+	if [ "$size" -gt "$off" ]; then
+		tail -c "+$((off + 1))" "$stream_file" >"$new"
+		# drop a trailing line that has no newline yet
+		if [ "$(tail -c 1 "$new" | wc -l | tr -d ' ')" != 1 ]; then sed '$d' "$new" >"$new.cut" && mv "$new.cut" "$new"; fi
+		used=$(wc -c <"$new" | tr -d ' ')
+		if [ "$used" -gt 0 ]; then
+			off=$((off + used))
+			grep '^data:' "$new" | sed 's/^data: *//' >"$batch"
+			summary=$(jq -Rcs --rawfile seen "$ids_file" '
+				($seen | split("\n")) as $seen
+				| [split("\n")[] | select(length > 0) | fromjson?]
+				| reduce .[] as $e ({texts: [], ids: [], reason: null};
+					if .reason != null then .
+					elif $e.type == "agent.message" then
+						(($e.id // "") as $i
+						| if $i != "" and ((($seen | index($i)) != null) or ((.ids | index($i)) != null)) then .
+						  else .ids += [$i] | .texts += [[$e.content[]? | select(.type == "text") | .text] | join("")] end)
+					elif $e.type == "session.status_idle" then .reason = ($e.stop_reason.type // "end_turn")
+					elif $e.type == "session.error" then .reason = "error"
+					else . end)' "$batch" 2>/dev/null) || summary=
+			if [ -n "$summary" ]; then
+				printf '%s' "$summary" | jq -r '.ids[]' >>"$ids_file" 2>/dev/null
+				chunk=$(printf '%s' "$summary" | jq -r '.texts | join("\n\n")' 2>/dev/null)
+				if [ -n "$chunk" ]; then
+					[ -s "$answer" ] && printf '\n\n' >>"$answer"
+					printf '%s' "$chunk" >>"$answer"
+				fi
+				reason=$(printf '%s' "$summary" | jq -r '.reason // empty' 2>/dev/null)
 			fi
-			;;
-		session.status_idle) reason=$(printf '%s' "$ev" | jq -r '.stop_reason.type // "end_turn"') ;;
-		session.error) reason=error ;;
-		esac
-	done
-	[ -n "$reason" ] && break
-	if ! kill -0 "$stream_pid" 2>/dev/null && [ "$seen" -ge "$(grep -c '^data:' "$stream_file" 2>/dev/null || echo 0)" ]; then
+			[ -n "$reason" ] && break
+		fi
+	fi
+	if ! kill -0 "$stream_pid" 2>/dev/null; then
+		# the stream is over: read what is left once more, then give up
+		[ "$size" -gt "$off" ] && [ "$(tail -c 1 "$stream_file" | wc -l | tr -d ' ')" = 1 ] && continue
 		log_line "stream dropped"
 		exit 1
 	fi
