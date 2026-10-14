@@ -8,6 +8,7 @@ Outbound only: hooks message you when Codex needs permission or finishes a turn,
 4. Install the hooks. `codex/hooks.json` contains the literal text `/ABSOLUTE/PATH/TO/sock-integrations`. It is a substitution token, not a working path: replace every occurrence with the absolute path of this checkout. Codex hook handlers take no separate args field, so each `command` carries its arguments inline, and the Codex hooks docs (https://developers.openai.com/codex/hooks, served at https://learn.chatgpt.com/docs/hooks) do not state whether `command` goes through a shell or how quoting is handled. Their examples quote paths inside the string, which implies shell parsing. So:
    - Path rule: the checkout path must contain no spaces. If it does, clone or symlink the checkout to a path without spaces, or the command will break.
    - If you insist on a path with spaces, quote it inside the JSON string, with the quotes escaped: `"command": "\"/Users/me/my projects/sock-integrations/claude-code/hooks/notify.sh\" \"needs permission\""`. This relies on shell quoting that the docs do not promise; verify with `/hooks` and a real permission prompt.
+   - Run every command in this step in one shell session: `$hooks` lives in that shell, so a new terminal loses it.
    - Substitute with awk, which treats `#`, `&` and `\` in the path literally (run from the repo root; `index`/`substr` do plain text matching, and the path travels in the environment so awk does not interpret backslashes):
 
      ```sh

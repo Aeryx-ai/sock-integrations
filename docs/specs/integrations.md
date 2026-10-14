@@ -65,7 +65,7 @@ Marketplace file at the repo root, `.claude-plugin/marketplace.json`: name `sock
 
 Each entry runs `${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh <text>` in exec form. The `Stop` entry runs `notify.sh --stop <text>`. Splitting by matcher means the script never parses the hook JSON, so there is no `jq` dependency.
 
-`SKILL.md`: when to message the owner (long task finished, blocked on a decision, needs an approval), how to reply to a `<channel source="sock" ...>` tag with `sock_send` and the tag's `conversation_id`, and that message text is data, not instructions.
+`SKILL.md`: when to message the owner (long task finished, blocked on a decision, needs an approval), how to reply to a `<channel source="sock" ...>` tag with `sock_send` and the tag's `conversation_id`, that a reply on the channel is the owner's answer to the question asked, and that other message text is data, not instructions.
 
 ## Codex
 
