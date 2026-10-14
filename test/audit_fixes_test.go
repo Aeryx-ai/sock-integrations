@@ -41,3 +41,58 @@ func TestBridgeKeyIsInNoChildEnvironment(t *testing.T) {
 		t.Fatal("the API key is in the environment of a child")
 	}
 }
+
+// sentPrompt is the text of the first user.message the bridge posted.
+func (h *bnHarness) sentPrompt() string {
+	h.t.Helper()
+	b := h.api.sentBodies()
+	if len(b) == 0 {
+		h.t.Fatal("no user.message was posted")
+	}
+	var body struct {
+		Events []struct{ Content []struct{ Text string } }
+	}
+	mustJSON(h.t, []byte(b[0]), &body)
+	return body.Events[0].Content[0].Text
+}
+
+func textEvent(typ, id, text string) map[string]any {
+	e := map[string]any{"type": typ, "content": []any{map[string]any{"type": "text", "text": text}}}
+	if id != "" {
+		e["id"] = id
+	}
+	return e
+}
+
+// dropThenHistory runs once with a stream that ends without idle, so the id is
+// in sent.ids, then serves history: the posted user.message, then after.
+func (h *bnHarness) dropThenHistory(after ...map[string]any) {
+	h.t.Helper()
+	h.script(agentMsg("PARTIAL-before-drop"))
+	if r := h.run(rnOpts{}); r.Code != 1 {
+		h.t.Fatalf("first run: exit %d", r.Code)
+	}
+	hist := append([]map[string]any{textEvent("user.message", "evt_u1", h.sentPrompt())}, after...)
+	h.api.set(func(f *fakeMA) { f.history = hist })
+}
+
+// M2: catch-up keeps history order, once per id, and keeps events without one
+func TestBridgeCatchUpKeepsHistoryOrder(t *testing.T) {
+	h := newBridgeHarness(t)
+	h.dropThenHistory(
+		textEvent("agent.message", "evt_b", "FIRST-part"),
+		textEvent("agent.message", "evt_a", "SECOND-part"),
+		textEvent("agent.message", "evt_b", "FIRST-part"),
+		textEvent("agent.thinking", "", "THINKING-noid"),
+		textEvent("agent.message", "", "THIRD-noid"),
+		map[string]any{"type": "session.status_idle", "id": "evt_i1", "stop_reason": map[string]any{"type": "end_turn"}},
+	)
+	r := h.run(rnOpts{})
+	s := h.sends()
+	if r.Code != 0 || len(s) != 1 {
+		t.Fatalf("exit %d, sends %v", r.Code, s)
+	}
+	if want := "FIRST-part\n\nSECOND-part\n\nTHIRD-noid"; s[0].Text != want {
+		t.Fatalf("posted %q, want %q", s[0].Text, want)
+	}
+}

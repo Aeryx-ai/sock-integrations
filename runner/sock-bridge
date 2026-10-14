@@ -273,6 +273,11 @@ mark_sent() {
 }
 
 text_of='[.content[]? | select(.type == "text") | .text] | join("")'
+# once_per_id keeps the first event of each id, in order, and every event without one
+# shellcheck disable=SC2016 # jq's variables, not the shell's
+once_per_id='reduce .[] as $e ({seen: {}, out: []};
+    ($e.id | if type == "string" then . else null end) as $k
+    | if $k != null and .seen[$k] then . else .out += [$e] | if $k != null then .seen[$k] = true else . end end) | .out'
 
 # fetch_history leaves every event of the session in $hist as {data: [...]},
 # following next_page (events are in processed_at order, oldest first)
@@ -313,7 +318,7 @@ catch_up() {
 		  | if \$j == null then {found: true, done: false}
 		    else {found: true, done: true,
 		      reason: (if \$after[\$j].type == \"session.error\" then \"error\" else \$after[\$j].stop_reason.type end),
-		      text: (\$after[:\$j] | unique_by(.id) | map(select(.type == \"agent.message\") | $text_of) | join(\"\n\n\"))} end end" "$hist" 2>/dev/null) || verdict='{"found":false}'
+		      text: (\$after[:\$j] | map(select(.type == \"agent.message\")) | $once_per_id | map($text_of) | join(\"\n\n\"))} end end" "$hist" 2>/dev/null) || verdict='{"found":false}'
 	found=$(printf '%s' "$verdict" | jq -r '.found // false')
 	finished=$(printf '%s' "$verdict" | jq -r '.done // false')
 }
