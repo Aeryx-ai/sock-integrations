@@ -40,7 +40,21 @@ func maSession(id, conv, puppet string) map[string]any {
 		"environment_id": bnEnv, "budget": nil}
 }
 
+// sessionsFile is the map as "<conversation> <session>" lines, without the
+// config hash each line carries; sessionsRaw is the file as it is.
 func (h *bnHarness) sessionsFile() string {
+	var out strings.Builder
+	for _, l := range strings.SplitAfter(h.sessionsRaw(), "\n") {
+		if f := strings.Fields(l); len(f) >= 2 {
+			out.WriteString(f[0] + " " + f[1] + "\n")
+		} else {
+			out.WriteString(l)
+		}
+	}
+	return out.String()
+}
+
+func (h *bnHarness) sessionsRaw() string {
 	b, _ := os.ReadFile(filepath.Join(h.state, "sessions"))
 	return string(b)
 }
@@ -801,4 +815,63 @@ func TestBridgeConversationCreateBreakerClears(t *testing.T) {
 			t.Fatalf("mapped: exit %d, log %q", r.Code, h.bridgeLog())
 		}
 	})
+}
+
+// a session made from this exact configuration that a Check shows in another
+// shape has drifted: the breaker trips and the session is kept, unused, rather
+// than replaced on every reply
+func TestBridgeConversationShapeDriftTripsTheBreaker(t *testing.T) {
+	h := newConvHarness(t)
+	h.env["SOCK_BRIDGE_BUDGET"] = "100"
+	h.api.set(func(f *fakeMA) { f.checkNoBudget = true })
+	for i := range 4 {
+		h.script(agentMsg(bnAnswer), idle("end_turn"))
+		want := 2
+		if i == 0 {
+			want = 0
+		}
+		if r := h.run(h.inConv(i+1, rnConvID)); r.Code != want {
+			t.Fatalf("message %d: exit %d, log %q", i, r.Code, h.bridgeLog())
+		}
+	}
+	if n := count(h.api.kinds(), "create"); n != 1 {
+		t.Fatalf("%d creates, want 1", n)
+	}
+	if n := h.haltNotices(); n != 1 {
+		t.Fatalf("%d halt notices, sends %v", n, h.sends())
+	}
+	for _, s := range h.sends() {
+		if s.Text == bnConfigMsg {
+			t.Fatal("a drifted session was replaced as a configuration change")
+		}
+	}
+	if got := h.sessionsRaw(); !strings.HasPrefix(got, rnConvID+" sesn_NEW1 ") {
+		t.Fatalf("sessions %q: the session is kept", got)
+	}
+	if n := len(h.api.sentBodies()); n != 1 {
+		t.Fatalf("%d user.messages: a drifted session is not used", n)
+	}
+}
+
+// the hash on a sessions line tells an operator's change from drift: a session
+// created under one budget and checked under another is replaced, not halted
+func TestBridgeConversationRecordedHashSeparatesAConfigChange(t *testing.T) {
+	h := newConvHarness(t)
+	h.env["SOCK_BRIDGE_BUDGET"] = "100"
+	h.script(agentMsg(bnAnswer), idle("end_turn"))
+	if r := h.run(rnOpts{}); r.Code != 0 {
+		t.Fatalf("first: exit %d", r.Code)
+	}
+	if f := strings.Fields(h.sessionsRaw()); len(f) != 3 || len(f[2]) != 16 {
+		t.Fatalf("sessions %q: want the config hash on the line", h.sessionsRaw())
+	}
+	h.env["SOCK_BRIDGE_BUDGET"] = "50"
+	h.script(agentMsg(bnAnswer), idle("end_turn"))
+	r := h.run(h.inConv(2, rnConvID))
+	if r.Code != 0 || count(h.api.kinds(), "create") != 2 || h.haltNotices() != 0 {
+		t.Fatalf("exit %d, kinds %v, log %q", r.Code, h.api.kinds(), h.bridgeLog())
+	}
+	if s := h.sends(); len(s) < 2 || s[1].Text != bnConfigMsg {
+		t.Fatalf("sends %v", s)
+	}
 }
