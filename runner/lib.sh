@@ -62,6 +62,11 @@ require_state_dir() {
 
 # lib_init makes the state directory and sweeps what a SIGKILLed run left.
 lib_init() {
+	# absolute, so a later cd (the runner's into its workdir) keeps every path
+	case $state_dir in
+	/*) ;;
+	*) state_dir=$(pwd)/$state_dir ;;
+	esac
 	log=$state_dir/$log_name
 	lock=$state_dir/$lock_name
 	done_file=$state_dir/$ledger_name

@@ -301,3 +301,19 @@ func TestBridgeAStopReasonWithANewlineIsUnknown(t *testing.T) {
 		})
 	}
 }
+
+// L9: a relative SOCK_RUNNER_STATE still means the directory it named at start,
+// after the runner has moved into the workdir
+func TestRunnerRelativeStateDirIsResolvedAtStart(t *testing.T) {
+	h := newRunnerHarness(t)
+	r := h.run(rnOpts{Env: map[string]string{"SOCK_RUNNER_STATE": "state"}}) // the harness runs in h.dir
+	if r.Code != 0 || len(h.runs()) != 1 || !strings.Contains(h.log(), " ran") {
+		t.Fatalf("exit %d, %d runs, log %q, stderr %q", r.Code, len(h.runs()), h.log(), r.Stderr)
+	}
+	if _, err := os.Lstat(h.lockPath()); err == nil {
+		t.Fatal("the lock was left behind")
+	}
+	if _, err := os.Stat(filepath.Join(h.work, "state")); err == nil {
+		t.Fatal("state was written under the workdir")
+	}
+}
