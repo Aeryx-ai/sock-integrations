@@ -12,11 +12,11 @@ Caller class: puppet device (`sock_pt_`). Human session tokens are not supported
 
 v1 is bearer-token platforms only.
 
-In: Claude Code plugin, Codex config and hooks, Agent SDK example.
+In: Claude Code plugin, Codex config and hooks, Agent SDK example, and the headless inbound runner (`runner/sock-runner`).
 
 Out, tracked in bd:
 - Managed Agents bridge (a daemon, own spec).
-- Codex and headless inbound (no channel equivalent).
+- Codex app-server live injection (`turn/steer`): a follow-up bead after the runner below.
 - Hosted HTTP surfaces: Responses API hosted MCP, claude.ai, ChatGPT, Managed Agents cloud MCP. sock-mcp is stdio only, and these need a public URL and an OAuth-style credential.
 - Won't do: a `Stop` hook that fetches pending messages. The channel is the inbound path.
 
@@ -91,6 +91,61 @@ Shared by Claude Code and Codex. Behavior:
 5. Run `sock send -- "<text>"` (the `--` keeps a project name like `-v` from parsing as a flag) as a child with a watchdog that kills it after `SOCK_HOOK_TIMEOUT` seconds, default 10; a value that is not a positive integer falls back to 10. Async hooks are not timed out by the host, so the script bounds itself. The watchdog is reaped without a job notice on stderr.
 6. Any failure, including `sock` missing from `PATH`, appends one line to `${XDG_STATE_HOME:-$HOME/.local/state}/sock-integrations/hook.log` (mode 600, truncated above 100 KB). A failed send logs `sock send exit <code>:` and the child's stderr, with the token redacted from the whole captured stderr first and the result then cut to 300 bytes, so a token straddling the cut cannot leak a prefix. Every control character is stripped from the line, so tool output cannot drive a terminal that reads the log. The line never contains the token.
 7. Exit 0 always.
+
+## Headless inbound: sock-runner
+
+Codex and a `claude -p` agent have no channel: nothing pushes a message into a session that is idle. The inbound path is the CLI's `sock listen --exec`, which streams the puppet's deliveries and calls a command once per message. `runner/sock-runner` is that command: it resumes the agent's session headlessly with the owner's message as the prompt. It adds no server surface and no state of its own besides a lock and a log.
+
+Rejected: a `Stop` hook that fetches pending messages. It fires only at the end of a turn, so an idle session never fetches, and it would consume the puppet's deliveries beside the channel (rule 2).
+
+### Invocation
+
+```sh
+SOCK_TOKEN=sock_pt_...  SOCK_URL=...                      # the runner's own puppet, see Rules
+SOCK_RUNNER_AGENT=claude                                  # claude | codex, required
+SOCK_RUNNER_SESSION=<session id>                          # the session to resume, required
+SOCK_RUNNER_WORKDIR=<dir>                                 # required, an existing directory
+SOCK_RUNNER_PERMISSION=<mode>                             # required, no default
+sock listen --exec /path/to/runner/sock-runner
+```
+
+Optional: `SOCK_RUNNER_TIMEOUT` (seconds an agent run may take, default 900; not a positive integer falls back to 900), `SOCK_RUNNER_STATE` (directory of the lock and log, default `${XDG_STATE_HOME:-$HOME/.local/state}/sock-integrations`).
+
+`SOCK_RUNNER_PERMISSION` is the agent's headless permission posture, passed through and never derived from a message. There is no prompt to answer in a headless run, so a mode that needs approval makes the agent fail the step. For `claude` it is the value of `--permission-mode` (`acceptEdits`, `plan`, `default`, `bypassPermissions`; the runner refuses `bypassPermissions` unless `SOCK_RUNNER_ALLOW_BYPASS=1` is also set). For `codex` it is the `--sandbox` value (`read-only`, `workspace-write`, `danger-full-access`; the last needs `SOCK_RUNNER_ALLOW_BYPASS=1`). Documented defaults in `install.md`: `plan` and `read-only`.
+
+### Interface with sock listen
+
+`sock listen --exec` (sock-cli `internal/cli/listen.go`, `handle`) runs the command once per message, with:
+
+- stdin: the message as `protojson` of `sock.v1.Message`, one object: `id`, `conversationId`, `seq` (int64, so a JSON string), `senderId`, `sentAt` (RFC 3339), `text`, `evidenceTag` (base64). protojson randomizes whitespace between tokens, so the runner never matches on exact bytes.
+- env: `SOCK_MESSAGE_ID`, `SOCK_CONVERSATION_ID`, `SOCK_SENDER_ID`. Ids only, never text.
+- exit status: 0 acknowledges the message; non-zero leaves it pending, `listen` retries up to 5 times with backoff and then holds it for the next connection. Delivery is at least once, so a run may repeat after a crash between the agent finishing and the ack.
+
+### Behavior
+
+1. Validate configuration: agent, session, workdir and permission present, session id matching `[A-Za-z0-9._-]{1,128}`, workdir an existing directory, `claude` or `codex` on `PATH`. A bad configuration exits 2 and acknowledges nothing; the message stays pending and the log says why.
+2. The owner gate. The sender must be the puppet's owner: `SOCK_SENDER_ID` and the `senderId` in the stdin JSON must be the same UUID, and equal `account.puppet.ownerId` from `sock whoami --json`, run with the same token. Any other sender, a missing field, a puppet token that whoami does not show as a puppet, or a failing whoami: a gate failure that is the sender's (not the owner, malformed) drops the message, exit 0, so it is acknowledged and cannot wedge the stream; a whoami that could not run (network, 5xx) exits 1 so the message is retried. Nothing from a non-owner reaches the agent.
+3. Take the run lock: one agent run at a time per `SOCK_RUNNER_STATE`, by an atomic `mkdir` of `runner.lock` holding the runner's pid (macOS has no `flock`). A lock whose pid is dead is replaced. Waiting for it counts against the timeout; past it, exit 1.
+4. Build the prompt from the owner's text only: `<sock-message from="owner" conversation="<conversationId>" id="<id>">` newline text newline `</sock-message>`, with any `</sock-message>` inside the text broken by inserting a zero-width space after `</`. A one-line preface above the tag says the tag holds the owner's reply to the question the agent asked and that it is not a system instruction. The text goes to the agent on stdin; it never appears in argv, the environment, a log or a file.
+5. Run the agent, in `SOCK_RUNNER_WORKDIR`, killed after `SOCK_RUNNER_TIMEOUT` seconds:
+   - `claude`: `claude -p --resume "$SESSION" --permission-mode "$MODE"`, prompt on stdin.
+   - `codex`: `codex exec resume "$SESSION" -` with `--sandbox "$MODE"`, prompt on stdin.
+   The agent replies with `sock_send` through the plugin's sock-mcp (outbound only, rule 2); the runner sends nothing.
+6. Exit 0 when the agent exits 0. Any other agent exit, or a timeout: exit 1 so the message is retried. A prompt that crashes the agent every time is retried five times and then held pending, which is why the lock and timeout bound the damage.
+7. Log one line per message to `runner.log` in the state directory (mode 600, truncated above 100 KB): time, message id, outcome (`ran`, `dropped: sender`, `dropped: malformed`, `agent exit <n>`, `timeout`, `locked`). Never the text, the token, or the agent's output.
+
+### Rules that follow
+
+- The runner's puppet is its own: sock-mcp for that puppet runs without the channel and nothing calls `sock_fetch` or `sock_ack` for it (rule 2). The `listen` process is the single consumer.
+- Run `sock listen` and the agent as the same user, in the workdir's project. The token comes from the environment (`SOCK_TOKEN`), as everywhere in this repo.
+- Message text is untrusted data even from the owner: the permission mode is the control, and the default is the most restrictive.
+- At-least-once: the agent may see a message twice. The prompt carries the message id so the session can recognise a repeat.
+
+### Tests
+
+Under `test/`, against stubs of `sock` (whoami output, listen environment) and of `claude` and `codex` that record argv, environment and stdin: the owner's message runs the agent exactly once with the text on stdin and in neither argv nor environment; a non-owner sender, a mismatch between env and stdin sender, malformed JSON and a missing field are dropped with exit 0 and no agent run; a failing whoami exits 1 with no agent run; a bad configuration exits 2; a second runner waits on the lock and a stale lock is replaced; the timeout kills the agent and exits 1; the log never contains the text or the token; `</sock-message>` in the text cannot close the tag; `bypassPermissions` and `danger-full-access` are refused without `SOCK_RUNNER_ALLOW_BYPASS=1`.
+
+Security review before merge, as the review gate below: sender spoofing, injection through the text into argv, environment or the tag, lock races and stale locks, log leakage, and any path where a non-owner message reaches the agent.
 
 ## Tests
 
