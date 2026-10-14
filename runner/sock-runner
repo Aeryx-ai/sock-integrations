@@ -117,8 +117,11 @@ claude) env $scrub SOCK_HEADLESS=1 claude -p --resume "$session" --permission-mo
 codex) env $scrub SOCK_HEADLESS=1 codex exec --sandbox "$mode" resume "$session" - <"$prompt" >/dev/null 2>/dev/null & ;;
 esac
 agent_pgid=$!
+# the lock wait counted against the timeout: the run gets what take_lock left
+left=$((deadline - $(now)))
+[ "$left" -gt 0 ] || left=1
 (
-	sleep "$timeout"
+	sleep "$left"
 	: >"$prompt.timeout"
 	kill -TERM -- "-$agent_pgid" 2>/dev/null
 	sleep 5
@@ -134,14 +137,15 @@ kill -KILL -- "-$watchdog_pgid" 2>/dev/null
 watchdog_pgid=
 set +m
 
-if [ -e "$prompt.timeout" ]; then
-	log_line "timeout"
-	exit 1
-fi
+# exit 0 wins over a watchdog that fired as the agent finished: the turn ran
 if [ "$code" -eq 0 ]; then
 	record_done
 	log_line "ran"
 	exit 0
+fi
+if [ -e "$prompt.timeout" ]; then
+	log_line "timeout"
+	exit 1
 fi
 # the status only: its stderr can echo the owner's text, its output or a secret
 log_line "agent exit $code"
