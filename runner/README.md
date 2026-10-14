@@ -27,4 +27,4 @@ sock listen --exec /path/to/runner/sock-runner
 ## Codex notes
 
 - A fresh `CODEX_HOME` ignores `OPENAI_API_KEY`: run `codex login --with-api-key` once for the account the runner uses.
-- `codex exec` refuses a workdir that is neither a git repository nor a trusted project (`Not inside a trusted directory and --skip-git-repo-check was not specified`). Point `SOCK_RUNNER_WORKDIR` at a git repository or trust the directory in `~/.codex/config.toml`. A failed run logs the end of the agent's stderr (control characters stripped, token redacted) in `runner.log`, so this shows up there.
+- `codex exec` refuses a workdir that is neither a git repository nor a trusted project (`Not inside a trusted directory and --skip-git-repo-check was not specified`). Point `SOCK_RUNNER_WORKDIR` at a git repository or trust the directory in `~/.codex/config.toml`. A failed run logs only `agent exit <n>` in `runner.log`, never the agent's output: to see the message, run the same `codex exec` in the workdir by hand.

@@ -321,23 +321,18 @@ func mustJSON(t *testing.T, b []byte, v any) {
 	}
 }
 
-// A failed agent run says why in the log: the end of its stderr, control bytes
-// stripped and the token redacted, cut short (as notify.sh does for sock send).
-func TestRunnerLogsTheAgentsStderrTailOnFailure(t *testing.T) {
+// A failed agent run logs its exit status and nothing of its output: stderr can
+// echo the owner's text, agent output or a secret no redactor knows.
+func TestRunnerLogsOnlyTheExitStatusOnFailure(t *testing.T) {
 	h := newRunnerHarness(t)
-	long := strings.Repeat("padding ", 100)
-	err := long + "Not inside a trusted directory \\033[31mred\\033[0m token " + rnTokenSentinel + " end-of-stderr"
+	err := "Not inside a trusted directory " + rnOutSentinel + " token " + rnTokenSentinel
 	r := h.run(rnOpts{Env: map[string]string{"STUB_EXIT": "1", "STUB_ERR": err}})
 	log := h.log()
-	if r.Code != 1 || !strings.Contains(log, "agent exit 1") || !strings.Contains(log, "end-of-stderr") ||
-		!strings.Contains(log, "Not inside a trusted directory") {
+	if r.Code != 1 || !strings.HasSuffix(log, " agent exit 1\n") || strings.Count(log, "\n") != 1 {
 		t.Fatalf("exit %d log %q", r.Code, log)
 	}
-	if strings.ContainsRune(log, 0x1b) || strings.Contains(log, rnTokenSentinel) {
-		t.Fatalf("control byte or token in the log: %q", log)
-	}
-	if len(log) > 700 {
-		t.Fatalf("log line is %d bytes", len(log))
+	if strings.Contains(log, "trusted directory") {
+		t.Fatalf("stderr in the log: %q", log)
 	}
 	h.noLeak(r)
 }
