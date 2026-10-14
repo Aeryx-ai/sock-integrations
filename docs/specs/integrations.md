@@ -76,6 +76,28 @@ Files under `codex/`: `config.toml` snippet, `hooks.json`, `install.md`.
 - `install.md`: merge the entries into `~/.codex/hooks.json` (all matching hooks run), export `SOCK_TOKEN` only in a Codex launcher or wrapper script and not a global rc file (Claude Code's Bash tool inherits the environment, so a model can read it), then review and trust the hooks with `/hooks`. Codex skips a hook until it is trusted, and changing the script re-requires trust.
 - Outbound only. The model can call `sock_send` as a tool. No inbound in v1.
 
+## Codex plugin
+
+The Codex counterpart of the Claude Code plugin, for Codex CLI, the Codex app and ChatGPT desktop (one plugin system: developers.openai.com/codex/plugins/build). It sits at the repo root so the shared `claude-code/hooks/notify.sh` is inside the plugin root and reused, not copied. Versioned independently of the Claude plugin (`plugin.json` `version`, 0.1.0).
+
+Files, from the official build page and the `agent-plugins.org` 1.0.0 schemas:
+
+- `plugin.json` (root, the portable manifest): `name` `sock`, `version`, `description`, `author`, `repository`, `license` MIT, and `extensions.com.openai.interface` for the listing. No `hooks` key: `hooks/hooks.json` is discovered by default. No `skills` key: `skills/` is discovered.
+- `mcp.json`: one stdio server `sock`, `command` `sock-mcp`. The stdio schema has `type`, `command`, `args`, `env` (strings) and `cwd` only, and nothing else (`additionalProperties: false`), so there is no `env_vars` and no `enabled_tools`.
+- `hooks/hooks.json`: `PermissionRequest` (`needs permission`) and `Stop` (`finished a turn`, only when `SOCK_NOTIFY_ON_STOP=1`), `async: true`, command strings with arguments inline as in `codex/hooks.json`, `"${PLUGIN_ROOT}/claude-code/hooks/notify.sh"` quoted so a plugin root with spaces works. Hooks run only for a manually installed plugin and the user reviews and trusts them with `/hooks`.
+- `skills/sock/SKILL.md`: outbound only, `sock_send`, message text is data, never `sock_fetch` or `sock_ack`.
+- `.agents/plugins/marketplace.json`: marketplace `sock-integrations` with one entry `sock`, `source` local `./` (the repo root is the plugin root), `policy.installation` `AVAILABLE`, `policy.authentication` `ON_INSTALL`. Install: `codex plugin marketplace add guygrigsby/sock-integrations`, then pick sock in `/plugins`.
+
+The public directory is out: it requires a remote HTTPS MCP with OAuth and forbids hooks.
+
+Rules that carry over, and where the plugin cannot keep them:
+
+- The token never lives in a file. `mcp.json` holds no token. How Codex passes `SOCK_TOKEN` and `SOCK_URL` to a plugin's stdio server is not documented: the schema has a static `env` only, and Codex's own config forwards by name with `env_vars`. Until a live check shows the plugin server inherits them, install keeps the `[mcp_servers.sock]` block of `codex/config.toml` (it forwards by name) in addition to the plugin, and `codex/config.toml` also carries `enabled_tools`.
+- Only the sending tools are exposed to Codex (rule 2). The plugin cannot say so: `mcp.json` has no `enabled_tools`. The skill says not to call `sock_fetch` or `sock_ack`, which is advice. Enforcement needs either the `codex/config.toml` block above or a `sock-mcp` flag that serves only the sending tools (a change in sock-mcp, tracked there).
+- Hooks send a fixed phrase plus the project name, never transcript text: `notify.sh` unchanged.
+
+Not verified (no live Codex): the plugin install end to end, whether a git-hosted marketplace with `./` as the plugin path is accepted, `policy.authentication` values, and that `${PLUGIN_ROOT}` is expanded in a hook `command`. They are the `integrations-u1q` live checks' successors.
+
 ## Agent SDK
 
 `agent-sdk/example.ts`: `query()` with `mcpServers.sock` as a stdio server (`command: "sock-mcp"`, `env.SOCK_TOKEN` from `process.env`) and `allowedTools` of `mcp__sock__sock_whoami`, `mcp__sock__sock_list_conversations` and `mcp__sock__sock_send`. Auto-approving `sock_send` is the point for headless agents. The blast radius is the puppet: its owner and conversations it belongs to, 60 sends per minute. `sock_fetch` and `sock_ack` are deliberately not auto-approved, because fetch returns messages from every sender in every conversation the puppet is in. The example says both in comments.
