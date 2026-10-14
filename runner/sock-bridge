@@ -1,0 +1,303 @@
+#!/bin/sh
+# sock-bridge: the command `sock listen --exec` runs once per message, to carry the
+# owner's reply into one Claude Managed Agents session as a user.message and the
+# agent's answer back to the owner with `sock send`
+# (docs/specs/integrations.md, "Managed Agents bridge: sock-bridge").
+#
+# Exit 0 acknowledges the message (answered, or dropped as not the owner's or
+# malformed). Exit 1 leaves it pending for a retry. Exit 2 is a bad configuration
+# or a refused key: nothing was sent and the message stays pending.
+#
+# Needs curl and jq. The owner's text goes only into the request body; the API key
+# only into a private curl config file, never argv, an environment or a log.
+# shellcheck source-path=SCRIPTDIR
+# shellcheck disable=SC2034,SC2154 # the settings lib.sh reads, and what it sets
+set -u
+umask 077
+
+cmd_name=sock-bridge
+here=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=lib.sh
+. "$here/lib.sh"
+
+# --- configuration -----------------------------------------------------------
+session=${SOCK_BRIDGE_SESSION:-}
+key=${ANTHROPIC_API_KEY:-}
+api=${SOCK_BRIDGE_API:-https://api.anthropic.com}
+printf '%s\n' "$session" | grep -Eqx '[A-Za-z0-9_][A-Za-z0-9_-]{0,127}' ||
+	die_config "SOCK_BRIDGE_SESSION must be 1 to 128 characters of A-Z a-z 0-9 _ -, not starting with -"
+printf '%s\n' "$key" | grep -Eqx '[A-Za-z0-9_.-]{8,200}' || die_config "ANTHROPIC_API_KEY is missing or has characters an API key does not"
+for tool in curl jq sock; do
+	command -v "$tool" >/dev/null 2>&1 || die_config "$tool is not on PATH"
+done
+timeout=${SOCK_BRIDGE_TIMEOUT:-900}
+case $timeout in
+'' | *[!0-9]*) timeout=900 ;;
+esac
+[ "$timeout" -gt 0 ] || timeout=900
+
+state_dir=${SOCK_BRIDGE_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/sock-integrations-bridge}
+log_name=bridge.log
+lock_name=bridge.lock
+ledger_name=done.ids
+lib_init
+sent_file=$state_dir/sent.ids
+
+# --- temp files and the stream: removed on exit ------------------------------
+cfg=
+hdr=
+body=
+resp=
+stream_file=
+stream_hdr=
+answer=
+parts=
+stream_pid=
+# shellcheck disable=SC2329 # run by the library's EXIT trap
+extra_cleanup() {
+	[ -n "$stream_pid" ] && kill "$stream_pid" 2>/dev/null
+	for f in "$cfg" "$hdr" "$body" "$resp" "$stream_file" "$stream_hdr" "$answer"; do
+		[ -n "$f" ] && rm -f "$f"
+	done
+	[ -n "$parts" ] && rm -rf "$parts"
+}
+install_traps
+
+read_message
+owner_gate
+drop_if_done
+take_lock
+drop_if_done
+
+deadline=$(($(now) + timeout))
+
+# the key goes to curl in a private config, so it is in no argv or environment
+cfg=$(mktemp "$state_dir/curl.XXXXXX") || exit 1
+{
+	printf 'header = "x-api-key: %s"\n' "$key"
+	printf '%s\n' 'header = "anthropic-version: 2023-06-01"' 'header = "anthropic-beta: managed-agents-2026-04-01"' \
+		'header = "content-type: application/json"' 'user-agent = "sock-bridge"'
+} >"$cfg"
+unset key ANTHROPIC_API_KEY
+
+base="$api/v1/sessions/$session/events"
+hdr=$(mktemp "$state_dir/hdr.XXXXXX") || exit 1
+resp=$(mktemp "$state_dir/resp.XXXXXX") || exit 1
+
+# api METHOD URL [body file]: sets code; retries 429, 5xx and network failures
+# a few times, honouring Retry-After (seconds or an HTTP date)
+retry_wait() {
+	ra=$(sed -n 's/^[Rr]etry-[Aa]fter: *//p' "$hdr" | tr -d '\r' | head -n 1)
+	case $ra in
+	'') wait=$((1 << attempt)) ;;
+	*[!0-9]*)
+		when=$(date -j -f '%a, %d %b %Y %H:%M:%S GMT' "$ra" +%s 2>/dev/null || date -d "$ra" +%s 2>/dev/null || echo "")
+		if [ -n "$when" ]; then wait=$((when - $(now))); else wait=$((1 << attempt)); fi
+		;;
+	*) wait=$ra ;;
+	esac
+	[ "$wait" -lt 0 ] && wait=0
+	[ "$wait" -gt 30 ] && wait=30
+	jitter=$(awk 'BEGIN { srand(); printf "%.1f", rand() }')
+	sleep "$((wait))$(printf '%s' "$jitter" | sed 's/^0//')" 2>/dev/null || sleep "$wait"
+}
+api() {
+	method=$1
+	url=$2
+	data=${3:-}
+	attempt=0
+	while :; do
+		left=$((deadline - $(now)))
+		if [ "$left" -le 0 ]; then
+			log_line "timeout"
+			exit 1
+		fi
+		set -- -sS --config "$cfg" -X "$method" -o "$resp" -D "$hdr" -w '%{http_code}' --connect-timeout 10 --max-time "$left"
+		[ -n "$data" ] && set -- "$@" --data-binary "@$data"
+		code=$(curl "$@" "$url" 2>/dev/null) || code=000
+		case $code in
+		2??) return 0 ;;
+		401 | 403 | 404)
+			log_line "http $code"
+			echo "$cmd_name: the Managed Agents API answered $code: check ANTHROPIC_API_KEY and SOCK_BRIDGE_SESSION" >&2
+			exit 2
+			;;
+		429 | 5?? | 000)
+			attempt=$((attempt + 1))
+			if [ "$attempt" -ge 4 ]; then
+				log_line "http $code"
+				exit 1
+			fi
+			retry_wait
+			;;
+		*)
+			log_line "http $code"
+			exit 1
+			;;
+		esac
+	done
+}
+
+# --- posting to the owner: fixed texts or the agent's text, split, bounded ---
+post_one() { sock send -- "$1" >/dev/null 2>&1; }
+post_text() {
+	parts=$(mktemp -d "$state_dir/parts.XXXXXX") || exit 1
+	printf '%s\n' "$1" | LC_ALL=C awk -v max=60000 -v dir="$parts" '
+		function flush() { if (size > 0) { n++; close(out) } }
+		BEGIN { n = 1; size = 0 }
+		{
+			line = $0
+			while (length(line) + 1 > max) {
+				if (size > 0) { n++; size = 0 }
+				print substr(line, 1, max - 1) > (dir "/part." n); close(dir "/part." n)
+				line = substr(line, max)
+				n++; size = 0
+			}
+			if (size + length(line) + 1 > max && size > 0) { n++; size = 0 }
+			print line >> (dir "/part." n); size += length(line) + 1
+			close(dir "/part." n)
+		}'
+	count=$(find "$parts" -name 'part.*' | wc -l | tr -d ' ')
+	[ "$count" -gt 0 ] || { printf '%s\n' "$1" >"$parts/part.1"; count=1; }
+	i=1
+	while [ "$i" -le "$count" ] && [ "$i" -le 5 ]; do
+		part=$(cat "$parts/part.$i")
+		if [ "$i" -eq 5 ] && [ "$count" -gt 5 ]; then
+			part="$(printf '%s' "$part" | head -c 59000)
+[cut: the rest of the answer was not sent]"
+		fi
+		post_one "$part" || {
+			log_line "send failed"
+			exit 1
+		}
+		i=$((i + 1))
+	done
+	rm -rf "$parts"
+	parts=
+}
+
+# an outcome from a turn's end: stop reason (or "error") and the answer text
+finish() {
+	reason=$1
+	text=$2
+	case $reason in
+	end_turn)
+		[ -n "$text" ] || text="the agent finished without a reply"
+		out="ran"
+		;;
+	requires_action)
+		text="the agent is waiting for approval of a tool call"
+		out="waiting for approval"
+		;;
+	budget_reached)
+		text="the agent's budget is used up"
+		out="budget"
+		;;
+	*)
+		text="the agent hit an error"
+		out="agent error"
+		;;
+	esac
+	post_text "$text"
+	record_done
+	log_line "$out"
+	exit 0
+}
+
+mark_sent() {
+	{
+		printf '%s\n' "$stdin_id" >>"$sent_file"
+		tail -n 200 "$sent_file" >"$sent_file.tmp" && mv "$sent_file.tmp" "$sent_file"
+	} 2>/dev/null || true
+}
+
+text_of='[.content[]? | select(.type == "text") | .text] | join("")'
+
+# --- catch-up: the user.message is already in the session ---------------------
+if [ -f "$sent_file" ] && grep -qxF "$stdin_id" "$sent_file" 2>/dev/null; then
+	api GET "$base?beta=true"
+	verdict=$(jq -c --arg tag "id=\"$stdin_id\"" "
+		.data as \$d
+		| ([range(0; \$d | length) | select(\$d[.].type == \"user.message\" and ((\$d[.].content // []) | map(.text // \"\") | join(\"\") | contains(\$tag)))] | last) as \$i
+		| if \$i == null then {found: false}
+		  else (\$d[\$i + 1:]) as \$after
+		  | ([range(0; \$after | length) | select(\$after[.].type == \"session.status_idle\" or \$after[.].type == \"session.error\")] | first) as \$j
+		  | if \$j == null then {found: true, done: false}
+		    else {found: true, done: true,
+		      reason: (if \$after[\$j].type == \"session.error\" then \"error\" else \$after[\$j].stop_reason.type end),
+		      text: (\$after[:\$j] | map(select(.type == \"agent.message\") | $text_of) | join(\"\n\n\"))} end end" "$resp" 2>/dev/null) || verdict=
+	if [ "$(printf '%s' "$verdict" | jq -r '.done // false' 2>/dev/null)" != true ]; then
+		log_line "waiting"
+		exit 1
+	fi
+	finish "$(printf '%s' "$verdict" | jq -r '.reason // "error"')" "$(printf '%s' "$verdict" | jq -r '.text // ""')"
+fi
+
+# --- a fresh turn: stream first, then send, then follow the stream -----------
+write_prompt
+stream_file=$(mktemp "$state_dir/stream.XXXXXX") || exit 1
+stream_hdr=$(mktemp "$state_dir/stream.XXXXXX") || exit 1
+curl -sS -N --config "$cfg" -H 'accept: text/event-stream' -o "$stream_file" -D "$stream_hdr" \
+	--connect-timeout 10 --max-time "$((deadline - $(now)))" "$base/stream?beta=true" >/dev/null 2>&1 &
+stream_pid=$!
+# the stream shows only events after it opens: wait for its status line
+opened=
+for _ in $(seq 100); do
+	if grep -q '^HTTP/' "$stream_hdr" 2>/dev/null; then
+		opened=1
+		break
+	fi
+	kill -0 "$stream_pid" 2>/dev/null || break
+	sleep 0.1
+done
+status=$(sed -n 's/^HTTP\/[0-9.]* \([0-9]*\).*/\1/p' "$stream_hdr" | tail -n 1)
+case ${status:-} in
+2??) ;;
+401 | 403 | 404)
+	log_line "http $status"
+	echo "$cmd_name: the Managed Agents API answered $status: check ANTHROPIC_API_KEY and SOCK_BRIDGE_SESSION" >&2
+	exit 2
+	;;
+*)
+	log_line "http ${status:-000}"
+	exit 1
+	;;
+esac
+
+body=$(mktemp "$state_dir/body.XXXXXX") || exit 1
+jq -n --rawfile t "$prompt" '{events: [{type: "user.message", content: [{type: "text", text: $t}]}]}' >"$body"
+api POST "$base?beta=true" "$body"
+mark_sent
+
+answer=$(mktemp "$state_dir/answer.XXXXXX") || exit 1
+seen=0
+reason=
+while [ -z "$reason" ]; do
+	if [ "$(now)" -ge "$deadline" ]; then
+		log_line "timeout"
+		exit 1
+	fi
+	total=$(grep -c '^data:' "$stream_file" 2>/dev/null || true)
+	while [ "$seen" -lt "${total:-0}" ] && [ -z "$reason" ]; do
+		seen=$((seen + 1))
+		ev=$(grep '^data:' "$stream_file" | sed -n "${seen}p" | sed 's/^data: *//')
+		case $(printf '%s' "$ev" | jq -r '.type // empty' 2>/dev/null) in
+		agent.message)
+			chunk=$(printf '%s' "$ev" | jq -j "$text_of" 2>/dev/null)
+			if [ -n "$chunk" ]; then
+				[ -s "$answer" ] && printf '\n\n' >>"$answer"
+				printf '%s' "$chunk" >>"$answer"
+			fi
+			;;
+		session.status_idle) reason=$(printf '%s' "$ev" | jq -r '.stop_reason.type // "end_turn"') ;;
+		session.error) reason=error ;;
+		esac
+	done
+	[ -n "$reason" ] && break
+	if ! kill -0 "$stream_pid" 2>/dev/null && [ "$seen" -ge "$(grep -c '^data:' "$stream_file" 2>/dev/null || echo 0)" ]; then
+		log_line "stream dropped"
+		exit 1
+	fi
+	sleep 0.2
+done
+finish "$reason" "$(cat "$answer")"
