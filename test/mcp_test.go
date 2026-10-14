@@ -15,7 +15,9 @@ const mcpSendText = "smoke: mcp"
 // over stdio, to a NotifyOwner endpoint. By default the endpoint is the stub
 // and the test asserts the stub saw one authenticated request with the text.
 // With SOCK_SMOKE=1 it targets SOCK_URL with SOCK_TOKEN from the environment
-// (scripts/smoke.sh) and asserts only that the call succeeded.
+// (scripts/smoke.sh) and asserts only that the call succeeded. Only the
+// digest channel session may message the owner unprompted (sock-mcp
+// SOCK_MCP_DIGEST_CHANNEL=1).
 func TestMCPSend(t *testing.T) {
 	url, tok := "", token
 	var s *stub
@@ -28,7 +30,7 @@ func TestMCPSend(t *testing.T) {
 		s = newStub(t)
 		url = s.URL
 	}
-	c := startMCP(t, url, tok)
+	c := startMCP(t, url, tok, "SOCK_MCP_DIGEST_CHANNEL=1")
 	line := c.request(2, "tools/call", `{"name":"sock_send","arguments":{"text":"`+mcpSendText+`"}}`)
 	var resp struct {
 		Error  json.RawMessage `json:"error"`
@@ -50,6 +52,25 @@ func TestMCPSend(t *testing.T) {
 	}
 	got := s.Requests()
 	if len(got) != 1 || got[0].Auth != "Bearer "+token || got[0].Text != mcpSendText {
+		t.Fatalf("stub saw %+v", got)
+	}
+}
+
+// Any other session's sock_send without conversation_id is refused and
+// reaches nothing.
+func TestMCPSendRefusedOutsideDigestChannel(t *testing.T) {
+	s := newStub(t)
+	c := startMCP(t, s.URL, token)
+	line := c.request(2, "tools/call", `{"name":"sock_send","arguments":{"text":"`+mcpSendText+`"}}`)
+	var resp struct {
+		Result struct {
+			IsError bool `json:"isError"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(line, &resp); err != nil || !resp.Result.IsError {
+		c.die("want an isError refusal, got %v: %s", err, line)
+	}
+	if got := s.Requests(); len(got) != 0 {
 		t.Fatalf("stub saw %+v", got)
 	}
 }

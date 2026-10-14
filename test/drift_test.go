@@ -52,11 +52,11 @@ type mcpClient struct {
 
 // startMCP launches the sock-mcp binary with the given SOCK_URL and
 // SOCK_TOKEN, then runs the initialize handshake.
-func startMCP(t *testing.T, url, tok string) *mcpClient {
+func startMCP(t *testing.T, url, tok string, env ...string) *mcpClient {
 	t.Helper()
 	c := &mcpClient{t: t, stderr: &bytes.Buffer{}, redact: []string{tok}}
 	cmd := exec.Command(mcpBin(t))
-	cmd.Env = []string{"PATH=/usr/bin:/bin", "SOCK_TOKEN=" + tok, "SOCK_URL=" + url}
+	cmd.Env = append([]string{"PATH=/usr/bin:/bin", "SOCK_TOKEN=" + tok, "SOCK_URL=" + url}, env...)
 	cmd.Stderr = c.stderr
 	in, err := cmd.StdinPipe()
 	if err != nil {

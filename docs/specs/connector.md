@@ -135,7 +135,7 @@ When a subscription closes for `gone`, `tooLarge` or `deliveryFailed`, the conne
 
 ## GrantDormancy
 
-Value object, owned by the grant, 0 or 1. The grant's puppet token was refused and no new one has been issued. One row per grant, not per subscription: `since` and `cause` describe one episode and cannot disagree across its subscriptions. A subscription is dormant when it is unclosed and its grant has this row.
+Value object, owned by the grant, 0 or 1. The grant's puppet token was refused and no new one has been issued. One row per grant, not per subscription: `since` and `cause` describe one episode and cannot disagree across its subscriptions. A subscription is dormant when it is unclosed and its grant has this row and no connection; a row beside a connection is stray, and the grant's next refusal replaces it.
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -314,7 +314,7 @@ DROP TABLE connector.subscription_dormancy;
     -- sock-mcpd was never deployed, so 00006's unknown backfill and this move only ever saw test data
 ```
 
-Unclosed is derived: no closure row. Live is derived: unclosed and its grant has no `grant_dormancy` row. Stream open is replica memory, never stored.
+Unclosed is derived: no closure row. Live is derived: unclosed and its grant has a connection or no `grant_dormancy` row. Stream open is replica memory, never stored.
 
 ## Security
 
