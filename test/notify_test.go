@@ -158,7 +158,7 @@ func TestTokenInvalidNoRetryStorm(t *testing.T) {
 func TestSockMissingFromPath(t *testing.T) {
 	s := newStub(t)
 	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": "/usr/bin:/bin"}}, "x")
-	if r.Code != 0 || strings.Count(r.Log, "\n") != 1 || !strings.Contains(r.Log, "sock") {
+	if r.Code != 0 || strings.Count(r.Log, "\n") != 1 || !strings.Contains(r.Log, "sock not found on PATH") {
 		t.Fatalf("%+v", r)
 	}
 }
@@ -417,5 +417,56 @@ func TestInvalidTimeoutFallsBackToDefault(t *testing.T) {
 	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"SOCK_HOOK_TIMEOUT": "abc"}}, "x")
 	if r.Code != 0 || len(s.Requests()) != 1 || r.Log != "" {
 		t.Fatalf("%+v reqs=%d", r, len(s.Requests()))
+	}
+}
+
+// r3j: a hook.log that already exists with loose permissions is tightened
+func TestExistingLogIsTightened(t *testing.T) {
+	s := newStub(t)
+	s.setFail(func(int) error { return unavailable() })
+	state := filepath.Join(t.TempDir(), "state")
+	dir := filepath.Join(state, "sock-integrations")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	log := filepath.Join(dir, "hook.log")
+	if err := os.WriteFile(log, []byte("old line\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(log, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"XDG_STATE_HOME": state}}, "x")
+	fi, err := os.Stat(log)
+	if err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("log mode %v, %v", fi, err)
+	}
+}
+
+// r3j: a sock that ignores TERM is killed after the grace, so the hook ends
+func TestWatchdogEscalatesToKill(t *testing.T) {
+	s := newStub(t)
+	tmp := t.TempDir()
+	script := "#!/bin/sh\ntrap '' TERM\nwhile :; do sleep 1; done\n"
+	if err := os.WriteFile(filepath.Join(tmp, "sock"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": tmp + ":/usr/bin:/bin", "SOCK_HOOK_TIMEOUT": "1"}}, "x")
+	if r.Code != 0 || r.Elapsed.Seconds() > 1+2+3 {
+		t.Fatalf("hook took %v: %+v", r.Elapsed, r)
+	}
+}
+
+// r3j: NUL bytes in the failed command's stderr neither warn nor hide the rest
+func TestNULBytesInStderrAreHandled(t *testing.T) {
+	s := newStub(t)
+	tmp := t.TempDir()
+	script := "#!/bin/sh\nprintf 'before\\000after' >&2\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(tmp, "sock"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": tmp + ":/usr/bin:/bin", "SOCK_HOOK_TIMEOUT": "10"}}, "x")
+	if r.Stderr != "" || !strings.Contains(r.Log, "beforeafter") {
+		t.Fatalf("stderr %q log %q", r.Stderr, r.Log)
 	}
 }

@@ -41,6 +41,8 @@ log_line() {
 		if [ -f "$log" ] && [ "$(wc -c <"$log")" -gt 102400 ]; then
 			: >"$log"
 		fi
+		# umask covers a new file; an older one may have been left looser
+		[ -e "$log" ] && chmod 600 "$log"
 		printf '%s %s\n' "$(date -u +%FT%TZ)" "$msg" >>"$log"
 	) 2>/dev/null
 	return 0
@@ -102,6 +104,9 @@ pid=$!
 (
 	sleep "$timeout"
 	kill "$pid" 2>/dev/null
+	# a sock that ignores TERM is killed after a short grace, so the hook always ends
+	sleep 2
+	kill -9 "$pid" 2>/dev/null
 ) >/dev/null 2>&1 &
 watchdog=$!
 disown "$watchdog" 2>/dev/null # no "Terminated" job notice on stderr when we reap it below

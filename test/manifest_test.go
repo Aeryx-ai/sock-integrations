@@ -269,3 +269,15 @@ func TestCodexSkillKeepsOutboundOnlyRules(t *testing.T) {
 		}
 	}
 }
+
+// r3j: the hooks.json commands run through a shell, so the install doc limits
+// the checkout path to characters a shell leaves alone.
+func TestCodexInstallLimitsThePathCharacters(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join(root, "codex", "install.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "only letters, digits and `. _ / -`") {
+		t.Fatal("codex/install.md lost the path character rule")
+	}
+}
