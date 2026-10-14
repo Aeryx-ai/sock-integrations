@@ -1149,7 +1149,7 @@ func TestCodexPluginRouteIgnoresAnExportedSockToken(t *testing.T) {
 
 func TestClaudePluginWithPluginRootIsUnchanged(t *testing.T) {
 	s := newStub(t)
-	runHook(t, s.URL, hookEnv{Env: map[string]string{"PLUGIN_ROOT": "/x/plugin", "SOCK_TOKEN": "", "CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_other_other", "CLAUDE_PLUGIN_OPTION_SOCK_URL": s.URL}}, "x")
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_ROOT": "/x/cplugin", "PLUGIN_ROOT": "/x/plugin", "SOCK_TOKEN": "", "CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_other_other", "CLAUDE_PLUGIN_OPTION_SOCK_URL": s.URL}}, "x")
 	if g := s.Requests(); len(g) != 1 || g[0].Auth != "Bearer sock_pt_other_other" {
 		t.Fatalf("%+v", g)
 	}
@@ -1250,5 +1250,35 @@ func TestMachineKeyTokenFileThroughASymlinkedDirIsRefused(t *testing.T) {
 	runHook(t, s.URL, hookEnv{Env: machineKeyEnv(bin), Stdin: stopInput("k12", "Ship it?")}, "--stop", "--ask-now")
 	if sent(rec) {
 		t.Fatalf("sent %q from a token file outside the cache", readRec(t, rec, "send-token"))
+	}
+}
+
+// Claude Code plugin hooks carry CLAUDE_PLUGIN_ROOT; an ambient PLUGIN_ROOT
+// there must not turn them into the Codex route.
+func TestClaudePluginRootKeepsTheMachineKeyRoute(t *testing.T) {
+	s := newStub(t)
+	bin, rec := fakeSockForKeys(t, "")
+	env := machineKeyEnv(bin)
+	env["CLAUDE_PLUGIN_ROOT"] = "/x/cplugin"
+	env["PLUGIN_ROOT"] = "/x/plugin"
+	env["CLAUDE_PLUGIN_OPTION_SOCK_TOKEN"] = ""
+	runHook(t, s.URL, hookEnv{Env: env, Stdin: stopInput("r1", "Ship it?")}, "--stop", "--ask-now")
+	if got := readRec(t, rec, "send-token"); got != "sock_pt_projectpuppet_secret" {
+		t.Fatalf("send ran with %q, want the project puppet", got)
+	}
+}
+
+// The Codex route is PLUGIN_ROOT without CLAUDE_PLUGIN_ROOT, whatever the option holds.
+func TestCodexRouteIgnoresAnAmbientPluginOption(t *testing.T) {
+	s := newStub(t)
+	bin, rec := fakeSockAsPuppet(t, false)
+	env := codexPluginEnv(bin)
+	env["CLAUDE_PLUGIN_OPTION_SOCK_TOKEN"] = "sock_pt_other_other"
+	runHook(t, s.URL, hookEnv{Env: env}, "x")
+	if got := readRec(t, rec, "args"); got != "send\n--as-puppet\n--project\n/x/plugin" {
+		t.Fatalf("argv %q", got)
+	}
+	if e := readRec(t, rec, "env"); strings.Contains(e, "sock_pt_other_other") {
+		t.Fatal("the plugin option reached sock send")
 	}
 }

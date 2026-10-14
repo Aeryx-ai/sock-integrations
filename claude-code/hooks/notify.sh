@@ -50,13 +50,14 @@ else
 	token=${SOCK_TOKEN:-}
 	url=${SOCK_URL:-}
 fi
-# The Codex plugin route (PLUGIN_ROOT, no plugin option): the plugin's sock-mcp
-# runs in PLUGIN_ROOT, never sees SOCK_TOKEN and resolves its credential from
-# the config file, so the CLI resolves the same one (`sock send --as-puppet`,
-# sock-cli v0.2.5), never the login token. An exported SOCK_TOKEN is ignored
-# here; it is kept in $token only for redaction.
+# The Codex plugin route (PLUGIN_ROOT set, CLAUDE_PLUGIN_ROOT unset: Claude
+# Code sets the latter for its plugin hooks): the plugin's sock-mcp runs in
+# PLUGIN_ROOT, never sees SOCK_TOKEN and resolves its credential from the
+# config file, so the CLI resolves the same one (`sock send --as-puppet`,
+# sock-cli v0.2.5), never the login token. An exported SOCK_TOKEN or plugin
+# option is ignored here; $token keeps it only for redaction.
 as_puppet=0
-if [ "$from_plugin" = 0 ] && [ -n "${PLUGIN_ROOT:-}" ]; then
+if [ -n "${PLUGIN_ROOT:-}" ] && [ -z "${CLAUDE_PLUGIN_ROOT:-}" ]; then
 	as_puppet=1
 fi
 # No child inherits the credential: each sock call gets the one it needs. A
