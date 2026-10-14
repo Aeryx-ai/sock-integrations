@@ -231,6 +231,26 @@ Under `test/`, against stubs of `sock` (whoami output, listen environment) and o
 
 Security review before merge, as the review gate below: sender spoofing, injection through the text into argv, environment or the tag, lock races and stale locks, log leakage, and any path where a non-owner message reaches the agent.
 
+## Hosted connector: ChatGPT, dots and claude.ai
+
+The public listing in the OpenAI plugin directory and the claude.ai connector both take a remote MCP server behind OAuth 2.1, and the directory refuses plugins with hooks. The design is split ([ADR 11](https://github.com/guygrigsby/sock-contract/blob/main/docs/adr/0011-agent-platforms-connect-through-oauth.md) in `sock-contract`): the authorization server and the connector grant live in `sockd`'s Identity context on `api.sock.aeryx.ai`; the resource server is `sock-mcpd` on `mcp.sock.aeryx.ai`, specified in [connector](connector.md). This repository owns the client side:
+
+- **Client registration.** ChatGPT and Claude arrive by CIMD, so no secrets are exchanged; redirect URIs come from their metadata documents (`https://chatgpt.com/connector_platform_oauth_redirect` because the hub implements RFC 9207, `https://claude.ai/api/mcp/auth_callback`, loopback for Claude Code). Others register by DCR.
+- **The directory package** is a second plugin, separate from the Codex marketplace one (which keeps hooks for manual installs): `skills/sock/SKILL.md` plus a remote MCP entry for `https://mcp.sock.aeryx.ai/mcp` with auth mode `cimd`, every tool declared `oauth2`, no hooks, and the listing metadata under `extensions.com.openai.interface`: display name, the subtitle (at most 30 characters), long description, developer name, category, a square icon of at least 48 px, website, support, privacy and terms URLs. The domain challenge is served by `sock-mcpd`. Submission needs the owner's business verification, five positive and three negative test cases, a demo video, release notes and a reviewer account: a dedicated sock human on production whose connector puppet the consent flow creates, with no MFA. Servers are rescanned daily, so a tool change is a release.
+- **Dots.** The user tells the dot to watch sock replies; whether the dot or ChatGPT creates the `owner.reply` subscription is settled by the live dot test and written into the install notes.
+- **claude.ai.** The same URL as a custom connector; `oauth_cimd` works without a registration call. Outbound only in v1; Claude Code keeps the stdio plugin and its channel.
+- **Testing, in order**: tool discovery over OpenAI's Secure MCP Tunnel with the stdio server; the staging endpoint as a custom MCP server in ChatGPT developer mode and as a claude.ai connector; an owner reply arriving at a dot; then submission. The production plugin stays private, installed from this marketplace with the hosted URL, until the directory approves.
+
+## Project puppets: the machine key
+
+One puppet per machine breaks with more than one Claude Code session: the hub's delivery queue is per puppet, so sessions compete for the owner's replies. The product owner's requirements: setup in one step, and every message shows who sent it. [ADR 10](https://github.com/guygrigsby/sock-contract/blob/main/docs/adr/0010-machine-keys-mint-project-puppets.md) in `sock-contract` gives the hub a **machine key** (`sock_mk_`): a human's device that may only create, list, mint tokens for and erase the puppets it created. This repository's part:
+
+- The plugin's `userConfig` replaces `sock_token` with `sock_machine_key` (sensitive, required); `sock_url` and `notify_on_stop` stay. A `sock_token` already set keeps working as one puppet for the machine until the owner switches.
+- `sock-mcp` (the `mcp` repository) mints one puppet per project on first use, named `<project> on <host>`, where the project is the repository name (every worktree of a repository shares its puppet) or the directory name outside git; on `PUPPET_NAME_TAKEN` it appends a short hash of the path. It keeps each token at `${XDG_STATE_HOME:-~/.local/state}/sock-integrations/puppets/<key>` (mode 600) beside the repository path, and on start erases puppets whose repository is gone.
+- `hooks/notify.sh` sends as the project's puppet: it asks the `sock` CLI for the project's token (`sock puppets ensure <dir>`, which reads the same cache or mints), so the hook and the server always agree. The ensure-or-read routine lives once, in `sock-client`.
+- `SKILL.md` and the README say what the owner sees: a contact per project, erasable from the app like any puppet; `sock puppets use` stays for Codex and the tunnel.
+- Each diff that touches the key (hub, `sock-mcp`, this plugin) gets a fresh-context security review before merge.
+
 ## Tests
 
 A Go test module under `test/`, run by `make test`. It runs the real `notify.sh` against a loopback stub of `MessagingService/NotifyOwner` (`SOCK_URL` accepts http on loopback).
