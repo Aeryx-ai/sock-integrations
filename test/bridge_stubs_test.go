@@ -409,8 +409,15 @@ func rnBridgePath(t *testing.T) string {
 
 func newBridgeHarness(t *testing.T) *bnHarness {
 	t.Helper()
-	bin := rnBridgePath(t)
 	t.Parallel()
+	return newBridgeHarnessNoParallel(t)
+}
+
+// newBridgeHarnessNoParallel is a second harness inside a test that already
+// runs in parallel.
+func newBridgeHarnessNoParallel(t *testing.T) *bnHarness {
+	t.Helper()
+	bin := rnBridgePath(t)
 	dir := t.TempDir()
 	h := &rnHarness{t: t, bin: bin, dir: dir}
 	h.stubs = filepath.Join(dir, "bin")

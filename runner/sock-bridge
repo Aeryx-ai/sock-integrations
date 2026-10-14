@@ -103,13 +103,16 @@ page=$state_dir/page.$$
 hist=$state_dir/hist.$$
 histp=$state_dir/histp.$$
 parts=$state_dir/parts.$$
+reasonf=$state_dir/reason.$$
+cfnew=$state_dir/cfnew.$$
+cfadd=$state_dir/cfadd.$$
 stream_pid=
 curl_pid=
 # shellcheck disable=SC2329 # run by the library's EXIT trap
 extra_cleanup() {
 	[ -n "$stream_pid" ] && kill "$stream_pid" 2>/dev/null
 	[ -n "$curl_pid" ] && kill "$curl_pid" 2>/dev/null
-	rm -rf "$cfg" "$codef" "$hdr" "$resp" "$stream_file" "$stream_hdr" "$body" "$turn" "$turnn" "$new" "$newc" "$batch" "$page" "$hist" "$histp" "$parts"
+	rm -rf "$cfg" "$codef" "$hdr" "$resp" "$stream_file" "$stream_hdr" "$body" "$turn" "$turnn" "$new" "$newc" "$batch" "$page" "$hist" "$histp" "$parts" "$reasonf" "$cfnew" "$cfadd"
 }
 install_traps
 
@@ -131,7 +134,7 @@ unset key
 
 sessions_file=$state_dir/sessions
 creating=
-ok404=
+pass=
 
 # retry_wait [header file]: sleeps the Retry-After of that response (seconds, or
 # an HTTP date, which is GMT), else 1, 2, 4 s; never past the time left
@@ -236,8 +239,9 @@ api() {
 		case $code in
 		2??) return 0 ;;
 		esac
-		# a caller that asks for it hears of a 404 instead (a gone session)
-		if [ "$code" = 404 ] && [ -n "$ok404" ]; then return 1; fi
+		# a caller that asks for it hears of that status instead: a 404 (a gone
+		# session) or a 400 (a confirmation no longer pending)
+		if [ -n "$pass" ] && [ "$code" = "$pass" ]; then return 1; fi
 		retry_or_exit "$method" "$code"
 	done
 }
@@ -318,19 +322,27 @@ post_text() {
 	rm -rf "$parts"
 }
 
+# answer posts a fixed text to the owner, records the message replied, logs
+# the outcome and acknowledges
+answer() {
+	post_text "$1"
+	record_done
+	log_line "$2"
+	exit 0
+}
+
 # finish posts the outcome of a turn and acknowledges: reason is the stop reason
-# (or "error"), text the agent's answer
+# (or "error"), text the agent's answer. A turn waiting on tool calls asks the
+# owner (ask); any other end means the session waits on none of its calls.
 finish() {
 	reason=$1
 	text=$(printf '%s' "$2" | clean_text)
+	[ "$reason" = requires_action ] && ask "$text"
+	confirm_drop_session
 	case $reason in
 	end_turn)
 		[ -n "$(printf '%s' "$text" | tr -d ' \t\r\n')" ] || text="the agent finished without a reply"
 		out="ran"
-		;;
-	requires_action)
-		text="the agent is waiting for approval of a tool call"
-		out="waiting for approval"
 		;;
 	budget_reached)
 		text="the agent's budget is used up"
@@ -347,10 +359,7 @@ finish() {
 		out="agent error ($why)"
 		;;
 	esac
-	post_text "$text"
-	record_done
-	log_line "$out"
-	exit 0
+	answer "$text" "$out"
 }
 
 # mark_sent records the id in sent.ids BEFORE the user.message is posted: a run
@@ -363,31 +372,48 @@ mark_sent() {
 }
 
 # turn_jq is the one reading of a turn's events, for the stream and the history
-# alike. step($e; $tag) folds an event into the state {started, ids, texts,
-# reason}: a user.message whose second line is this message's tag (re)starts the
-# turn, so the last one counts; before it, and after the turn's end, nothing
-# counts. agent.message text is kept in order, once per id. An event whose id is
-# not a string of 1 to 256 characters without a control character (a number,
-# one holding a newline) is refused; one with no id is kept. The end is the
-# first session.status_idle, with its stop reason (end_turn when it gives none),
-# or session.error. An end seen before the turn started sets unanchored: on the
-# stream, that is an end the bridge cannot place.
+# alike. step($e; $tag; $tuid) folds an event into the state {started, ids,
+# texts, tools, reason, blockers}. The turn starts at its anchor: a
+# user.message whose second line is this message's tag, or, when $tuid is set,
+# the user.tool_confirmation of that call; the last one counts. Before it, and
+# after the turn's end, nothing counts. agent.message text is kept in order,
+# once per id. An event whose id is not a string of 1 to 256 characters without
+# a control character (a number, one holding a newline) is refused; one with no
+# id is kept. Of a tool call only its type, name, server and evaluated
+# permission are kept, by id, never its input. The end is the first
+# session.status_idle, with its stop reason (end_turn when it gives none) and
+# the ids it waits on, or session.error. An end seen before the turn started
+# sets unanchored: on the stream, that is an end the bridge cannot place.
 # shellcheck disable=SC2016 # jq's variables, not the shell's
 turn_jq='
 def texts: [.content[]? | objects | select(.type == "text") | .text | strings];
 def okid: if .id == null then "" elif (.id | type) == "string" and (.id | test("^[^\u0000-\u001f\u007f]{1,256}$")) then .id else null end;
-def step($e; $tag):
-	if $e.type == "user.message" and (($e | texts | join("") | split("\n"))[1] == $tag) then {started: true, ids: {}, texts: [], reason: null}
+def str: if type == "string" then . else null end;
+def anchor($tag; $tuid):
+	if $tuid != "" then .type == "user.tool_confirmation" and .tool_use_id == $tuid
+	else .type == "user.message" and ((texts | join("") | split("\n"))[1] == $tag) end;
+def tooluse: .type == "agent.tool_use" or .type == "agent.mcp_tool_use" or .type == "agent.custom_tool_use";
+def step($e; $tag; $tuid):
+	if ($e | anchor($tag; $tuid)) then {started: true, ids: {}, texts: [], tools: {}, reason: null}
 	elif (.started | not) then (if $e.type == "session.status_idle" or $e.type == "session.error" then .unanchored = true else . end)
 	elif .reason != null then .
 	elif $e.type == "agent.message" then
 		($e | okid) as $k
 		| if $k == null or ($k != "" and .ids[$k]) then .
 		  else .texts += [$e | texts | join("")] | if $k != "" then .ids[$k] = true else . end end
-	elif $e.type == "session.status_idle" then .reason = ((($e.stop_reason | objects | .type) // "end_turn") | tostring)
+	elif ($e | tooluse) then
+		($e | okid) as $k
+		| if $k == null or $k == "" then .
+		  else .tools[$k] = {type: $e.type, name: ($e.name | str), server: ($e.mcp_server_name | str), perm: ($e.evaluated_permission | str)} end
+	elif $e.type == "session.status_idle" then
+		.reason = ((($e.stop_reason | objects | .type) // "end_turn") | tostring)
+		| .blockers = [$e.stop_reason | objects | .event_ids | arrays | .[] | strings]
 	elif $e.type == "session.error" then .reason = "error"
 	else . end;
 '
+# tuid is the call a confirmation answers: set, a turn starts at its
+# user.tool_confirmation instead of this message's user.message
+tuid=
 tag=$(open_tag | tr -d '\n')
 
 # fetch_history leaves every event of the session in $hist as {data: [...]},
@@ -416,13 +442,15 @@ fetch_history() {
 	rm -f "$histp"
 }
 
-# catch_up reads the history for this message's turn. It sets found and done,
-# and, when done, reason and text.
+# catch_up reads the history for this message's turn into $turn. It sets found
+# and finished, and verdict, which holds reason and text.
 catch_up() {
 	fetch_history
-	verdict=$(jq -c --arg tag "$tag" "$turn_jq"'
-		reduce (.data[]? | objects) as $e ({started: false}; step($e; $tag))
-		| {found: (.started == true), done: (.reason != null), reason, text: ((.texts // []) | join("\n\n"))}' "$hist" 2>/dev/null) || verdict='{"found":false}'
+	jq -c --arg tag "$tag" --arg tuid "$tuid" "$turn_jq"'
+		reduce (.data[]? | objects) as $e ({started: false}; step($e; $tag; $tuid))' "$hist" >"$turn" 2>/dev/null ||
+		printf '%s\n' '{"started": false}' >"$turn"
+	verdict=$(jq -c '{found: (.started == true), done: (.reason != null), reason, text: ((.texts // []) | join("\n\n"))}' "$turn" 2>/dev/null) ||
+		verdict='{"found":false}'
 	found=$(printf '%s' "$verdict" | jq -r '.found // false')
 	finished=$(printf '%s' "$verdict" | jq -r '.done // false')
 }
@@ -518,13 +546,13 @@ resolve_session() {
 	gone=
 	session=$(awk -v c="$stdin_conv" '$1 == c { print $2; exit }' "$sessions_file" 2>/dev/null)
 	if [ -n "$session" ] && session_ok "$session"; then
-		ok404=1
+		pass=404
 		if api GET "$api/v1/sessions/$session?beta=true"; then
 			jq -e '.status == "terminated" or .archived_at != null' "$resp" >/dev/null 2>&1 && gone=$session
 		else
 			gone=$session
 		fi
-		ok404=
+		pass=
 		[ -n "$gone" ] || return 0
 		map_put ""
 		log_line "session gone"
@@ -545,103 +573,379 @@ resolve_session() {
 	fi
 }
 
+
+# --- tool confirmations brokered through the owner ---------------------------
+# confirm.pending holds one line per call waiting on the owner:
+#   <code> <conversationId> <session> <tool_use_id> <pending|sent> <message id|-> <tool|?> <server|?>
+# The code is 6 characters of a-km-z2-9 from /dev/urandom. It goes only into
+# this file and to the owner: never into the session, a request or the log.
+# The file is read and rewritten only under the run lock, by tmp and rename,
+# mode 600, and holds the newest 50 lines.
+confirm_file=$state_dir/confirm.pending
+
+# confirm_put FILE replaces confirm.pending with the last 50 lines of FILE
+confirm_put() {
+	{
+		tail -n 50 "$1" >"$confirm_file.tmp" && chmod 600 "$confirm_file.tmp" && mv "$confirm_file.tmp" "$confirm_file"
+	} 2>/dev/null || {
+		log_line "confirm not writable"
+		exit 1
+	}
+}
+
+# confirm_keep AWK rewrites confirm.pending with only the lines AWK prints;
+# s is the session, c the code ($ccode), v the conversation and m the message.
+# Every match is made on text ("" $1 == "" c): awk compares two strings that
+# read as numbers as numbers, and 10 and 1e1 are one number
+confirm_keep() {
+	[ -f "$confirm_file" ] || return 0
+	awk -v s="$session" -v c="${ccode:-}" -v v="$stdin_conv" -v m="$stdin_id" "$1" "$confirm_file" >"$cfnew" 2>/dev/null || {
+		log_line "confirm not writable"
+		exit 1
+	}
+	confirm_put "$cfnew"
+}
+# the session waits on none of its calls any more
+confirm_drop_session() {
+	[ -f "$confirm_file" ] && awk -v s="$session" '"" $3 == "" s { f = 1 } END { exit !f }' "$confirm_file" 2>/dev/null || return 0
+	# shellcheck disable=SC2016 # awk's fields
+	confirm_keep '"" $3 != "" s'
+}
+# shellcheck disable=SC2016 # awk's fields
+confirm_drop_line() { confirm_keep '!("" $1 == "" c && "" $2 == "" v)'; }
+
+# new_code sets ccode to a fresh one, unique among the codes in confirm.pending
+# and $cfadd
+new_code() {
+	for _ in 1 2 3 4 5 6 7 8; do
+		ccode=$(head -c 512 /dev/urandom | LC_ALL=C tr -dc 'a-km-z2-9' | head -c 6)
+		[ "${#ccode}" -eq 6 ] || continue
+		cat "$confirm_file" "$cfadd" 2>/dev/null | awk -v c="$ccode" '"" $1 == "" c { f = 1 } END { exit !f }' || return 0
+	done
+	log_line "no code"
+	exit 1
+}
+
+# requests prints, for each line of this conversation and session still
+# pending, what the owner replies to answer it
+requests() {
+	awk -v s="$session" -v v="$stdin_conv" '"" $2 == "" v && "" $3 == "" s && $5 == "pending" {
+		tool = ($7 == "?") ? "a tool" : $7
+		if ($8 != "?") tool = tool " from " $8
+		if (n++) printf "\n\n"
+		printf "the agent wants to run %s: reply \"approve %s\" or \"deny %s <optional reason>\"", tool, $1, $1
+	}' "$confirm_file" 2>/dev/null
+}
+
+# blockers_jq lists the calls a requires_action turn waits on, one per line:
+# <id> <ask|custom|unseen|other> <tool|?> <server|?>, or "! bad ? ?" for an id
+# that cannot be a tool_use_id. A name outside [A-Za-z0-9_.-]{1,64} is "?".
+# shellcheck disable=SC2016 # jq's variables
+blockers_jq='
+def ok: if type == "string" and test("\\A[A-Za-z0-9_.-]{1,64}\\z") then . else "?" end;
+(.tools // {}) as $t
+| (.blockers // [])[]
+| if test("\\A[A-Za-z0-9_-]{1,128}\\z") | not then "! bad ? ?"
+  else . as $id | $t[$id] as $u
+  | [$id,
+     (if $u == null then "unseen" elif $u.type == "agent.custom_tool_use" then "custom" elif $u.perm == "ask" then "ask" else "other" end),
+     ($u.name | ok),
+     (if $u.type == "agent.mcp_tool_use" then ($u.server | ok) else "?" end)]
+  | join(" ") end'
+
+# ask ends a turn that waits on tool calls ($turn). A call it already holds a
+# line for keeps its code; a call evaluated "ask" gets a new one; anything else
+# (a custom tool, a call it did not see, an odd id) cannot be answered from
+# sock, so the turn ends with the fixed text and the owner answers in the
+# console. Lines of this session for calls it no longer waits on are dropped.
+ask() {
+	blk=$(jq -r "$blockers_jq" "$turn" 2>/dev/null) || blk=
+	fixed=
+	[ -n "$blk" ] || fixed=1
+	: >"$cfadd"
+	{ awk -v s="$session" '"" $3 != "" s' "$confirm_file" 2>/dev/null || true; } >"$cfnew"
+	added=0
+	while read -r id kind name server; do
+		[ -n "$id" ] || continue
+		line=$(awk -v s="$session" -v t="$id" '"" $3 == "" s && "" $4 == "" t' "$confirm_file" 2>/dev/null | head -n 1)
+		if [ -n "$line" ]; then
+			printf '%s\n' "$line" >>"$cfnew"
+			continue
+		fi
+		if [ "$kind" != ask ]; then
+			fixed=1
+			continue
+		fi
+		new_code
+		printf '%s %s %s %s pending - %s %s\n' "$ccode" "$stdin_conv" "$session" "$id" "$name" "$server" >>"$cfadd"
+		added=$((added + 1))
+	done <<EOF
+$blk
+EOF
+	if [ -n "$fixed" ]; then
+		confirm_put "$cfnew"
+		answer "the agent is waiting for approval of a tool call" "waiting for approval"
+	fi
+	cat "$cfadd" >>"$cfnew"
+	confirm_put "$cfnew"
+	if [ -n "$tuid" ] && [ "$added" -eq 0 ]; then
+		answer "recorded; $(printf '%s\n' "$blk" | grep -c .) more waiting" "approval recorded"
+	fi
+	# the requests come last, after the agent's text cut short enough that
+	# the split cannot cut them
+	msg=$(requests)
+	if [ -n "$(printf '%s' "$1" | tr -d ' \t\r\n')" ]; then
+		msg="$(printf '%s' "$1" | LC_ALL=C awk -v max=200000 "$awk_cut"'
+			BEGIN { ord_init() } { buf = buf (NR > 1 ? "\n" : "") $0 } END { print substr(buf, 1, cut_at(buf, max)) }')
+
+$msg"
+	fi
+	answer "$msg" "approval requested"
+}
+
+# parse_reply sets verb (approve or deny, else empty) and ccode from the owner's
+# text: trimmed, "approve <code>" as the whole message, or "deny <code>" alone
+# or followed by whitespace and a reason, which goes to $reasonf. Only the verb
+# is case-insensitive, and only in ASCII.
+parse_reply() {
+	verb=
+	ccode=
+	: >"$reasonf" || exit 1
+	# shellcheck disable=SC2016 # jq's variables
+	cmd=$(printf '%s' "$input" | jq -r '
+		.text | sub("\\A[ \t\r\n]+"; "") | sub("[ \t\r\n]+\\z"; "")
+		| if (.[0:8] | ascii_downcase) == "approve " and (.[8:] | test("\\A[a-km-z2-9]{6}\\z")) then "approve " + .[8:]
+		  elif (.[0:5] | ascii_downcase) == "deny " and (.[5:] | test("\\A[a-km-z2-9]{6}(\\z|[ \t\r\n])")) then "deny " + .[5:11]
+		  else "" end' 2>/dev/null) || cmd=
+	case $cmd in
+	'approve '* | 'deny '*) ;;
+	*) return 0 ;;
+	esac
+	verb=${cmd%% *}
+	ccode=${cmd#* }
+	if [ "$verb" = deny ]; then
+		printf '%s' "$input" | jq -j '.text | sub("\\A[ \t\r\n]+"; "") | .[11:] | sub("\\A[ \t\r\n]+"; "")' >"$reasonf" 2>/dev/null || : >"$reasonf"
+	fi
+}
+
+# confirm_line sets the fields of this conversation's line for the code, or
+# answers that none is pending. A line marked sent counts only for the message
+# that sent it.
+confirm_line() {
+	line=$(awk -v c="$ccode" -v v="$stdin_conv" '"" $1 == "" c && "" $2 == "" v' "$confirm_file" 2>/dev/null | head -n 1)
+	read -r _ _ c_session c_tuid c_state c_msg _ <<EOF
+$line
+EOF
+	if [ -n "$line" ] && session_ok "${c_session:-}" && matches "${c_tuid:-}" '[A-Za-z0-9_-]{1,128}' &&
+		{ [ "$c_state" = pending ] || { [ "$c_state" = sent ] && [ "$c_msg" = "$stdin_id" ]; }; }; then
+		return 0
+	fi
+	answer "no approval is pending with that code" "approval not pending"
+}
+
+# confirm_body writes the confirmation to $body: the reason, if any, cleaned of
+# control characters, every code in confirm.pending taken out, cut to 1000
+# bytes on a character boundary
+confirm_body() {
+	if [ "$verb" = deny ]; then
+		clean_text <"$reasonf" >"$cfadd" || exit 1
+		# shellcheck disable=SC2013 # the codes are words, checked below
+		for c in $(cut -d' ' -f1 "$confirm_file" 2>/dev/null); do
+			matches "$c" '[a-km-z2-9]{6}' || continue
+			sed "s/$c/[code]/g" "$cfadd" >"$reasonf" && mv "$reasonf" "$cfadd" || exit 1
+		done
+		LC_ALL=C awk -v max=1000 "$awk_cut"'
+			BEGIN { ord_init() } { buf = buf (NR > 1 ? "\n" : "") $0 } END { printf "%s", substr(buf, 1, cut_at(buf, max)) }' "$cfadd" >"$reasonf" || exit 1
+	fi
+	# shellcheck disable=SC2016 # jq's variables
+	jq -n --arg t "$c_tuid" --arg r "$verb" --rawfile m "$reasonf" '
+		($m | sub("[ \t\r\n]+\\z"; "")) as $m
+		| {events: [{type: "user.tool_confirmation", tool_use_id: $t, result: (if $r == "approve" then "allow" else "deny" end)}
+			+ (if $r == "deny" and $m != "" then {deny_message: $m} else {} end)]}' >"$body" || exit 1
+}
+
+# confirm answers the call the owner's code names, then follows the turn it
+# resumes
+confirm() {
+	if [ "$c_session" != "$session" ]; then
+		confirm_drop_line
+		answer "that approval is no longer pending" "approval refused"
+	fi
+	tuid=$c_tuid
+	# the history tells a confirmation this message already sent (a crash
+	# after the POST: follow it, post nothing again) from one answered
+	# elsewhere, in the console
+	catch_up
+	if [ "$found" = true ]; then
+		[ "$c_state" = sent ] && from_history wait
+		confirm_drop_line
+		answer "that approval is no longer pending" "approval refused"
+	fi
+	open_stream
+	confirm_body
+	# marked sent before the POST, as sent.ids is: a confirmation that may
+	# have landed is looked up in the history before it is posted again
+	# shellcheck disable=SC2016 # awk's fields
+	confirm_keep '"" $1 == "" c && "" $2 == "" v { $5 = "sent"; $6 = m } { print }'
+	pass=400
+	if ! api POST "$base?beta=true" "$body"; then
+		# not pending at the API: answered in the console, or the session
+		# moved on
+		pass=
+		confirm_drop_line
+		answer "that approval is no longer pending" "approval refused"
+	fi
+	pass=
+	follow_stream
+}
+
+# hold_if_waiting: an ordinary reply while the session waits on a call the
+# owner was asked about is not sent into the session; the owner is reminded of
+# the codes. The history says what the session still waits on: lines for calls
+# it no longer waits on (answered in the console, or moved past) are dropped,
+# and with none left the reply goes in.
+hold_if_waiting() {
+	[ -f "$confirm_file" ] && awk -v s="$session" '"" $3 == "" s { f = 1 } END { exit !f }' "$confirm_file" 2>/dev/null || return 0
+	fetch_history
+	# shellcheck disable=SC2016 # jq's variables
+	jq -r '
+		[.data[]? | objects] as $d
+		| ([$d | to_entries[] | select(.value.type | . == "session.status_idle" or . == "session.status_running" or . == "session.status_rescheduled" or . == "session.status_terminated")] | last) as $l
+		| if $l == null or $l.value.type != "session.status_idle" or (($l.value.stop_reason | objects | .type) != "requires_action") then empty
+		  else [$d[$l.key + 1:][] | select(.type == "user.tool_confirmation") | .tool_use_id | strings] as $done
+		  | $l.value.stop_reason.event_ids | arrays | .[] | strings | . as $i | select($done | any(. == $i) | not)
+		  end' "$hist" >"$cfadd" 2>/dev/null || : >"$cfadd"
+	awk -v s="$session" -v wf="$cfadd" 'FILENAME == wf { w[$0] = 1; next } "" $3 != "" s || ($4 in w)' "$cfadd" "$confirm_file" >"$cfnew" 2>/dev/null || {
+		log_line "confirm not writable"
+		exit 1
+	}
+	confirm_put "$cfnew"
+	awk -v s="$session" '"" $3 == "" s { f = 1 } END { exit !f }' "$confirm_file" 2>/dev/null || return 0
+	msg=$(requests)
+	if [ -n "$msg" ]; then
+		answer "a tool call is waiting, so this reply was not sent to the agent:
+
+$msg" "approval pending"
+	fi
+	answer "a tool call is waiting for an answer in another conversation or the console, so this reply was not sent to the agent" "approval pending"
+}
+
+# --- the turn: the stream, opened before anything is posted, then followed ---
+# open_stream opens the event stream and waits for its status line: a stream
+# shows only events after it opens
+open_stream() {
+	attempt=0
+	while :; do
+		left=$((deadline - $(now)))
+		if [ "$left" -le 0 ]; then
+			log_line "timeout"
+			exit 1
+		fi
+		: >"$stream_file"
+		: >"$stream_hdr"
+		curl -q -sS --proto "$proto" --proto-redir "$proto" --max-redirs 0 -N --config "$cfg" -H 'accept: text/event-stream' -o "$stream_file" -D "$stream_hdr" \
+			--connect-timeout 10 --max-time "$left" "$base/stream?beta=true" >/dev/null 2>&1 &
+		stream_pid=$!
+		for _ in $(seq 100); do
+			grep -q '^HTTP/' "$stream_hdr" 2>/dev/null && break
+			kill -0 "$stream_pid" 2>/dev/null || break
+			nap 0.1
+		done
+		status=$(sed -n 's/^HTTP\/[0-9.]* \([0-9]*\).*/\1/p' "$stream_hdr" 2>/dev/null | tail -n 1)
+		case ${status:-} in
+		2??) return 0 ;;
+		esac
+		kill "$stream_pid" 2>/dev/null
+		wait "$stream_pid" 2>/dev/null
+		stream_pid=
+		retry_or_exit GET "${status:-000}" "$stream_hdr"
+	done
+}
+
+# follow_stream follows the stream to the end of the turn and finishes. Only
+# whole lines count: curl appends as bytes arrive, and a line cut in the middle
+# is read again once its newline is there. The turn's state is turn_jq's,
+# carried from poll to poll in $turn. It starts at this run's anchor: the
+# stream opened before the post, so what comes before that (a turn still
+# running, its answer and its idle) is not this one's.
+follow_stream() {
+	printf '%s\n' '{"started": false}' >"$turn"
+	off=0
+	reason=
+	while [ -z "$reason" ]; do
+		if [ "$(now)" -ge "$deadline" ]; then
+			log_line "timeout"
+			exit 1
+		fi
+		size=$(wc -c <"$stream_file" | tr -d ' ')
+		if [ "$size" -gt "$max_stream" ]; then
+			log_line "stream too large"
+			exit 1
+		fi
+		if [ "$size" -gt "$off" ]; then
+			tail -c "+$((off + 1))" "$stream_file" >"$new"
+			# drop a trailing line that has no newline yet
+			if [ "$(tail -c 1 "$new" | wc -l | tr -d ' ')" != 1 ]; then sed '$d' "$new" >"$newc" && mv "$newc" "$new"; fi
+			used=$(wc -c <"$new" | tr -d ' ')
+			if [ "$used" -gt 0 ]; then
+				off=$((off + used))
+				grep '^data:' "$new" | sed 's/^data: *//' >"$batch"
+				jq -Rcs --arg tag "$tag" --arg tuid "$tuid" --slurpfile st "$turn" "$turn_jq"'
+					reduce (split("\n")[] | select(length > 0) | fromjson? | objects) as $e ($st[0]; step($e; $tag; $tuid))' "$batch" >"$turnn" 2>/dev/null &&
+					mv "$turnn" "$turn"
+				reason=$(jq -r '.reason // empty' "$turn" 2>/dev/null)
+				[ -n "$reason" ] && break
+				# an end before this run's own anchor showed: a stream that does
+				# not echo it, or one that played another turn's end first. Nothing
+				# from it is posted: the history holds the anchor and places the turn.
+				if [ "$(jq -r '.unanchored // false' "$turn" 2>/dev/null)" = true ]; then
+					kill "$stream_pid" 2>/dev/null
+					stream_pid=
+					log_line "stream unanchored"
+					from_history wait
+				fi
+			fi
+		fi
+		if ! kill -0 "$stream_pid" 2>/dev/null; then
+			# the stream is over: it may have ended after $size was read, so
+			# measure again and read what is left once more, then give up
+			size=$(wc -c <"$stream_file" | tr -d ' ')
+			[ "$size" -gt "$off" ] && [ "$(tail -c 1 "$stream_file" | wc -l | tr -d ' ')" = 1 ] && continue
+			log_line "stream dropped"
+			exit 1
+		fi
+		nap 0.2
+	done
+	finish "$reason" "$(jq -r '(.texts // []) | join("\n\n")' "$turn")"
+}
+
+# --- the run -----------------------------------------------------------------
+# an owner reply that answers a confirmation is looked up before the session:
+# a code no line holds for this conversation is answered at once
+parse_reply
+[ -z "$verb" ] || confirm_line
+
 [ -z "$agent" ] || resolve_session
 base="$api/v1/sessions/$session/events"
 
-# --- a redelivery of a message whose user.message already went in --------------
-# not there at all: the post never landed, so it goes out below. There, but the
-# agent is still working: wait for it
+[ -z "$verb" ] || confirm
+
+# a redelivery of a message whose user.message already went in: not there at
+# all, the post never landed, so it goes out below. There, but the agent is
+# still working: wait for it
 if [ -f "$sent_file" ] && grep -qxF "$stdin_id" "$sent_file" 2>/dev/null; then
 	from_history send
+else
+	hold_if_waiting
 fi
 
-# --- a fresh turn: stream first, then send, then follow the stream -----------
+# a fresh turn: stream first, then send, then follow the stream
 write_prompt
-attempt=0
-while :; do
-	left=$((deadline - $(now)))
-	if [ "$left" -le 0 ]; then
-		log_line "timeout"
-		exit 1
-	fi
-	: >"$stream_file"
-	: >"$stream_hdr"
-	curl -q -sS --proto "$proto" --proto-redir "$proto" --max-redirs 0 -N --config "$cfg" -H 'accept: text/event-stream' -o "$stream_file" -D "$stream_hdr" \
-		--connect-timeout 10 --max-time "$left" "$base/stream?beta=true" >/dev/null 2>&1 &
-	stream_pid=$!
-	# the stream shows only events after it opens: wait for its status line
-	for _ in $(seq 100); do
-		grep -q '^HTTP/' "$stream_hdr" 2>/dev/null && break
-		kill -0 "$stream_pid" 2>/dev/null || break
-		nap 0.1
-	done
-	status=$(sed -n 's/^HTTP\/[0-9.]* \([0-9]*\).*/\1/p' "$stream_hdr" 2>/dev/null | tail -n 1)
-	case ${status:-} in
-	2??) break ;;
-	esac
-	kill "$stream_pid" 2>/dev/null
-	wait "$stream_pid" 2>/dev/null
-	stream_pid=
-	retry_or_exit GET "${status:-000}" "$stream_hdr"
-done
-
+open_stream
 jq -n --rawfile t "$prompt" '{events: [{type: "user.message", content: [{type: "text", text: $t}]}]}' >"$body"
 mark_sent || {
 	log_line "ledger not writable"
 	exit 1
 }
 api POST "$base?beta=true" "$body"
-
-# Follow the stream. Only whole lines count: curl appends as bytes arrive, and
-# a line cut in the middle is read again once its newline is there. The turn's
-# state is turn_jq's, carried from poll to poll in $turn. It starts at this
-# run's own user.message: the stream opened before the send, so what comes
-# before that (a turn still running, its answer and its idle) is not this one's.
-printf '%s\n' '{"started": false}' >"$turn"
-off=0
-reason=
-while [ -z "$reason" ]; do
-	if [ "$(now)" -ge "$deadline" ]; then
-		log_line "timeout"
-		exit 1
-	fi
-	size=$(wc -c <"$stream_file" | tr -d ' ')
-	if [ "$size" -gt "$max_stream" ]; then
-		log_line "stream too large"
-		exit 1
-	fi
-	if [ "$size" -gt "$off" ]; then
-		tail -c "+$((off + 1))" "$stream_file" >"$new"
-		# drop a trailing line that has no newline yet
-		if [ "$(tail -c 1 "$new" | wc -l | tr -d ' ')" != 1 ]; then sed '$d' "$new" >"$newc" && mv "$newc" "$new"; fi
-		used=$(wc -c <"$new" | tr -d ' ')
-		if [ "$used" -gt 0 ]; then
-			off=$((off + used))
-			grep '^data:' "$new" | sed 's/^data: *//' >"$batch"
-			jq -Rcs --arg tag "$tag" --slurpfile st "$turn" "$turn_jq"'
-				reduce (split("\n")[] | select(length > 0) | fromjson? | objects) as $e ($st[0]; step($e; $tag))' "$batch" >"$turnn" 2>/dev/null &&
-				mv "$turnn" "$turn"
-			reason=$(jq -r '.reason // empty' "$turn" 2>/dev/null)
-			[ -n "$reason" ] && break
-			# an end before this run's own user.message showed: a stream that does
-			# not echo it, or one that played another turn's end first. Nothing from
-			# it is posted: the history holds the user.message and places the turn.
-			if [ "$(jq -r '.unanchored // false' "$turn" 2>/dev/null)" = true ]; then
-				kill "$stream_pid" 2>/dev/null
-				stream_pid=
-				log_line "stream unanchored"
-				from_history wait
-			fi
-		fi
-	fi
-	if ! kill -0 "$stream_pid" 2>/dev/null; then
-		# the stream is over: it may have ended after $size was read, so measure
-		# again and read what is left once more, then give up
-		size=$(wc -c <"$stream_file" | tr -d ' ')
-		[ "$size" -gt "$off" ] && [ "$(tail -c 1 "$stream_file" | wc -l | tr -d ' ')" = 1 ] && continue
-		log_line "stream dropped"
-		exit 1
-	fi
-	nap 0.2
-done
-finish "$reason" "$(jq -r '(.texts // []) | join("\n\n")' "$turn")"
+follow_stream
