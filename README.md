@@ -39,6 +39,7 @@ See `agent-sdk/example.ts`.
 
 Hooks never fail the agent. They log one line per failure to `${XDG_STATE_HOME:-~/.local/state}/sock-integrations/hook.log`. Read it first. Common first-run causes:
 
+- `quiet: background`, `quiet: unknown session` or `quiet: throttled`: by design. Hooks message you only from an interactive session, at most once an hour per project; `-p`, SDK, background and subagent sessions never do, and replies through `sock_send` are never held back (`docs/specs/integrations.md`, notify.sh rule 8).
 - No token: the plugin option is unset, or `SOCK_TOKEN` is not exported where the hook runs.
 - `sock` or `sock-mcp` is not on the `PATH` of the Claude Code process, for example installed to `~/go/bin` which that `PATH` lacks.
 - The server rejected the request: a revoked or mistyped token, or a URL that does not match the token's server.

@@ -11,6 +11,8 @@ Do not also append `codex/config.toml`: two servers named `sock` would clash. Th
 
 Outbound only: hooks message you when Codex needs permission and, at the end of each turn, with the turn's trailing question or decision when it has one (`finished a turn` as well with `SOCK_NOTIFY_ON_STOP=1`), and the model can call `sock_send`. No inbound in v1. The token is forwarded from your shell and never written to config.
 
+Hooks send only from the TUI or the Codex app, at most once an hour per project: `codex exec` and subagents never message you, and a `sock_send` reply is never held back (`docs/specs/integrations.md`, notify.sh rule 8).
+
 1. Put `sock` and `sock-mcp` on `PATH` (`make install-bins`). The plugin route needs sock-mcp v0.2.3 or later: v0.2.2 named a machine-key puppet after the plugin cache directory.
 2. Mint a puppet for this machine in the sock app, then `export SOCK_TOKEN=sock_pt_...` only in a launcher or wrapper script that starts Codex, not in a global shell rc file. Claude Code's Bash tool inherits its parent's environment, so a token exported globally is readable by a model running there. Optionally set `SOCK_URL` in the same wrapper.
 3. Append `codex/config.toml` to `~/.codex/config.toml`. This registers the `sock` MCP server and forwards `SOCK_TOKEN` and `SOCK_URL` from your shell.
