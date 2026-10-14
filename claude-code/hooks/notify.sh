@@ -78,6 +78,11 @@ unset SOCK_URL
 url_args=()
 if [ -n "$url" ]; then
 	url_args=(--url "$url")
+	# The config file's access_gate belongs to the config's own URL. When the
+	# plugin names the URL, point the CLI at a config path that does not exist.
+	if [ -n "${CLAUDE_PLUGIN_OPTION_SOCK_TOKEN:-}" ]; then
+		export XDG_CONFIG_HOME=${TMPDIR:-/tmp}/sock-hook-noconfig.$$
+	fi
 fi
 
 errf=$(mktemp "${TMPDIR:-/tmp}/sock-hook.XXXXXX") || {

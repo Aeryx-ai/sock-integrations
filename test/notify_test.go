@@ -95,6 +95,23 @@ func TestEnvTokenKeepsAccessGate(t *testing.T) {
 	}
 }
 
+// access_gate in the CLI config file belongs to the config's own URL, not the plugin URL.
+func TestPluginTokenIgnoresConfigFileAccessGate(t *testing.T) {
+	s := newStub(t)
+	cfg := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cfg, "sock"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg, "sock", "config.toml"), []byte("access_gate = \"file-gate\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_other_other", "CLAUDE_PLUGIN_OPTION_SOCK_URL": s.URL, "XDG_CONFIG_HOME": cfg}}, "x")
+	g := s.Requests()
+	if len(g) != 1 || g[0].Gate != "" {
+		t.Fatalf("config file access gate leaked to plugin URL: %+v", g)
+	}
+}
+
 func TestPluginOptionTokenUsedWhenSockTokenUnset(t *testing.T) {
 	s := newStub(t)
 	runHook(t, s.URL, hookEnv{Env: map[string]string{"SOCK_TOKEN": "", "CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_opt_opt", "CLAUDE_PLUGIN_OPTION_SOCK_URL": s.URL, "SOCK_URL": ""}}, "x")
