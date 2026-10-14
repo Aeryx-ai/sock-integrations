@@ -136,7 +136,7 @@ func TestRunnerClaudeArgv(t *testing.T) {
 	h := newRunnerHarness(t)
 	h.run(rnOpts{})
 	runs := h.runs()
-	want := []string{"-p", "--resume", rnSess, "--permission-mode", "plan"}
+	want := []string{"-p", "--resume", rnSess, "--permission-mode", "plan", "--allowedTools", rnClaudeTools, "--permission-prompts", "none"}
 	if len(runs) != 1 || !slices.Equal(runs[0].Argv, want) {
 		t.Fatalf("%+v", runs)
 	}
@@ -408,13 +408,13 @@ func TestRunnerSecondRunnerWaitsOnLock(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		first = h.run(rnOpts{Env: map[string]string{"STUB_SLEEP": "2"}})
+		first = h.run(h.withID(1, rnOpts{Env: map[string]string{"STUB_SLEEP": "2"}}))
 	}()
 	deadline := time.Now().Add(10 * time.Second)
 	for len(h.events()) == 0 && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
 	}
-	second := h.run(rnOpts{Env: map[string]string{"SOCK_RUNNER_TIMEOUT": "30"}})
+	second := h.run(h.withID(2, rnOpts{Env: map[string]string{"SOCK_RUNNER_TIMEOUT": "30"}}))
 	wg.Wait()
 	if first.Code != 0 || second.Code != 0 {
 		t.Fatalf("exits %d %d", first.Code, second.Code)
@@ -461,7 +461,7 @@ func TestRunnerRacingOverStaleLockDoNotOverlap(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			codes[i] = h.run(rnOpts{Env: map[string]string{"STUB_SLEEP": "1", "SOCK_RUNNER_TIMEOUT": "30"}}).Code
+			codes[i] = h.run(h.withID(i+1, rnOpts{Env: map[string]string{"STUB_SLEEP": "1", "SOCK_RUNNER_TIMEOUT": "30"}})).Code
 		}()
 	}
 	wg.Wait()

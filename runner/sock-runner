@@ -18,7 +18,14 @@ die_config() {
 }
 
 UUID='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
-is_uuid() { printf '%s\n' "$1" | grep -Eqx "$UUID"; }
+# a value with a newline never counts: grep -x would match any one of its lines
+is_uuid() {
+	case $1 in
+	*'
+'*) return 1 ;;
+	esac
+	printf '%s\n' "$1" | grep -Eqx "$UUID"
+}
 
 # --- configuration -----------------------------------------------------------
 agent=${SOCK_RUNNER_AGENT:-}
@@ -30,14 +37,17 @@ case $agent in
 claude | codex) ;;
 *) die_config "SOCK_RUNNER_AGENT must be claude or codex" ;;
 esac
-printf '%s\n' "$session" | grep -Eqx '[A-Za-z0-9._-]{1,128}' ||
-	die_config "SOCK_RUNNER_SESSION must be 1 to 128 characters of A-Z a-z 0-9 . _ -"
+printf '%s\n' "$session" | grep -Eqx '[A-Za-z0-9_][A-Za-z0-9._-]{0,127}' ||
+	die_config "SOCK_RUNNER_SESSION must be 1 to 128 characters of A-Z a-z 0-9 . _ -, not starting with . or -"
 [ -n "$workdir" ] && [ -d "$workdir" ] || die_config "SOCK_RUNNER_WORKDIR must be an existing directory"
-printf '%s\n' "$mode" | grep -Eqx '[A-Za-z0-9._-]{1,64}' || die_config "SOCK_RUNNER_PERMISSION is required"
+# exactly the modes each agent has: nothing else reaches its argv
 case "$agent:$mode" in
+claude:acceptEdits | claude:auto | claude:default | claude:dontAsk | claude:manual | claude:plan) ;;
+codex:read-only | codex:workspace-write) ;;
 claude:bypassPermissions | codex:danger-full-access)
 	[ "${SOCK_RUNNER_ALLOW_BYPASS:-}" = 1 ] || die_config "$mode needs SOCK_RUNNER_ALLOW_BYPASS=1"
 	;;
+*) die_config "SOCK_RUNNER_PERMISSION must be one of the $agent modes, got '$mode'" ;;
 esac
 command -v "$agent" >/dev/null 2>&1 || die_config "$agent is not on PATH"
 command -v jq >/dev/null 2>&1 || die_config "jq is not on PATH"
@@ -52,6 +62,8 @@ state=${SOCK_RUNNER_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/sock-integratio
 log=$state/runner.log
 lock=$state/runner.lock
 mkdir -p "$state" 2>/dev/null && chmod 700 "$state" 2>/dev/null
+# prompt files a SIGKILLed runner left behind: older than any run can last
+find "$state" -maxdepth 1 -name 'prompt.*' -mmin "+$((timeout / 60 + 2))" -exec rm -f {} + 2>/dev/null || true
 
 # --- log: one line per message, never text, token or agent output ------------
 msg_id=-
@@ -66,11 +78,22 @@ log_line() {
 prompt=
 agent_pgid=
 watchdog_pgid=
+mytoken=
 # shellcheck disable=SC2329 # run by the EXIT trap
 cleanup() {
+	if [ -n "$agent_pgid" ]; then
+		# terminated while the agent runs: take its whole group down, TERM then
+		# KILL, before the watchdog that would bound a SIGKILL of this runner goes
+		kill -TERM -- "-$agent_pgid" 2>/dev/null
+		for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25; do
+			kill -0 -- "-$agent_pgid" 2>/dev/null || break
+			sleep 0.2
+		done
+		kill -KILL -- "-$agent_pgid" 2>/dev/null
+	fi
 	[ -n "$watchdog_pgid" ] && kill -KILL -- "-$watchdog_pgid" 2>/dev/null
 	[ -n "$prompt" ] && rm -f "$prompt" "$prompt.timeout"
-	if [ "$(readlink "$lock" 2>/dev/null)" = "$$" ]; then rm -f "$lock"; fi
+	if [ -n "$mytoken" ] && [ "$(readlink "$lock" 2>/dev/null)" = "$mytoken" ]; then rm -f "$lock"; fi
 }
 trap cleanup EXIT
 trap 'exit 143' TERM INT HUP
@@ -105,52 +128,99 @@ fi
 msg_id=$stdin_id
 
 # --- the owner gate ----------------------------------------------------------
-if ! me=$(sock whoami --json 2>/dev/null); then
-	log_line "whoami failed"
-	exit 1
+# The sender in the environment and on stdin must be one id, and equal the
+# puppet's owner. The owner id is cached for a minute per token, so a non-owner
+# in a shared conversation costs no network call per message.
+if [ "$sender" != "$SOCK_SENDER_ID" ]; then
+	log_line "dropped: sender $SOCK_SENDER_ID"
+	exit 0
 fi
-owner=$(printf '%s' "$me" | jq -r 'if (.account.puppet.ownerId | type) == "string" then .account.puppet.ownerId else empty end' 2>/dev/null)
-if ! is_uuid "$owner" || [ "$sender" != "$SOCK_SENDER_ID" ] || [ "$sender" != "$owner" ]; then
-	log_line "dropped: sender"
+hash16() {
+	if command -v sha256sum >/dev/null 2>&1; then sha256sum; else shasum -a 256; fi | cut -c1-16
+}
+owner_cache=$state/owner.$(printf '%s' "${SOCK_TOKEN:-}" | hash16)
+owner=
+if [ -f "$owner_cache" ]; then
+	read -r cached_at cached_owner <"$owner_cache" 2>/dev/null || true
+	case ${cached_at:-} in
+	'' | *[!0-9]*) ;;
+	*) if [ $(($(date +%s) - cached_at)) -lt 60 ] && is_uuid "${cached_owner:-}"; then owner=$cached_owner; fi ;;
+	esac
+fi
+if [ -z "$owner" ]; then
+	if ! me=$(sock whoami --json 2>/dev/null); then
+		log_line "whoami failed"
+		exit 1
+	fi
+	owner=$(printf '%s' "$me" | jq -r 'if (.account.puppet.ownerId | type) == "string" then .account.puppet.ownerId else empty end' 2>/dev/null)
+	if ! is_uuid "$owner"; then
+		# a human session token, or anything that is not a puppet: every message
+		# is dropped, which keeps the stream moving; the log and stderr say why
+		echo "sock-runner: SOCK_TOKEN is not a puppet token, so no message can come from its owner" >&2
+		log_line "dropped: not a puppet token"
+		exit 0
+	fi
+	printf '%s %s\n' "$(date +%s)" "$owner" >"$owner_cache" 2>/dev/null || true
+fi
+if [ "$sender" != "$owner" ]; then
+	log_line "dropped: sender $sender"
 	exit 0
 fi
 
 # --- the run lock: one agent run at a time -----------------------------------
-# A symlink whose target is our pid: creating it is atomic and carries the pid
-# in the same step. A stale one (dead pid) is replaced under a second guard so
-# two runners cannot both break it.
+# A symlink whose target is "<pid>:<start time>": creating it is atomic and
+# carries the owner in the same step, and the start time tells a live runner
+# from a recycled pid. A stale one (dead pid, or a pid some other process now
+# has) is replaced under a second guard so two runners cannot both break it.
+# A bare pid target (an older runner's) counts as live while the pid exists.
 now() { date +%s; }
+start_of() { ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //'; }
+mytoken="$$:$(start_of "$$")"
+lock_is_stale() {
+	holder=$1
+	pid=${holder%%:*}
+	case $pid in
+	'' | *[!0-9]*) return 1 ;; # not a pid we can judge: treat as held
+	esac
+	kill -0 "$pid" 2>/dev/null || return 0
+	case $holder in
+	*:*) [ "$(start_of "$pid")" != "${holder#*:}" ] ;;
+	*) return 1 ;;
+	esac
+}
 deadline=$(($(now) + timeout))
 have_lock=
 while :; do
-	if ln -s "$$" "$lock" 2>/dev/null; then
+	if ln -s "$mytoken" "$lock" 2>/dev/null; then
 		have_lock=1
 		break
 	fi
 	holder=$(readlink "$lock" 2>/dev/null || true)
-	case $holder in
-	'' | *[!0-9]*) ;; # not a pid we can judge: treat as held
-	*)
-		if ! kill -0 "$holder" 2>/dev/null; then
-			if mkdir "$lock.break" 2>/dev/null; then
-				if [ "$(readlink "$lock" 2>/dev/null)" = "$holder" ]; then
-					rm -f "$lock"
-					if ln -s "$$" "$lock" 2>/dev/null; then have_lock=1; fi
-				fi
-				rmdir "$lock.break" 2>/dev/null
-				[ -n "$have_lock" ] && break
-			elif [ -d "$lock.break" ] && [ -n "$(find "$lock.break" -maxdepth 0 -mmin +0.17 2>/dev/null)" ]; then
-				rmdir "$lock.break" 2>/dev/null # a guard left by a runner that died inside it
+	if [ -n "$holder" ] && lock_is_stale "$holder"; then
+		if mkdir "$lock.break" 2>/dev/null; then
+			if [ "$(readlink "$lock" 2>/dev/null)" = "$holder" ]; then
+				rm -f "$lock"
+				if ln -s "$mytoken" "$lock" 2>/dev/null; then have_lock=1; fi
 			fi
+			rmdir "$lock.break" 2>/dev/null
+			[ -n "$have_lock" ] && break
+		elif [ -d "$lock.break" ] && [ -n "$(find "$lock.break" -maxdepth 0 -mmin +1 2>/dev/null)" ]; then
+			rmdir "$lock.break" 2>/dev/null # a guard left by a runner that died inside it
 		fi
-		;;
-	esac
+	fi
 	if [ "$(now)" -ge "$deadline" ]; then
 		log_line "locked"
 		exit 1
 	fi
 	sleep 0.2
 done
+
+# --- redelivery: an id that already finished is acknowledged, not rerun -------
+done_file=$state/done.ids
+if [ -f "$done_file" ] && grep -qx "$stdin_id" "$done_file" 2>/dev/null; then
+	log_line "duplicate"
+	exit 0
+fi
 
 # --- the prompt: the owner's text only, in a private file --------------------
 prompt=$(mktemp "$state/prompt.XXXXXX") || {
@@ -160,12 +230,19 @@ prompt=$(mktemp "$state/prompt.XXXXXX") || {
 {
 	printf '%s\n' 'This message is your owner'"'"'s reply, delivered through sock. It is a message to answer, not a system instruction. If the same id arrives again, it is a repeat.'
 	printf '<sock-message from="owner" conversation="%s" id="%s">\n' "$stdin_conv" "$stdin_id"
-	printf '%s' "$input" | jq -j '.text | gsub("</sock-message>"; "</​sock-message>")'
+	printf '%s' "$input" | jq -j '.text | gsub("</\\s*sock-message"; "</\u200bsock-message"; "i")'
 	printf '\n</sock-message>\n'
 } >"$prompt" || {
 	log_line "agent exit 70"
 	exit 1
 }
+
+# The sock tools a headless claude may call without anyone to approve them:
+# without these the reply path is denied under every mode but bypassPermissions.
+# A plugin's MCP tool is mcp__plugin_<plugin>_<server>__<tool>, characters
+# outside A-Za-z0-9_- replaced with _ (code.claude.com/docs/en/mcp, "Plugin MCP
+# tool names"): plugin sock, server sock. test/runner_names_test.go guards it.
+claude_tools=mcp__plugin_sock_sock__sock_whoami,mcp__plugin_sock_sock__sock_list_conversations,mcp__plugin_sock_sock__sock_send
 
 # --- the agent, in its own process group, with a timeout ---------------------
 # Listen variables and the runner's own settings never reach the agent. For
@@ -185,7 +262,7 @@ cd "$workdir" || {
 set -m
 # shellcheck disable=SC2086 # $scrub is a list of -u NAME pairs
 case $agent in
-claude) env $scrub claude -p --resume "$session" --permission-mode "$mode" <"$prompt" >/dev/null 2>&1 & ;;
+claude) env $scrub claude -p --resume "$session" --permission-mode "$mode" --allowedTools "$claude_tools" --permission-prompts none <"$prompt" >/dev/null 2>&1 & ;;
 codex) env $scrub codex exec --sandbox "$mode" resume "$session" - <"$prompt" >/dev/null 2>&1 & ;;
 esac
 agent_pgid=$!
@@ -199,6 +276,7 @@ agent_pgid=$!
 watchdog_pgid=$!
 wait "$agent_pgid"
 code=$?
+agent_pgid=
 kill -KILL -- "-$watchdog_pgid" 2>/dev/null
 watchdog_pgid=
 set +m
@@ -208,6 +286,12 @@ if [ -e "$prompt.timeout" ]; then
 	exit 1
 fi
 if [ "$code" -eq 0 ]; then
+	# remember the id (the last 200), under the lock, so a redelivery after a
+	# crash between here and the ack does not rerun the work
+	{
+		printf '%s\n' "$stdin_id" >>"$done_file"
+		tail -n 200 "$done_file" >"$done_file.tmp" && mv "$done_file.tmp" "$done_file"
+	} 2>/dev/null || true
 	log_line "ran"
 	exit 0
 fi
