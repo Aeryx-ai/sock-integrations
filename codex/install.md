@@ -5,7 +5,7 @@ Plugin route (recommended; see the Codex plugin section of `docs/specs/integrati
 1. Put `sock` and `sock-mcp` on `PATH` (`make install-bins`). The plugin route needs sock-mcp v0.2.3 or later: v0.2.2 named a machine-key puppet after the plugin cache directory.
 2. `sock login`, then `sock puppets use <puppet id>` for the puppet Codex should send as. It writes the puppet token to `~/.config/sock/config.toml` (mode 0600), where the plugin's `sock-mcp` reads it: a plugin's server never sees your shell's `SOCK_TOKEN`.
 3. `codex plugin marketplace add aeryx-ai/sock-integrations`, then `codex plugin add sock@sock-integrations` (or pick sock in `/plugins`).
-4. Run `/hooks` in Codex and trust both hooks. The hooks send with `SOCK_TOKEN` from the environment Codex starts in (step 2 of the manual route below).
+4. Run `/hooks` in Codex and trust both hooks. They need no `SOCK_TOKEN`: they send with `sock send --as-puppet`, which resolves the same credential the plugin's server does, so both send as one puppet. This needs sock-cli v0.2.5 or later. A `SOCK_TOKEN` in the environment Codex starts in still wins for the hooks, so leave it unset on this route.
 
 Do not also append `codex/config.toml`: two servers named `sock` would clash. The plugin's server starts in the plugin's own directory, not your project, so it sends as one puppet for every project. For a puppet per project (`<repo> on <host>`), use the manual route below with a machine key as `SOCK_TOKEN` (`sock machine-key create --label "$(hostname -s)"`): a server registered in `config.toml` starts in the session's project directory. The manual route is also for anyone who wants no token in a file.
 

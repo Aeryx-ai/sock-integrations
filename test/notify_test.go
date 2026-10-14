@@ -1051,3 +1051,88 @@ func TestNULBytesInSockStderrNeverReachTheLog(t *testing.T) {
 		t.Fatalf("hook stderr %q", r.Stderr)
 	}
 }
+
+// --- Codex plugin route (integrations-zpe) -----------------------------------
+
+// fakeSockAsPuppet records each call's argv (one per line), stdin and
+// environment under rec. With refuse set it fails the way sock v0.2.5 does
+// when it finds no puppet credential.
+func fakeSockAsPuppet(t *testing.T, refuse bool) (dir, rec string) {
+	t.Helper()
+	dir = t.TempDir()
+	rec = filepath.Join(dir, "rec")
+	if err := os.MkdirAll(rec, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := `rec="` + rec + `"
+echo call >> "$rec/calls"
+printf '%s\n' "$@" > "$rec/args"
+env > "$rec/env"
+cat > "$rec/text"
+`
+	if refuse {
+		body += "echo 'sock: send --as-puppet: no puppet credential; set SOCK_TOKEN, or run sock machine-key use or sock puppets use' >&2\nexit 1"
+	}
+	return fakeSock(t, body), rec
+}
+
+func codexPluginEnv(bin string) map[string]string {
+	return map[string]string{"PATH": bin + ":" + hookPathTail, "SOCK_TOKEN": "", "PLUGIN_ROOT": "/x/plugin", "CLAUDE_PROJECT_DIR": "/x/proj", "SOCK_ACCESS_GATE": "gate-secret", "SOCK_HOOK_TIMEOUT": fakeSockTimeout}
+}
+
+// With no SOCK_TOKEN the hook sends as the puppet the plugin's sock-mcp
+// resolves, never with a token of its own and never as the login.
+func TestCodexPluginRouteSendsAsThePluginPuppet(t *testing.T) {
+	s := newStub(t)
+	bin, rec := fakeSockAsPuppet(t, false)
+	r := runHook(t, s.URL, hookEnv{Env: codexPluginEnv(bin), Stdin: stopInput("z1", "Ship it?")}, "--stop", "--ask-now")
+	if got := readRec(t, rec, "args"); got != "send\n--as-puppet\n--project\n/x/plugin" {
+		t.Fatalf("argv %q", got)
+	}
+	if got := readRec(t, rec, "text"); got != "proj: Ship it?" {
+		t.Fatalf("stdin %q", got)
+	}
+	env := readRec(t, rec, "env")
+	for _, v := range []string{"SOCK_TOKEN=", "SOCK_URL=", "SOCK_ACCESS_GATE=", "CLAUDE_PROJECT_DIR="} {
+		if regexp.MustCompile(`(?m)^` + v).MatchString(env) {
+			t.Fatalf("%s reached sock send: the config must pick the credential and server, as for sock-mcp", v)
+		}
+	}
+	if r.Log != "" {
+		t.Fatalf("log %q", r.Log)
+	}
+}
+
+func TestCodexPluginRouteRefusalIsLoggedAndNothingElse(t *testing.T) {
+	s := newStub(t)
+	bin, rec := fakeSockAsPuppet(t, true)
+	r := runHook(t, s.URL, hookEnv{Env: codexPluginEnv(bin)}, "needs permission")
+	if r.Code != 0 {
+		t.Fatalf("exit %d", r.Code)
+	}
+	if got := readRec(t, rec, "calls"); got != "call" {
+		t.Fatalf("sock calls %q, want one", got)
+	}
+	if strings.Count(r.Log, "\n") != 1 || !strings.Contains(r.Log, "sock send exit 1: sock: send --as-puppet: no puppet credential") {
+		t.Fatalf("log %q", r.Log)
+	}
+	if len(s.Requests()) != 0 {
+		t.Fatal("a request reached the server")
+	}
+}
+
+func TestCodexPluginRouteWithSockTokenIsUnchanged(t *testing.T) {
+	s := newStub(t)
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"PLUGIN_ROOT": "/x/plugin"}}, "x")
+	if g := s.Requests(); len(g) != 1 || g[0].Auth != "Bearer "+token {
+		t.Fatalf("%+v", g)
+	}
+}
+
+func TestClaudePluginWithPluginRootIsUnchanged(t *testing.T) {
+	s := newStub(t)
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"PLUGIN_ROOT": "/x/plugin", "SOCK_TOKEN": "", "CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_other_other", "CLAUDE_PLUGIN_OPTION_SOCK_URL": s.URL}}, "x")
+	if g := s.Requests(); len(g) != 1 || g[0].Auth != "Bearer sock_pt_other_other" {
+		t.Fatalf("%+v", g)
+	}
+}
