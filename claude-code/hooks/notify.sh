@@ -50,12 +50,13 @@ else
 	token=${SOCK_TOKEN:-}
 	url=${SOCK_URL:-}
 fi
-# The Codex plugin route (PLUGIN_ROOT, no plugin option) with no SOCK_TOKEN:
-# the plugin's sock-mcp runs in PLUGIN_ROOT and resolves its credential from
+# The Codex plugin route (PLUGIN_ROOT, no plugin option): the plugin's sock-mcp
+# runs in PLUGIN_ROOT, never sees SOCK_TOKEN and resolves its credential from
 # the config file, so the CLI resolves the same one (`sock send --as-puppet`,
-# sock-cli v0.2.5), never the login token.
+# sock-cli v0.2.5), never the login token. An exported SOCK_TOKEN is ignored
+# here; it is kept in $token only for redaction.
 as_puppet=0
-if [ "$from_plugin" = 0 ] && [ -n "${PLUGIN_ROOT:-}" ] && [ -z "$token" ]; then
+if [ "$from_plugin" = 0 ] && [ -n "${PLUGIN_ROOT:-}" ]; then
 	as_puppet=1
 fi
 # No child inherits the credential: each sock call gets the one it needs. A
@@ -241,7 +242,7 @@ scrubbed() {
 
 # send_as_puppet sends $1 as the puppet the plugin's sock-mcp resolves. The
 # config file picks the server and gate as it does for sock-mcp, which never
-# sees the shell's SOCK_URL or SOCK_ACCESS_GATE, and CLAUDE_PROJECT_DIR would
+# sees the shell's SOCK_TOKEN, SOCK_URL or SOCK_ACCESS_GATE, and CLAUDE_PROJECT_DIR would
 # override --project.
 send_as_puppet() {
 	if ! command -v sock >/dev/null 2>&1; then
@@ -255,7 +256,7 @@ send_as_puppet() {
 	}
 	printf '%s' "$1" >"$work/text"
 	bounded "$work/text" /dev/null "$work/send.err" \
-		env -u SOCK_URL -u SOCK_ACCESS_GATE -u CLAUDE_PROJECT_DIR sock send --as-puppet --project "$PLUGIN_ROOT"
+		env -u SOCK_TOKEN -u SOCK_URL -u SOCK_ACCESS_GATE -u CLAUDE_PROJECT_DIR sock send --as-puppet --project "$PLUGIN_ROOT"
 	rc=$?
 	if [ "$rc" -ne 0 ]; then
 		log_line "sock send exit $rc: $(scrubbed "$work/send.err")"

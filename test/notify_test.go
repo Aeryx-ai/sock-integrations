@@ -1121,11 +1121,22 @@ func TestCodexPluginRouteRefusalIsLoggedAndNothingElse(t *testing.T) {
 	}
 }
 
-func TestCodexPluginRouteWithSockTokenIsUnchanged(t *testing.T) {
+// The plugin's sock-mcp never sees SOCK_TOKEN, so an exported one must not
+// make the hooks send as a different puppet.
+func TestCodexPluginRouteIgnoresAnExportedSockToken(t *testing.T) {
 	s := newStub(t)
-	runHook(t, s.URL, hookEnv{Env: map[string]string{"PLUGIN_ROOT": "/x/plugin"}}, "x")
-	if g := s.Requests(); len(g) != 1 || g[0].Auth != "Bearer "+token {
-		t.Fatalf("%+v", g)
+	bin, rec := fakeSockAsPuppet(t, false)
+	env := codexPluginEnv(bin)
+	env["SOCK_TOKEN"] = token
+	runHook(t, s.URL, hookEnv{Env: env}, "x")
+	if got := readRec(t, rec, "args"); got != "send\n--as-puppet\n--project\n/x/plugin" {
+		t.Fatalf("argv %q", got)
+	}
+	if e := readRec(t, rec, "env"); regexp.MustCompile(`(?m)^SOCK_TOKEN=`).MatchString(e) || strings.Contains(e, token) {
+		t.Fatal("the exported SOCK_TOKEN reached sock send")
+	}
+	if len(s.Requests()) != 0 {
+		t.Fatal("a request reached the server")
 	}
 }
 
