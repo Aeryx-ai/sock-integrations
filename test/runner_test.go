@@ -136,7 +136,7 @@ func TestRunnerClaudeArgv(t *testing.T) {
 	h := newRunnerHarness(t)
 	h.run(rnOpts{})
 	runs := h.runs()
-	want := []string{"-p", "--resume", rnSess, "--permission-mode", "plan", "--allowedTools", rnClaudeTools, "--disallowedTools", rnClaudeDenied, "--permission-prompts", "none"}
+	want := []string{"-p", "--resume", rnSess, "--permission-mode", "default", "--allowedTools", rnClaudeTools, "--disallowedTools", rnClaudeDenied, "--permission-prompts", "none"}
 	if len(runs) != 1 || !slices.Equal(runs[0].Argv, want) {
 		t.Fatalf("%+v", runs)
 	}
@@ -176,7 +176,7 @@ func TestRunnerAgentEnvironment(t *testing.T) {
 	for _, agent := range []string{"claude", "codex"} {
 		t.Run(agent, func(t *testing.T) {
 			h := newRunnerHarness(t)
-			perm := map[string]string{"claude": "plan", "codex": "read-only"}[agent]
+			perm := map[string]string{"claude": "default", "codex": "read-only"}[agent]
 			h.run(rnOpts{Env: map[string]string{"SOCK_RUNNER_AGENT": agent, "SOCK_RUNNER_PERMISSION": perm, "SOCK_RUNNER_ALLOW_BYPASS": ""}})
 			runs := h.runs()
 			if len(runs) != 1 {
@@ -427,7 +427,7 @@ func TestRunnerBadConfigExits2(t *testing.T) {
 				}
 			}
 			h.removeStub(agent)
-			perm := map[string]string{"claude": "plan", "codex": "read-only"}[agent]
+			perm := map[string]string{"claude": "default", "codex": "read-only"}[agent]
 			r := h.run(rnOpts{Env: map[string]string{"SOCK_RUNNER_AGENT": agent, "SOCK_RUNNER_PERMISSION": perm}})
 			h.wantNoRun(r, 2)
 		})

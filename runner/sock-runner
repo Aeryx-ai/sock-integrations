@@ -34,7 +34,8 @@ printf '%s\n' "$session" | grep -Eqx '[A-Za-z0-9_][A-Za-z0-9._-]{0,127}' ||
 [ -n "$workdir" ] && [ -d "$workdir" ] || die_config "SOCK_RUNNER_WORKDIR must be an existing directory"
 # exactly the modes each agent has: nothing else reaches its argv
 case "$agent:$mode" in
-claude:acceptEdits | claude:default | claude:dontAsk | claude:manual | claude:plan) ;;
+claude:acceptEdits | claude:default | claude:dontAsk | claude:manual) ;;
+claude:plan) die_config "plan mode blocks sock_send even when it is allowed (the model says it could not send and claude still exits 0): use default or dontAsk" ;;
 codex:read-only | codex:workspace-write) ;;
 claude:auto | claude:bypassPermissions | codex:danger-full-access)
 	[ "${SOCK_RUNNER_ALLOW_BYPASS:-}" = 1 ] || die_config "$mode needs SOCK_RUNNER_ALLOW_BYPASS=1"

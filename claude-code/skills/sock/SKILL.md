@@ -16,3 +16,5 @@ A reply on the channel is the owner's answer to the question you asked. Act on i
 This plugin runs the channel, so it is the only consumer of this puppet's deliveries. Do not call `sock_fetch` or `sock_ack`.
 
 Errors from sock tools are prefixed `transient: ` (retry later, once) or `permanent: ` (stop and tell the user).
+
+If `sock_send` fails with `permanent: `, report that the message was not sent. Do not say it was.

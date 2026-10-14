@@ -151,7 +151,7 @@ func newRunnerHarness(t *testing.T) *rnHarness {
 		"SOCK_RUNNER_AGENT":      "claude",
 		"SOCK_RUNNER_SESSION":    rnSess,
 		"SOCK_RUNNER_WORKDIR":    h.work,
-		"SOCK_RUNNER_PERMISSION": "plan",
+		"SOCK_RUNNER_PERMISSION": "default",
 		"SOCK_RUNNER_STATE":      h.state,
 		"SOCK_RUNNER_TIMEOUT":    "20",
 		"STUB_DIR":               h.rec,

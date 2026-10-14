@@ -170,7 +170,7 @@ func TestRunnerLedgerKeepsTheLastTwoHundred(t *testing.T) {
 
 func TestRunnerPermissionIsAnAllowlist(t *testing.T) {
 	for _, c := range []struct{ agent, mode string }{
-		{"claude", "auto"}, {"claude", "plan; id"}, {"claude", "--dangerously-skip-permissions"}, {"claude", "codex"}, {"claude", "read-only"},
+		{"claude", "auto"}, {"claude", "plan"}, {"claude", "plan; id"}, {"claude", "--dangerously-skip-permissions"}, {"claude", "codex"}, {"claude", "read-only"},
 		{"codex", "plan"}, {"codex", "--yolo"}, {"codex", "workspace-write\nx"},
 	} {
 		t.Run(c.agent+" "+c.mode, func(t *testing.T) {
@@ -180,7 +180,7 @@ func TestRunnerPermissionIsAnAllowlist(t *testing.T) {
 		})
 	}
 	for _, c := range []struct{ agent, mode string }{
-		{"claude", "acceptEdits"}, {"claude", "default"}, {"claude", "dontAsk"}, {"claude", "plan"}, {"codex", "read-only"}, {"codex", "workspace-write"},
+		{"claude", "acceptEdits"}, {"claude", "default"}, {"claude", "dontAsk"}, {"codex", "read-only"}, {"codex", "workspace-write"},
 	} {
 		t.Run("accepts "+c.agent+" "+c.mode, func(t *testing.T) {
 			h := newRunnerHarness(t)
