@@ -2,6 +2,7 @@ package test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -139,8 +140,33 @@ type hookEnv struct {
 // hookPathTail is where jq lives on this machine, after the per-run bin dir.
 const hookPathTail = "/usr/bin:/bin:/opt/homebrew/bin:/usr/local/bin"
 
+// testSession is the session id runHook gives a hook input that names none.
+const testSession = "test-session"
+
+// interactiveStdin returns the hook input with a session_id (testSession when
+// it names none, or when there is no input) and that id. Input that is not a
+// JSON object is returned as is: the hook cannot tell its session.
+func interactiveStdin(in string) (string, string) {
+	if in == "" {
+		return `{"session_id":"` + testSession + `"}`, testSession
+	}
+	var m map[string]any
+	if json.Unmarshal([]byte(in), &m) != nil {
+		return in, testSession
+	}
+	if sid, ok := m["session_id"].(string); ok {
+		return in, sid
+	}
+	m["session_id"] = testSession
+	b, _ := json.Marshal(m)
+	return string(b), testSession
+}
+
 // runHook runs the real notify.sh with a clean environment. The real sock
-// binary is on PATH unless env.Env["PATH"] overrides it.
+// binary is on PATH unless env.Env["PATH"] overrides it. By default the run is
+// an attended Claude Code session (CLAUDE_CODE_SESSION_ATTENDED=1 and
+// CLAUDE_CODE_SESSION_ID matching the input's session_id), the one kind that
+// may message the owner; a test overrides either variable to be another kind.
 func runHook(t *testing.T, stubURL string, he hookEnv, args ...string) result {
 	t.Helper()
 	tmp := t.TempDir()
@@ -155,14 +181,20 @@ func runHook(t *testing.T, stubURL string, he hookEnv, args ...string) result {
 	if state == "" {
 		state = filepath.Join(tmp, "state")
 	}
+	stdin, sid := he.Stdin, testSession
+	if he.StdinFile == nil {
+		stdin, sid = interactiveStdin(he.Stdin)
+	}
 	env := map[string]string{
-		"PATH":              binDir + ":" + hookPathTail,
-		"HOME":              filepath.Join(tmp, "home"),
-		"XDG_STATE_HOME":    state,
-		"TMPDIR":            tmp,
-		"SOCK_URL":          stubURL,
-		"SOCK_TOKEN":        token,
-		"SOCK_HOOK_TIMEOUT": "2",
+		"CLAUDE_CODE_SESSION_ATTENDED": "1",
+		"CLAUDE_CODE_SESSION_ID":       sid,
+		"PATH":                         binDir + ":" + hookPathTail,
+		"HOME":                         filepath.Join(tmp, "home"),
+		"XDG_STATE_HOME":               state,
+		"TMPDIR":                       tmp,
+		"SOCK_URL":                     stubURL,
+		"SOCK_TOKEN":                   token,
+		"SOCK_HOOK_TIMEOUT":            "2",
 	}
 	for k, v := range he.Env {
 		env[k] = v
@@ -182,8 +214,8 @@ func runHook(t *testing.T, stubURL string, he hookEnv, args ...string) result {
 	}
 	if he.StdinFile != nil {
 		cmd.Stdin = he.StdinFile
-	} else if he.Stdin != "" {
-		cmd.Stdin = strings.NewReader(he.Stdin)
+	} else {
+		cmd.Stdin = strings.NewReader(stdin)
 	}
 	var stderr strings.Builder
 	cmd.Stderr = &stderr

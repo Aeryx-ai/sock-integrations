@@ -2,7 +2,7 @@
 # Messages the puppet's owner through the sock CLI, saying what the session
 # needs. Modes:
 #   --permission   a Notification permission_prompt: forwards the notification
-#                  text, which names the tool ("needs permission" without jq)
+#                  text, which names the tool ("needs permission" when it has none)
 #   --stop         a Stop: records the ask in the last assistant message (the
 #                  trailing question or decision, code blocks dropped) for
 #                  --idle; sends nothing unless notify_on_stop is on
@@ -14,6 +14,8 @@
 #   <phrase>       sends "<project>: <phrase>" (the v1 shape, kept for callers)
 # The owner asked for the ask itself in these messages (2026-10-13), which is
 # why assistant text now leaves the machine; it is capped and stripped of code.
+# Only a session the hook can show is interactive sends, and at most once an
+# hour per project (2026-10-14: dozens of messages overnight from agents).
 # Always exits 0: a hook must never block or fail the agent.
 set -u
 
@@ -302,6 +304,119 @@ send_as_puppet() {
 	[ "$rc" -eq 0 ]
 }
 
+# session_kind prints interactive, background or unknown. Only a positive
+# signal is interactive:
+#   Claude Code  CLAUDE_CODE_SESSION_ATTENDED=1 with CLAUDE_CODE_SESSION_ID equal
+#                to the input's session_id (0 is -p, the SDK, --bg and teammates)
+#   Codex        the transcript's session_meta for this session_id has source
+#                "cli" (the TUI) or "vscode" (the app); "exec" and a subagent
+#                object are background
+# agent_id in the input (a subagent) and SOCK_HEADLESS (set by sock-runner) are
+# background; anything else is unknown.
+session_kind() {
+	if [ -n "${SOCK_HEADLESS:-}" ]; then
+		echo background
+		return
+	fi
+	local sid
+	sid=$(field session_id)
+	if [ -z "$sid" ]; then
+		echo unknown
+		return
+	fi
+	if [ -n "$(field agent_id)" ]; then
+		echo background
+		return
+	fi
+	if [ "${CLAUDE_CODE_SESSION_ID:-}" = "$sid" ]; then
+		case ${CLAUDE_CODE_SESSION_ATTENDED:-} in
+		1) echo interactive ;;
+		0) echo background ;;
+		*) echo unknown ;;
+		esac
+		return
+	fi
+	local transcript source=
+	transcript=$(field transcript_path)
+	if [ -n "$transcript" ] && [ -f "$transcript" ] && [ -r "$transcript" ]; then
+		source=$(head -c 4194304 <"$transcript" | head -n 1 | jq -r --arg s "$sid" 'select(.type == "session_meta" and .payload.id == $s) | .payload.source | if type == "string" then . elif type == "object" and has("subagent") then "subagent" else empty end' 2>/dev/null)
+	fi
+	case $source in
+	cli | vscode) echo interactive ;;
+	exec | subagent) echo background ;;
+	*) echo unknown ;;
+	esac
+}
+
+# The last send for this project, as epoch seconds, one file per project name.
+throttle_dir=$state_dir/throttle
+throttle_file=$throttle_dir/$project.at
+prev_send=
+
+# reserve_hour takes this project's hour: it returns 0 and records now as the
+# last send when none is recorded in the past hour, else 1. The check and the
+# record run under a mkdir lock, so two hooks firing together cannot both send.
+reserve_hour() {
+	local lock=$throttle_file.lock now last='' rc=1
+	(
+		umask 077
+		mkdir -p "$throttle_dir"
+	) 2>/dev/null
+	if ! mkdir "$lock" 2>/dev/null; then
+		# A lock a killed hook left behind goes after a minute.
+		[ -z "$(find "$lock" -maxdepth 0 -mmin +1 2>/dev/null)" ] || rmdir "$lock" 2>/dev/null
+		mkdir "$lock" 2>/dev/null || return 1
+	fi
+	now=$(date +%s)
+	[ -f "$throttle_file" ] && IFS= read -r last <"$throttle_file"
+	case $last in '' | *[!0-9]*) last=0 ;; esac
+	if [ $((now - last)) -lt 0 ] || [ $((now - last)) -ge 3600 ]; then
+		prev_send=$last
+		(
+			umask 077
+			printf '%s\n' "$now" >"$throttle_file.$$" && mv -f "$throttle_file.$$" "$throttle_file"
+		) 2>/dev/null && rc=0
+	fi
+	rmdir "$lock" 2>/dev/null
+	return "$rc"
+}
+
+# release_hour gives back the hour a failed send reserved.
+release_hour() {
+	(
+		umask 077
+		if [ "$prev_send" = 0 ]; then
+			rm -f "$throttle_file"
+		else
+			printf '%s\n' "$prev_send" >"$throttle_file.$$" && mv -f "$throttle_file.$$" "$throttle_file"
+		fi
+	) 2>/dev/null
+	return 0
+}
+
+# send_owner sends $1 when this session may message the owner now, logging a
+# fixed outcome, never the text, when it may not.
+send_owner() {
+	case $(session_kind) in
+	interactive) ;;
+	background)
+		log_line "quiet: background"
+		return 1
+		;;
+	*)
+		log_line "quiet: unknown session"
+		return 1
+		;;
+	esac
+	if ! reserve_hour; then
+		log_line "quiet: throttled"
+		return 1
+	fi
+	send_text "$1" && return 0
+	release_hour
+	return 1
+}
+
 send_text() {
 	# $1 is the message body; the project name is prefixed here.
 	local text
@@ -409,7 +524,7 @@ send_ask() {
 	if [ -n "$hash" ] && [ -f "$asks/$session.sent" ] && [ "$(cat "$asks/$session.sent" 2>/dev/null)" = "$hash" ]; then
 		return 0
 	fi
-	if send_text "$ask" && [ -n "$hash" ]; then
+	if send_owner "$ask" && [ -n "$hash" ]; then
 		(
 			umask 077
 			mkdir -p "$asks" && printf '%s\n' "$hash" >"$asks/$session.sent.$$" && mv "$asks/$session.sent.$$" "$asks/$session.sent"
@@ -437,14 +552,10 @@ remember_ask() {
 
 case $mode in
 permission)
-	msg=
-	if [ "$have_jq" = 1 ]; then
-		msg=$(field message | LC_ALL=C tr -d '\000-\037\177' | redact_stream | utf8_cap 300)
-	else
-		log_line "jq not found: sending the fixed phrase"
-	fi
+	# Without jq the session cannot be read, so send_owner stays quiet.
+	msg=$(field message | LC_ALL=C tr -d '\000-\037\177' | redact_stream | utf8_cap 300)
 	[ -n "$msg" ] || msg="needs permission"
-	send_text "$msg"
+	send_owner "$msg"
 	exit 0
 	;;
 stop)
@@ -457,7 +568,7 @@ stop)
 	remember_ask "$ask"
 	if [ "$ask_now" = 1 ]; then send_ask "$ask"; fi
 	case "${CLAUDE_PLUGIN_OPTION_NOTIFY_ON_STOP:-}:${SOCK_NOTIFY_ON_STOP:-}" in
-	true:* | *:1) send_text "finished a turn" ;;
+	true:* | *:1) send_owner "finished a turn" ;;
 	esac
 	exit 0
 	;;
@@ -486,5 +597,5 @@ esac
 
 # No mode: the v1 shape, a fixed phrase.
 [ -n "$phrase" ] || exit 0
-send_text "$phrase"
+send_owner "$phrase"
 exit 0

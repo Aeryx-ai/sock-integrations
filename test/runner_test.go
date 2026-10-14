@@ -200,6 +200,11 @@ func TestRunnerAgentEnvironment(t *testing.T) {
 			if strings.Contains(a.Env, rnTextSentinel) {
 				t.Fatal("text in env")
 			}
+			// The agent's hooks must stay quiet: a resumed Codex session keeps the
+			// source it was created with, which can be the TUI's.
+			if !strings.Contains("\n"+a.Env+"\n", "\nSOCK_HEADLESS=1\n") {
+				t.Fatal("SOCK_HEADLESS=1 not in agent env")
+			}
 		})
 	}
 }

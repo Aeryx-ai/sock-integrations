@@ -103,6 +103,8 @@ for n in $(env | sed -n 's/^\(SOCK_RUNNER_[A-Za-z0-9_]*\)=.*/\1/p') SOCK_MESSAGE
 	scrub="$scrub -u $n"
 done
 if [ "$agent" = claude ]; then scrub="$scrub -u SOCK_TOKEN -u SOCK_URL"; fi
+# SOCK_HEADLESS keeps the agent's notify.sh hooks quiet: the run answers the
+# owner with sock_send, and a resumed Codex session keeps the TUI's source.
 
 cd "$workdir" || {
 	log_line "agent exit 71"
@@ -111,8 +113,8 @@ cd "$workdir" || {
 set -m
 # shellcheck disable=SC2086 # $scrub is a list of -u NAME pairs
 case $agent in
-claude) env $scrub claude -p --resume "$session" --permission-mode "$mode" --allowedTools "$claude_tools" --disallowedTools "$claude_denied" --permission-prompts none <"$prompt" >/dev/null 2>/dev/null & ;;
-codex) env $scrub codex exec --sandbox "$mode" resume "$session" - <"$prompt" >/dev/null 2>/dev/null & ;;
+claude) env $scrub SOCK_HEADLESS=1 claude -p --resume "$session" --permission-mode "$mode" --allowedTools "$claude_tools" --disallowedTools "$claude_denied" --permission-prompts none <"$prompt" >/dev/null 2>/dev/null & ;;
+codex) env $scrub SOCK_HEADLESS=1 codex exec --sandbox "$mode" resume "$session" - <"$prompt" >/dev/null 2>/dev/null & ;;
 esac
 agent_pgid=$!
 (

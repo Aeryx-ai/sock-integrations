@@ -15,15 +15,16 @@ echo "1/3 sock send"
 "$sock_bin" send "smoke: cli"
 
 echo "2/3 notify.sh"
-log=${XDG_STATE_HOME:-$HOME/.local/state}/sock-integrations/hook.log
-before=0
-[ -f "$log" ] && before=$(wc -l <"$log")
-CLAUDE_PROJECT_DIR=/x/smoke "$here/claude-code/hooks/notify.sh" "needs permission"
-after=0
-[ -f "$log" ] && after=$(wc -l <"$log")
-if [ "$after" -gt "$before" ]; then
+# As an attended Claude Code session, with a state dir of its own so the hourly
+# throttle of an earlier run cannot hold this send back.
+state=$(mktemp -d)
+trap 'rm -rf "$state"' EXIT
+log=$state/sock-integrations/hook.log
+printf '{"session_id":"smoke"}' | XDG_STATE_HOME=$state CLAUDE_CODE_SESSION_ATTENDED=1 CLAUDE_CODE_SESSION_ID=smoke CLAUDE_PROJECT_DIR=/x/smoke \
+	"$here/claude-code/hooks/notify.sh" "needs permission"
+if [ -s "$log" ]; then
 	echo "hook log grew ($log):" >&2
-	tail -n "$((after - before))" "$log" >&2
+	cat "$log" >&2
 	exit 1
 fi
 

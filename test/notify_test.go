@@ -205,8 +205,9 @@ func TestStdinHeldOpenIsBounded(t *testing.T) {
 	if r.Code != 0 || r.Elapsed.Seconds() < 1.5 || r.Elapsed.Seconds() > 5 {
 		t.Fatalf("%+v", r)
 	}
-	if n := len(s.Requests()); n != 1 {
-		t.Fatalf("sent %d", n)
+	// No input, so no session: quiet (rule 8).
+	if n := len(s.Requests()); n != 0 || !strings.Contains(r.Log, "quiet: unknown session") {
+		t.Fatalf("sent %d, log %q", n, r.Log)
 	}
 }
 
@@ -494,6 +495,7 @@ func TestANewAskAfterTheSameSessionIsSent(t *testing.T) {
 	state := t.TempDir()
 	runHook(t, s.URL, hookEnv{Stdin: stopInput("s3", "First question?"), State: state}, "--stop")
 	runHook(t, s.URL, hookEnv{Stdin: idleInput("s3"), State: state}, "--idle")
+	expireThrottle(t, state)
 	runHook(t, s.URL, hookEnv{Stdin: stopInput("s3", "Second question?"), State: state}, "--stop")
 	runHook(t, s.URL, hookEnv{Stdin: idleInput("s3"), State: state}, "--idle")
 	g := s.Requests()
@@ -558,7 +560,7 @@ func binWithoutJq(t *testing.T) string {
 	if err := os.Symlink(sockBin(t), filepath.Join(dir, "sock")); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"env", "bash", "sh", "tr", "cut", "basename", "awk", "sed", "head", "tail", "shasum", "sha256sum", "find", "wc", "mktemp", "cat", "mkdir", "date", "sleep", "kill", "pkill", "rm"} {
+	for _, name := range []string{"env", "bash", "sh", "tr", "cut", "basename", "awk", "sed", "head", "tail", "shasum", "sha256sum", "find", "wc", "mktemp", "cat", "mkdir", "rmdir", "mv", "date", "sleep", "kill", "pkill", "rm"} {
 		for _, d := range []string{"/usr/bin", "/bin"} {
 			if _, err := os.Stat(filepath.Join(d, name)); err == nil {
 				if err := os.Symlink(filepath.Join(d, name), filepath.Join(dir, name)); err != nil {
@@ -571,19 +573,21 @@ func binWithoutJq(t *testing.T) string {
 	return dir
 }
 
-func TestWithoutJqPermissionKeepsThePhraseAndIdleStaysQuiet(t *testing.T) {
+// Without jq the session cannot be read, so a permission prompt is quiet
+// (rule 8); the idle prompt was already.
+func TestWithoutJqPermissionAndIdleStayQuiet(t *testing.T) {
 	s := newStub(t)
 	env := map[string]string{"PATH": binWithoutJq(t), "CLAUDE_PROJECT_DIR": "/x/proj"}
 	in := hookJSON(map[string]any{"hook_event_name": "Notification", "notification_type": "permission_prompt", "message": "Claude needs your permission to use Bash"})
 	r := runHook(t, s.URL, hookEnv{Env: env, Stdin: in}, "--permission")
-	if g := s.Requests(); len(g) != 1 || g[0].Text != "proj: needs permission" {
+	if g := s.Requests(); len(g) != 0 {
 		t.Fatalf("%+v", g)
 	}
-	if !strings.Contains(r.Log, "jq") {
+	if !strings.Contains(r.Log, "quiet: unknown session") {
 		t.Fatalf("log %q", r.Log)
 	}
 	runHook(t, s.URL, hookEnv{Env: env, Stdin: idleInput("s8")}, "--idle")
-	if g := s.Requests(); len(g) != 1 {
+	if g := s.Requests(); len(g) != 0 {
 		t.Fatalf("idle without jq sent: %+v", g)
 	}
 }
@@ -615,6 +619,7 @@ func TestANewTurnWithTheSameAskIsSentAgain(t *testing.T) {
 		runHook(t, s.URL, hookEnv{Stdin: stopInput("s10", "Proceed?"), State: state}, "--stop")
 		runHook(t, s.URL, hookEnv{Stdin: idleInput("s10"), State: state}, "--idle")
 		runHook(t, s.URL, hookEnv{Stdin: idleInput("s10"), State: state}, "--idle")
+		expireThrottle(t, state)
 	}
 	if g := s.Requests(); len(g) != 2 {
 		t.Fatalf("two turns asked the same thing, %d sent: %+v", len(g), g)
@@ -638,6 +643,7 @@ func TestWithoutAHashToolNothingIsSuppressed(t *testing.T) {
 	state := t.TempDir()
 	env := map[string]string{"PATH": dir}
 	runHook(t, s.URL, hookEnv{Env: env, Stdin: stopInput("s11", "First?"), State: state}, "--stop", "--ask-now")
+	expireThrottle(t, state)
 	runHook(t, s.URL, hookEnv{Env: env, Stdin: stopInput("s11", "Second?"), State: state}, "--stop", "--ask-now")
 	if g := s.Requests(); len(g) != 2 {
 		t.Fatalf("%+v", g)
@@ -1280,5 +1286,289 @@ func TestCodexRouteIgnoresAnAmbientPluginOption(t *testing.T) {
 	}
 	if e := readRec(t, rec, "env"); strings.Contains(e, "sock_pt_other_other") {
 		t.Fatal("the plugin option reached sock send")
+	}
+}
+
+// --- only an interactive session messages the owner, once per project per hour
+// (notify.sh rule 8). The owner got dozens of messages overnight.
+
+const quietAsk = "Deploy the canary now?"
+
+// codexTranscript writes a Codex rollout file whose first line is the
+// session_meta Codex writes (live probe, Codex 0.162.1) and returns its path.
+func codexTranscript(t *testing.T, sid string, source any) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "rollout-"+sid+".jsonl")
+	meta := hookJSON(map[string]any{"type": "session_meta", "payload": map[string]any{"id": sid, "session_id": sid, "originator": "codex-tui", "source": source, "base_instructions": strings.Repeat("b", 70000)}})
+	turn := hookJSON(map[string]any{"type": "turn_context", "payload": map[string]any{"approval_policy": "on-request"}})
+	if err := os.WriteFile(p, []byte(meta+"\n"+turn+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// codexStop is a Codex Stop input (live probe, Codex 0.162.1).
+func codexStop(sid, transcript string) string {
+	return hookJSON(map[string]any{"session_id": sid, "turn_id": "t1", "transcript_path": transcript, "cwd": "/x/proj", "hook_event_name": "Stop", "model": "gpt", "permission_mode": "default", "stop_hook_active": false, "last_assistant_message": quietAsk})
+}
+
+// noClaude clears the attended Claude Code session runHook sets up by default.
+func noClaude(extra map[string]string) map[string]string {
+	env := map[string]string{"CLAUDE_CODE_SESSION_ATTENDED": "", "CLAUDE_CODE_SESSION_ID": "", "CLAUDE_PROJECT_DIR": "/x/proj"}
+	for k, v := range extra {
+		env[k] = v
+	}
+	return env
+}
+
+func permissionInput(sid string, extra map[string]any) string {
+	m := map[string]any{"session_id": sid, "hook_event_name": "Notification", "notification_type": "permission_prompt", "message": "Claude needs your permission to use Bash"}
+	for k, v := range extra {
+		m[k] = v
+	}
+	return hookJSON(m)
+}
+
+// assertQuiet fails unless the run sent nothing and logged exactly the outcome,
+// never the text.
+func assertQuiet(t *testing.T, name string, s *stub, r result, outcome string) {
+	t.Helper()
+	if g := s.Requests(); len(g) != 0 {
+		t.Fatalf("%s: sent %+v", name, g)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(r.Log), " "+outcome) || strings.Count(r.Log, "\n") != 1 {
+		t.Fatalf("%s: log %q, want one line %q", name, r.Log, outcome)
+	}
+	for _, text := range []string{quietAsk, "needs your permission", "Bash"} {
+		if strings.Contains(r.Log, text) {
+			t.Fatalf("%s: text %q in the log %q", name, text, r.Log)
+		}
+	}
+}
+
+func TestBackgroundSessionsAreQuiet(t *testing.T) {
+	cases := []struct {
+		name  string
+		env   func(t *testing.T) map[string]string
+		stdin func(t *testing.T) string
+		args  []string
+	}{
+		{"claude -p", func(*testing.T) map[string]string {
+			return map[string]string{"CLAUDE_CODE_SESSION_ATTENDED": "0", "CLAUDE_CODE_SESSION_ID": "s1", "CLAUDE_CODE_ENTRYPOINT": "sdk-cli"}
+		}, func(*testing.T) string { return stopInput("s1", quietAsk) }, []string{"--stop", "--ask-now"}},
+		{"claude subagent permission prompt", nil, func(*testing.T) string {
+			return permissionInput("s1", map[string]any{"agent_id": "a79f", "agent_type": "general-purpose"})
+		}, []string{"--permission"}},
+		{"codex exec", func(*testing.T) map[string]string { return noClaude(nil) }, func(t *testing.T) string {
+			return codexStop("c1", codexTranscript(t, "c1", "exec"))
+		}, []string{"--stop", "--ask-now"}},
+		{"codex subagent", func(*testing.T) map[string]string { return noClaude(nil) }, func(t *testing.T) string {
+			return codexStop("c1", codexTranscript(t, "c1", map[string]any{"subagent": map[string]any{"other": "guardian"}}))
+		}, []string{"--stop", "--ask-now"}},
+		{"sock-runner resuming a TUI session", func(*testing.T) map[string]string { return noClaude(map[string]string{"SOCK_HEADLESS": "1"}) }, func(t *testing.T) string {
+			return codexStop("c1", codexTranscript(t, "c1", "cli"))
+		}, []string{"--stop", "--ask-now"}},
+		{"sock-runner under claude", func(*testing.T) map[string]string { return map[string]string{"SOCK_HEADLESS": "1"} }, func(*testing.T) string {
+			return stopInput("s1", quietAsk)
+		}, []string{"--stop", "--ask-now"}},
+	}
+	for _, c := range cases {
+		s := newStub(t)
+		var env map[string]string
+		if c.env != nil {
+			env = c.env(t)
+		}
+		r := runHook(t, s.URL, hookEnv{Env: env, Stdin: c.stdin(t)}, c.args...)
+		assertQuiet(t, c.name, s, r, "quiet: background")
+	}
+}
+
+func TestUnknownSessionIsQuiet(t *testing.T) {
+	cases := []struct {
+		name  string
+		env   func(t *testing.T) map[string]string
+		stdin func(t *testing.T) string
+	}{
+		{"no signal at all", func(*testing.T) map[string]string { return noClaude(nil) }, func(*testing.T) string { return stopInput("s1", quietAsk) }},
+		{"attended env of another session", func(*testing.T) map[string]string {
+			return map[string]string{"CLAUDE_CODE_SESSION_ID": "other"}
+		}, func(*testing.T) string { return stopInput("s1", quietAsk) }},
+		{"attended not set", func(*testing.T) map[string]string {
+			return map[string]string{"CLAUDE_CODE_SESSION_ATTENDED": "", "CLAUDE_CODE_SESSION_ID": "s1"}
+		}, func(*testing.T) string { return stopInput("s1", quietAsk) }},
+		{"attended not 0 or 1", func(*testing.T) map[string]string {
+			return map[string]string{"CLAUDE_CODE_SESSION_ATTENDED": "yes", "CLAUDE_CODE_SESSION_ID": "s1"}
+		}, func(*testing.T) string { return stopInput("s1", quietAsk) }},
+		{"codex source not recognized", func(*testing.T) map[string]string { return noClaude(nil) }, func(t *testing.T) string {
+			return codexStop("c1", codexTranscript(t, "c1", "app-server"))
+		}},
+		{"codex transcript of another session", func(*testing.T) map[string]string { return noClaude(nil) }, func(t *testing.T) string {
+			return codexStop("c1", codexTranscript(t, "c2", "cli"))
+		}},
+		{"codex transcript missing", func(*testing.T) map[string]string { return noClaude(nil) }, func(t *testing.T) string {
+			return codexStop("c1", filepath.Join(t.TempDir(), "gone.jsonl"))
+		}},
+	}
+	for _, c := range cases {
+		s := newStub(t)
+		r := runHook(t, s.URL, hookEnv{Env: c.env(t), Stdin: c.stdin(t)}, "--stop", "--ask-now")
+		assertQuiet(t, c.name, s, r, "quiet: unknown session")
+	}
+	// Input that is not JSON names no session.
+	s := newStub(t)
+	r := runHook(t, s.URL, hookEnv{Stdin: "not json"}, "--permission")
+	assertQuiet(t, "no session id", s, r, "quiet: unknown session")
+	// Without jq the hook cannot read the session: the permission prompt is quiet.
+	s = newStub(t)
+	r = runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": binWithoutJq(t)}, Stdin: permissionInput(testSession, nil)}, "--permission")
+	if g := s.Requests(); len(g) != 0 || !strings.Contains(r.Log, "quiet: unknown session") {
+		t.Fatalf("no jq: sent %+v, log %q", g, r.Log)
+	}
+}
+
+func TestInteractiveCodexSessionsSend(t *testing.T) {
+	for _, source := range []string{"cli", "vscode"} {
+		s := newStub(t)
+		r := runHook(t, s.URL, hookEnv{Env: noClaude(nil), Stdin: codexStop("c1", codexTranscript(t, "c1", source))}, "--stop", "--ask-now")
+		if g := s.Requests(); len(g) != 1 || g[0].Text != "proj: "+quietAsk || r.Log != "" {
+			t.Fatalf("%s: %+v log %q", source, g, r.Log)
+		}
+	}
+}
+
+// throttleFile is where notify.sh records the last send for a project.
+func throttleFile(state, project string) string {
+	return filepath.Join(state, "sock-integrations", "throttle", project+".at")
+}
+
+// expireThrottle moves every project's last send back past the hour.
+func expireThrottle(t *testing.T, state string) {
+	t.Helper()
+	files, _ := filepath.Glob(filepath.Join(state, "sock-integrations", "throttle", "*.at"))
+	for _, f := range files {
+		if err := os.WriteFile(f, fmt.Appendf(nil, "%d\n", time.Now().Unix()-3601), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestInteractiveSendsOnceAnHour(t *testing.T) {
+	s := newStub(t)
+	state := t.TempDir()
+	env := map[string]string{"CLAUDE_PROJECT_DIR": "/x/proj"}
+	runHook(t, s.URL, hookEnv{Env: env, Stdin: stopInput("s1", "First ask?"), State: state}, "--stop", "--ask-now")
+	if g := s.Requests(); len(g) != 1 || g[0].Text != "proj: First ask?" {
+		t.Fatalf("%+v", g)
+	}
+	r := runHook(t, s.URL, hookEnv{Env: env, Stdin: stopInput("s1", quietAsk), State: state}, "--stop", "--ask-now")
+	if g := s.Requests(); len(g) != 1 {
+		t.Fatalf("a second ask inside the hour was sent: %+v", g)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(r.Log), " quiet: throttled") || strings.Contains(r.Log, quietAsk) {
+		t.Fatalf("log %q", r.Log)
+	}
+	fi, err := os.Stat(throttleFile(state, "proj"))
+	if err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("throttle record %v %v", fi, err)
+	}
+	di, err := os.Stat(filepath.Dir(throttleFile(state, "proj")))
+	if err != nil || di.Mode().Perm() != 0o700 {
+		t.Fatalf("throttle dir %v %v", di, err)
+	}
+}
+
+func TestPermissionPromptInsideTheHourIsQuiet(t *testing.T) {
+	s := newStub(t)
+	state := t.TempDir()
+	env := map[string]string{"CLAUDE_PROJECT_DIR": "/x/proj"}
+	runHook(t, s.URL, hookEnv{Env: env, Stdin: stopInput("s1", "First ask?"), State: state}, "--stop", "--ask-now")
+	r := runHook(t, s.URL, hookEnv{Env: env, Stdin: permissionInput("s1", nil), State: state}, "--permission")
+	if g := s.Requests(); len(g) != 1 {
+		t.Fatalf("permission prompt inside the hour was sent: %+v", g)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(r.Log), " quiet: throttled") || strings.Contains(r.Log, "Bash") {
+		t.Fatalf("log %q", r.Log)
+	}
+}
+
+func TestAnotherProjectIsNotThrottled(t *testing.T) {
+	s := newStub(t)
+	state := t.TempDir()
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PROJECT_DIR": "/x/proj"}, Stdin: stopInput("s1", quietAsk), State: state}, "--stop", "--ask-now")
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PROJECT_DIR": "/x/other"}, Stdin: stopInput("s2", quietAsk), State: state}, "--stop", "--ask-now")
+	if g := s.Requests(); len(g) != 2 || g[1].Text != "other: "+quietAsk {
+		t.Fatalf("%+v", g)
+	}
+}
+
+func TestAfterTheHourItSendsAgain(t *testing.T) {
+	s := newStub(t)
+	state := t.TempDir()
+	env := map[string]string{"CLAUDE_PROJECT_DIR": "/x/proj"}
+	send := func(ask string) result {
+		return runHook(t, s.URL, hookEnv{Env: env, Stdin: stopInput("s1", ask), State: state}, "--stop", "--ask-now")
+	}
+	send("First ask?")
+	at := func(ago int64) {
+		if err := os.WriteFile(throttleFile(state, "proj"), fmt.Appendf(nil, "%d\n", time.Now().Unix()-ago), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	at(3590)
+	if r := send("Still inside?"); len(s.Requests()) != 1 || !strings.Contains(r.Log, "quiet: throttled") {
+		t.Fatalf("sent inside the hour: %+v", s.Requests())
+	}
+	at(3601)
+	send("Past the hour?")
+	if g := s.Requests(); len(g) != 2 || g[1].Text != "proj: Past the hour?" {
+		t.Fatalf("%+v", g)
+	}
+}
+
+// A send that fails does not use up the hour.
+func TestAFailedSendKeepsTheHour(t *testing.T) {
+	s := newStub(t)
+	state := t.TempDir()
+	s.setFail(func(int) error { return tokenInvalid() })
+	runHook(t, s.URL, hookEnv{Stdin: stopInput("s1", "First ask?"), State: state}, "--stop", "--ask-now")
+	s.setFail(nil)
+	runHook(t, s.URL, hookEnv{Stdin: stopInput("s1", "Second ask?"), State: state}, "--stop", "--ask-now")
+	if g := s.Requests(); len(g) != 2 || !strings.HasSuffix(g[1].Text, "Second ask?") {
+		t.Fatalf("%+v", g)
+	}
+}
+
+// Rule 8c: a reply to the owner is the model's sock_send through sock-mcp. No
+// hook runs on PreToolUse or PostToolUse, where it could block or count one,
+// and every hook is async, so none can hold up the turn that replies.
+func TestHooksNeverTouchSockSend(t *testing.T) {
+	allowed := map[string]bool{"Notification": true, "Stop": true, "PermissionRequest": true}
+	for _, rel := range []string{"claude-code/hooks/hooks.json", "hooks/hooks.json", "codex/hooks.json"} {
+		b, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var f struct {
+			Hooks map[string][]struct {
+				Hooks []struct {
+					Async bool `json:"async"`
+				} `json:"hooks"`
+			} `json:"hooks"`
+		}
+		if err := json.Unmarshal(b, &f); err != nil {
+			t.Fatalf("%s: %v", rel, err)
+		}
+		for event, groups := range f.Hooks {
+			if !allowed[event] {
+				t.Fatalf("%s: hook on %s", rel, event)
+			}
+			for _, g := range groups {
+				for _, h := range g.Hooks {
+					if !h.Async {
+						t.Fatalf("%s: %s hook is not async", rel, event)
+					}
+				}
+			}
+		}
 	}
 }
