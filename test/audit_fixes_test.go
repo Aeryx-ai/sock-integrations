@@ -1,10 +1,12 @@
 package test
 
 import (
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // wrapTools puts a wrapper for each tool first on PATH: it appends its own
@@ -127,5 +129,29 @@ func TestBridgeCatchUpIgnoresAQuotedTag(t *testing.T) {
 	}
 	if n := len(h.api.sentBodies()); n != 1 {
 		t.Fatalf("%d user.messages posted, want 1", n)
+	}
+}
+
+// M3: a Retry-After past 30 s is honored, bounded only by the time left
+func TestBridgeRetryAfterIsNotCappedAtThirtySeconds(t *testing.T) {
+	h := newBridgeHarness(t)
+	h.dropThenHistory(textEvent("agent.message", "evt_a1", bnAnswer),
+		map[string]any{"type": "session.status_idle", "id": "evt_i1", "stop_reason": map[string]any{"type": "end_turn"}})
+	h.api.set(func(f *fakeMA) { f.status["list"] = []int{429}; f.retryAft = "36" })
+	r := h.run(rnOpts{Env: map[string]string{"SOCK_BRIDGE_TIMEOUT": "60"}})
+	if r.Code != 0 || len(h.sends()) != 1 || r.Elapsed < 35*time.Second {
+		t.Fatalf("exit %d after %v, %d sends", r.Code, r.Elapsed, len(h.sends()))
+	}
+}
+
+// L1: an HTTP-date Retry-After is GMT whatever the local zone
+func TestBridgeRetryAfterDateIsReadAsGMT(t *testing.T) {
+	h := newBridgeHarness(t)
+	when := time.Now().Add(5 * time.Second).UTC().Format(http.TimeFormat)
+	h.api.set(func(f *fakeMA) { f.status["send"] = []int{429}; f.retryAft = when })
+	h.script(agentMsg(bnAnswer), idle("end_turn"))
+	r := h.run(rnOpts{Env: map[string]string{"TZ": "Europe/Berlin", "SOCK_BRIDGE_TIMEOUT": "60"}})
+	if r.Code != 0 || len(h.sends()) != 1 || r.Elapsed < 3*time.Second || r.Elapsed > 20*time.Second {
+		t.Fatalf("Retry-After %q: exit %d after %v, %d sends", when, r.Code, r.Elapsed, len(h.sends()))
 	}
 }
