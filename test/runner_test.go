@@ -327,6 +327,63 @@ func TestRunnerIDMismatchDropped(t *testing.T) {
 	}
 }
 
+// A cached owner is used only while fresh and only when it is a UUID; an
+// expired or tampered cache falls back to whoami rather than being trusted.
+func TestRunnerOwnerCacheExpiresAndRejectsTampering(t *testing.T) {
+	rnRunnerPath(t)
+	write := func(h *rnHarness, body string) {
+		h.t.Helper()
+		if err := os.MkdirAll(h.state, 0o700); err != nil {
+			h.t.Fatal(err)
+		}
+		ents, _ := filepath.Glob(filepath.Join(h.state, "owner.*"))
+		for _, e := range ents {
+			_ = os.Remove(e)
+		}
+		// Seed the cache under the name the runner uses, learned from one real run.
+		h.run(rnOpts{})
+		ents, _ = filepath.Glob(filepath.Join(h.state, "owner.*"))
+		if len(ents) != 1 {
+			h.t.Fatalf("owner cache files: %v", ents)
+		}
+		if err := os.WriteFile(ents[0], []byte(body), 0o600); err != nil {
+			h.t.Fatal(err)
+		}
+		_ = os.Remove(filepath.Join(h.rec, "sock-token"))
+	}
+	t.Run("expired", func(t *testing.T) {
+		h := newRunnerHarness(t)
+		write(h, "1000000000 "+rnOther+"\n")
+		// A stale cache naming a non-owner must not drop the owner's message.
+		r := h.run(h.withID(2, rnOpts{}))
+		if r.Code != 0 || len(h.runs()) != 2 {
+			t.Fatalf("expired cache was trusted: %+v runs=%d", r, len(h.runs()))
+		}
+		if tok, _ := os.ReadFile(filepath.Join(h.rec, "sock-token")); len(tok) == 0 {
+			t.Fatal("whoami not called after the cache expired")
+		}
+	})
+	t.Run("tampered", func(t *testing.T) {
+		h := newRunnerHarness(t)
+		write(h, "99999999999 not-a-uuid\n")
+		r := h.run(h.withID(3, rnOpts{}))
+		if r.Code != 0 || len(h.runs()) != 2 {
+			t.Fatalf("tampered cache broke the owner path: %+v runs=%d", r, len(h.runs()))
+		}
+		if tok, _ := os.ReadFile(filepath.Join(h.rec, "sock-token")); len(tok) == 0 {
+			t.Fatal("whoami not called after a tampered cache")
+		}
+	})
+	t.Run("fresh non-owner value is honoured for its minute", func(t *testing.T) {
+		h := newRunnerHarness(t)
+		write(h, strconv.FormatInt(time.Now().Unix(), 10)+" "+rnOther+"\n")
+		r := h.run(h.withID(4, rnOpts{}))
+		if r.Code != 0 || len(h.runs()) != 1 || !strings.Contains(h.log(), "dropped: sender") {
+			t.Fatalf("fresh cache not honoured: %+v runs=%d log %q", r, len(h.runs()), h.log())
+		}
+	})
+}
+
 func TestRunnerWhoamiFailureRetries(t *testing.T) {
 	h := newRunnerHarness(t)
 	r := h.run(rnOpts{Env: map[string]string{"STUB_WHOAMI": "fail"}})
