@@ -28,3 +28,28 @@ sock listen --exec /path/to/runner/sock-runner
 
 - A fresh `CODEX_HOME` ignores `OPENAI_API_KEY`: run `codex login --with-api-key` once for the account the runner uses.
 - `codex exec` refuses a workdir that is neither a git repository nor a trusted project (`Not inside a trusted directory and --skip-git-repo-check was not specified`). Point `SOCK_RUNNER_WORKDIR` at a git repository or trust the directory in `~/.codex/config.toml`. A failed run logs only `agent exit <n>` in `runner.log`, never the agent's output: to see the message, run the same `codex exec` in the workdir by hand.
+
+# sock-bridge
+
+The `sock listen --exec` command that carries one owner reply into a Claude Managed Agents session and the agent's answer back. The spec is `docs/specs/integrations.md`, "Managed Agents bridge: sock-bridge". Needs `sock`, `curl` and `jq` on `PATH`.
+
+```sh
+export SOCK_TOKEN=sock_pt_...             # the bridge's own puppet, no other consumer
+export ANTHROPIC_API_KEY=...
+export SOCK_BRIDGE_SESSION=sesn_...       # one existing session for every conversation
+sock listen --exec /path/to/runner/sock-bridge
+```
+
+Or a session per conversation, created on first use:
+
+```sh
+export SOCK_BRIDGE_AGENT=agent_...        # instead of SOCK_BRIDGE_SESSION; both together exit 2
+export SOCK_BRIDGE_ENVIRONMENT=env_...    # required with the agent
+export SOCK_BRIDGE_AGENT_VERSION=3        # optional: pin a version, else the latest
+export SOCK_BRIDGE_BUDGET=500             # optional: a cap per session in US cents, only settable at creation
+```
+
+- The map is `sessions` in `SOCK_BRIDGE_STATE` (default `~/.local/state/sock-integrations-bridge`), one `<conversation> <session>` line each. Losing it loses nothing: the bridge finds its sessions again by their metadata (`bridge_conversation`, and `bridge_puppet`, the puppet's account id, so two bridges on one agent never share a session).
+- A session that is deleted, terminated or archived is replaced, and the owner is told `the agent's earlier session ended; this reply started a new one`.
+- Every session is billed on its own. The bridge never archives or deletes one: archive them in the console.
+- Exit 0 acknowledges, 1 retries, 2 is a configuration error. The log is `bridge.log` in the state directory, one line per message and per session step, never the text, the answer, the key or the token.
