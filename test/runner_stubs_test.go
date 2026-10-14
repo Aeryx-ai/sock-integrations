@@ -47,7 +47,8 @@ echo $$ > "$r/pid"
 cat > "$r/stdin"
 [ -n "$STUB_IGNORE_TERM" ] && trap '' TERM
 echo start >> "$STUB_DIR/events"
-if [ -n "$STUB_OUT" ]; then echo "$STUB_OUT"; echo "$STUB_OUT" >&2; fi
+if [ -n "$STUB_OUT" ]; then echo "$STUB_OUT"; fi
+if [ -n "$STUB_ERR" ]; then printf '%b\n' "$STUB_ERR" >&2; fi
 if [ -n "$STUB_MARKER" ]; then
   ( sleep "${STUB_CHILD_SLEEP:-3}"; echo x > "$STUB_MARKER" ) >/dev/null 2>&1 &
   echo $! > "$r/childpid"

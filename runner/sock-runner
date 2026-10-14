@@ -103,6 +103,8 @@ for n in $(env | sed -n 's/^\(SOCK_RUNNER_[A-Za-z0-9_]*\)=.*/\1/p') SOCK_MESSAGE
 done
 if [ "$agent" = claude ]; then scrub="$scrub -u SOCK_TOKEN -u SOCK_URL"; fi
 
+agent_err=$prompt.err
+: >"$agent_err"
 cd "$workdir" || {
 	log_line "agent exit 71"
 	exit 1
@@ -110,8 +112,8 @@ cd "$workdir" || {
 set -m
 # shellcheck disable=SC2086 # $scrub is a list of -u NAME pairs
 case $agent in
-claude) env $scrub claude -p --resume "$session" --permission-mode "$mode" --allowedTools "$claude_tools" --disallowedTools "$claude_denied" --permission-prompts none <"$prompt" >/dev/null 2>&1 & ;;
-codex) env $scrub codex exec --sandbox "$mode" resume "$session" - <"$prompt" >/dev/null 2>&1 & ;;
+claude) env $scrub claude -p --resume "$session" --permission-mode "$mode" --allowedTools "$claude_tools" --disallowedTools "$claude_denied" --permission-prompts none <"$prompt" >/dev/null 2>"$agent_err" & ;;
+codex) env $scrub codex exec --sandbox "$mode" resume "$session" - <"$prompt" >/dev/null 2>"$agent_err" & ;;
 esac
 agent_pgid=$!
 (
@@ -126,6 +128,8 @@ wait "$agent_pgid"
 code=$?
 agent_pgid=
 kill -KILL -- "-$watchdog_pgid" 2>/dev/null
+# reap it here, so a shell that announces a killed job does so into /dev/null
+{ wait "$watchdog_pgid"; } 2>/dev/null
 watchdog_pgid=
 set +m
 
@@ -138,5 +142,14 @@ if [ "$code" -eq 0 ]; then
 	log_line "ran"
 	exit 0
 fi
-log_line "agent exit $code"
+# Why it failed: the end of its stderr. Control bytes go first, then the token
+# is redacted from the whole captured text, then it is cut, so a token split by
+# a control byte or straddling the cut cannot leak a prefix (as notify.sh does).
+detail=$(tail -c 65536 "$agent_err" 2>/dev/null | LC_ALL=C tr -d '[:cntrl:]')
+if [ -n "${SOCK_TOKEN:-}" ]; then
+	detail=$(printf '%s' "$detail" | T="$SOCK_TOKEN" awk 'BEGIN { t = ENVIRON["T"] }
+		{ out = ""; while ((i = index($0, t)) > 0) { out = out substr($0, 1, i - 1) "[redacted]"; $0 = substr($0, i + length(t)) } print out $0 }')
+fi
+detail=$(printf '%s' "$detail" | tail -c 300)
+log_line "agent exit $code: $detail"
 exit 1

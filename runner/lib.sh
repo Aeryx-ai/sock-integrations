@@ -86,7 +86,7 @@ log_line() {
 # shellcheck disable=SC2329 # run by the EXIT trap
 lib_cleanup() {
 	if command -v extra_cleanup >/dev/null 2>&1; then extra_cleanup; fi
-	[ -n "$prompt" ] && rm -f "$prompt" "$prompt.timeout"
+	[ -n "$prompt" ] && rm -f "$prompt" "$prompt.timeout" "$prompt.err"
 	if [ -n "$mytoken" ] && [ "$(readlink "$lock" 2>/dev/null)" = "$mytoken" ]; then rm -f "$lock"; fi
 }
 install_traps() {

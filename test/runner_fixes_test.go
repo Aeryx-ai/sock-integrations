@@ -320,3 +320,41 @@ func mustJSON(t *testing.T, b []byte, v any) {
 		t.Fatal(err)
 	}
 }
+
+// A failed agent run says why in the log: the end of its stderr, control bytes
+// stripped and the token redacted, cut short (as notify.sh does for sock send).
+func TestRunnerLogsTheAgentsStderrTailOnFailure(t *testing.T) {
+	h := newRunnerHarness(t)
+	long := strings.Repeat("padding ", 100)
+	err := long + "Not inside a trusted directory \\033[31mred\\033[0m token " + rnTokenSentinel + " end-of-stderr"
+	r := h.run(rnOpts{Env: map[string]string{"STUB_EXIT": "1", "STUB_ERR": err}})
+	log := h.log()
+	if r.Code != 1 || !strings.Contains(log, "agent exit 1") || !strings.Contains(log, "end-of-stderr") ||
+		!strings.Contains(log, "Not inside a trusted directory") {
+		t.Fatalf("exit %d log %q", r.Code, log)
+	}
+	if strings.ContainsRune(log, 0x1b) || strings.Contains(log, rnTokenSentinel) {
+		t.Fatalf("control byte or token in the log: %q", log)
+	}
+	if len(log) > 700 {
+		t.Fatalf("log line is %d bytes", len(log))
+	}
+	h.noLeak(r)
+}
+
+func TestRunnerSuccessLogsNoAgentOutput(t *testing.T) {
+	h := newRunnerHarness(t)
+	r := h.run(rnOpts{Env: map[string]string{"STUB_ERR": rnOutSentinel}})
+	if r.Code != 0 || strings.Contains(h.log(), rnOutSentinel) {
+		t.Fatalf("exit %d log %q", r.Code, h.log())
+	}
+}
+
+// The watchdog is reaped on a normal exit without the shell announcing it.
+func TestRunnerReapingTheWatchdogPrintsNothing(t *testing.T) {
+	h := newRunnerHarness(t)
+	r := h.run(rnOpts{})
+	if r.Code != 0 || strings.Contains(r.Stderr, "Killed") || strings.Contains(r.Stderr, "Terminated") {
+		t.Fatalf("exit %d stderr %q", r.Code, r.Stderr)
+	}
+}
