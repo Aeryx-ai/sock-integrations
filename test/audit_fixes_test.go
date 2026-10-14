@@ -317,3 +317,17 @@ func TestRunnerRelativeStateDirIsResolvedAtStart(t *testing.T) {
 		t.Fatal("state was written under the workdir")
 	}
 }
+
+// sec 7: bidi controls and the line and paragraph separators go too
+func TestBridgeCleansBidiControlsAndSeparators(t *testing.T) {
+	h := newBridgeHarness(t)
+	h.script(agentMsg("abc A\u202aB\u202bC\u202cD\u202dE\u202eF\u2066G\u2067H\u2068I\u2069J\u2028K\u2029L \u2027\u202f\u2065\u206a end"), idle("end_turn"))
+	r := h.run(rnOpts{})
+	s := h.sends()
+	if r.Code != 0 || len(s) != 1 {
+		t.Fatalf("exit %d, sends %v", r.Code, s)
+	}
+	if want := "abc ABCDEFGHIJKL \u2027\u202f\u2065\u206a end"; s[0].Text != want {
+		t.Fatalf("posted %q, want %q", s[0].Text, want)
+	}
+}

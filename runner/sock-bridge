@@ -200,9 +200,14 @@ awk_cut='
 post_one() { printf '%s' "$1" | sock send >/dev/null 2>&1; }
 # clean_text removes the control characters but newline and tab: C0 (CR among
 # them), DEL, and C1 (U+0080 to U+009F, the UTF-8 pairs C2 80 to C2 9F: C2 only
-# ever leads a character, so no other one is cut)
+# ever leads a character, so no other one is cut), and the characters that can
+# reorder or break what the owner's client shows: U+2028 to U+202E (line and
+# paragraph separators, bidi embeddings and overrides, E2 80 A8 to AE) and
+# U+2066 to U+2069 (bidi isolates, E2 81 A6 to A9)
 c1=$(printf '\302[\200-\237]')
-clean_text() { LC_ALL=C tr -d '\000-\010\013-\037\177' | LC_ALL=C sed "s/$c1//g"; }
+bidi=$(printf '\342\200[\250-\256]')
+isol=$(printf '\342\201[\246-\251]')
+clean_text() { LC_ALL=C tr -d '\000-\010\013-\037\177' | LC_ALL=C sed "s/$c1//g; s/$bidi//g; s/$isol//g"; }
 post_text() {
 	mkdir -p "$parts" || exit 1
 	# Paragraphs (lines up to a blank one) go into a part whole; one too long for
