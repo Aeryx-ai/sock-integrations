@@ -86,7 +86,7 @@ func TestBridgeFixedTextsForOutcomesItCannotAnswer(t *testing.T) {
 		want   string
 		code   int
 	}{
-		{"requires_action", []any{agentMsg("PARTIAL-text"), idle("requires_action")}, "the agent is waiting for approval of a tool call", 0},
+		{"requires_action", []any{agentMsg("PARTIAL-text"), idle("requires_action")}, "the agent wants to run a tool: reply allow ", 0},
 		{"budget", []any{idle("budget_reached")}, "the agent's budget is used up", 0},
 		{"error", []any{map[string]any{"type": "session.error", "id": "evt_err", "error": map[string]any{"message": "SECRETERROR-5d"}}}, "the agent hit an error", 0},
 	}
@@ -96,7 +96,7 @@ func TestBridgeFixedTextsForOutcomesItCannotAnswer(t *testing.T) {
 			h.script(c.events...)
 			r := h.run(rnOpts{})
 			s := h.sends()
-			if r.Code != c.code || len(s) != 1 || s[0].Text != c.want {
+			if r.Code != c.code || len(s) != 1 || !strings.HasPrefix(s[0].Text, c.want) || (c.name != "requires_action" && s[0].Text != c.want) {
 				t.Fatalf("exit %d sends %v, want %q", r.Code, s, c.want)
 			}
 		})

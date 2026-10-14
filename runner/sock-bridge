@@ -66,11 +66,15 @@ ids_file=$state_dir/ids.$$
 page=$state_dir/page.$$
 hist=$state_dir/hist.$$
 parts=$state_dir/parts.$$
+tools_file=$state_dir/tools.$$
+# tool calls waiting for the owner: one "<code> <event id>" per line, tab separated
+pending_file=$state_dir/pending.$session
+blocking=
 stream_pid=
 # shellcheck disable=SC2329 # run by the library's EXIT trap
 extra_cleanup() {
 	[ -n "$stream_pid" ] && kill "$stream_pid" 2>/dev/null
-	rm -rf "$cfg" "$hdr" "$resp" "$stream_file" "$stream_hdr" "$body" "$answer" "$new" "$batch" "$ids_file" "$page" "$hist" "$parts"
+	rm -rf "$cfg" "$hdr" "$resp" "$stream_file" "$stream_hdr" "$body" "$answer" "$new" "$batch" "$ids_file" "$page" "$hist" "$parts" "$tools_file"
 }
 install_traps
 
@@ -227,6 +231,31 @@ post_text() {
 	rm -rf "$parts"
 }
 
+# ask_owner turns the tool calls the session is blocked on into a question for
+# the owner and remembers them in pending_file. The owner answers "allow <code>"
+# or "deny <code>". Only the tool's name is shown, never its input: the input can
+# hold secrets, and the owner's answer is about running that tool.
+ask_owner() {
+	: >"$pending_file.tmp"
+	lines=
+	for id in $blocking; do
+		printf '%s\n' "$id" | grep -Eqx '[A-Za-z0-9_-]{1,128}' || continue
+		code=$(printf '%08x' "$(printf '%s' "$id" | cksum | cut -d' ' -f1)" | cut -c3-8)
+		name=$(awk -F'\t' -v i="$id" '$1 == i { print $2; exit }' "$tools_file" 2>/dev/null | LC_ALL=C tr -cd 'A-Za-z0-9_.:-' | cut -c1-64)
+		[ -n "$name" ] || name="a tool"
+		printf '%s\t%s\n' "$code" "$id" >>"$pending_file.tmp"
+		lines="$lines
+the agent wants to run $name: reply allow $code or deny $code"
+	done
+	if [ -s "$pending_file.tmp" ]; then
+		mv "$pending_file.tmp" "$pending_file"
+		printf '%s' "${lines#?}"
+	else
+		rm -f "$pending_file.tmp"
+		printf '%s' "the agent is waiting for approval of a tool call"
+	fi
+}
+
 # finish posts the outcome of a turn and acknowledges: reason is the stop reason
 # (or "error"), text the agent's answer
 finish() {
@@ -238,7 +267,7 @@ finish() {
 		out="ran"
 		;;
 	requires_action)
-		text="the agent is waiting for approval of a tool call"
+		text=$(ask_owner)
 		out="waiting for approval"
 		;;
 	budget_reached)
@@ -308,16 +337,54 @@ catch_up() {
 		  | if \$j == null then {found: true, done: false}
 		    else {found: true, done: true,
 		      reason: (if \$after[\$j].type == \"session.error\" then \"error\" else \$after[\$j].stop_reason.type end),
-		      text: (\$after[:\$j] | unique_by(.id) | map(select(.type == \"agent.message\") | $text_of) | join(\"\n\n\"))} end end" "$hist" 2>/dev/null) || verdict='{"found":false}'
+		      text: (\$after[:\$j] | unique_by(.id) | map(select(.type == \"agent.message\") | $text_of) | join(\"\n\n\")),
+		      tools: [\$after[:\$j][] | select(.type == \"agent.tool_use\" or .type == \"agent.mcp_tool_use\" or .type == \"agent.custom_tool_use\") | {id: (.id // \"\"), name: (.name // .tool_name // \"\")}],
+		      blocking: (\$after[\$j].stop_reason.event_ids // [])} end end" "$hist" 2>/dev/null) || verdict='{"found":false}'
 	found=$(printf '%s' "$verdict" | jq -r '.found // false')
 	finished=$(printf '%s' "$verdict" | jq -r '.done // false')
 }
 
+# --- the owner answering a tool confirmation, or a message while one waits -----
+# "allow <code>" / "deny <code>" (code: six hex digits from the question) answers
+# a tool call the session is blocked on; it is not text for the agent. Any other
+# message while a question is open is not forwarded either: the session cannot
+# take a user.message until its blocking calls are answered.
+mode=message
+answer_text=$(printf '%s' "$input" | jq -r '.text' | LC_ALL=C tr '[:upper:]' '[:lower:]' | tr -s ' \t' '  ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+case $answer_text in
+allow\ [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f] | deny\ [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+	verb=${answer_text%% *}
+	dcode=${answer_text##* }
+	event_id=$(awk -F'\t' -v c="$dcode" '$1 == c { print $2; exit }' "$pending_file" 2>/dev/null)
+	if [ -z "$event_id" ]; then
+		post_text "nothing is waiting for approval under $dcode"
+		record_done
+		log_line "no such confirmation"
+		exit 0
+	fi
+	mode=decision
+	;;
+*)
+	if [ -s "$pending_file" ]; then
+		ask=
+		while IFS="$(printf '\t')" read -r pcode _; do
+			ask="$ask $pcode"
+		done <"$pending_file"
+		post_text "the agent is waiting for your approval: reply allow <code> or deny <code> for:$ask"
+		record_done
+		log_line "waiting for approval"
+		exit 0
+	fi
+	;;
+esac
+
 # --- a redelivery of a message whose user.message already went in --------------
-if [ -f "$sent_file" ] && grep -qxF "$stdin_id" "$sent_file" 2>/dev/null; then
+if [ "$mode" = message ] && [ -f "$sent_file" ] && grep -qxF "$stdin_id" "$sent_file" 2>/dev/null; then
 	while :; do
 		catch_up
 		if [ "$found" = true ] && [ "$finished" = true ]; then
+			printf '%s' "$verdict" | jq -r '.tools[]? | "\(.id)\t\(.name)"' >"$tools_file" 2>/dev/null
+			blocking=$(printf '%s' "$verdict" | jq -r '(.blocking // []) | join(" ")' 2>/dev/null)
 			finish "$(printf '%s' "$verdict" | jq -r '.reason // "error"')" "$(printf '%s' "$verdict" | jq -r '.text // ""')"
 		fi
 		# not there at all: the post never landed, so it goes out below. There,
@@ -332,7 +399,7 @@ if [ -f "$sent_file" ] && grep -qxF "$stdin_id" "$sent_file" 2>/dev/null; then
 fi
 
 # --- a fresh turn: stream first, then send, then follow the stream -----------
-write_prompt
+[ "$mode" = message ] && write_prompt
 : >"$stream_file"
 : >"$stream_hdr"
 curl -sS -N --config "$cfg" -H 'accept: text/event-stream' -o "$stream_file" -D "$stream_hdr" \
@@ -358,12 +425,22 @@ case ${status:-} in
 	;;
 esac
 
-jq -n --rawfile t "$prompt" '{events: [{type: "user.message", content: [{type: "text", text: $t}]}]}' >"$body"
-mark_sent || {
-	log_line "ledger not writable"
-	exit 1
-}
+if [ "$mode" = decision ]; then
+	result=allow
+	[ "$verb" = deny ] && result=deny
+	jq -n --arg id "$event_id" --arg r "$result" '{events: [{type: "user.tool_confirmation", tool_use_id: $id, result: $r}]}' >"$body"
+else
+	jq -n --rawfile t "$prompt" '{events: [{type: "user.message", content: [{type: "text", text: $t}]}]}' >"$body"
+	mark_sent || {
+		log_line "ledger not writable"
+		exit 1
+	}
+fi
 api POST "$base?beta=true" "$body"
+if [ "$mode" = decision ]; then
+	# answered: it is not asked again
+	awk -F'\t' -v c="$dcode" '$1 != c' "$pending_file" >"$pending_file.tmp" && mv "$pending_file.tmp" "$pending_file"
+fi
 
 # Follow the stream. Only whole lines count: curl appends as bytes arrive, and
 # a line cut in the middle is read again once its newline is there.
@@ -391,17 +468,22 @@ while [ -z "$reason" ]; do
 			summary=$(jq -Rcs --rawfile seen "$ids_file" '
 				($seen | split("\n")) as $seen
 				| [split("\n")[] | select(length > 0) | fromjson?]
-				| reduce .[] as $e ({texts: [], ids: [], reason: null};
+				| reduce .[] as $e ({texts: [], ids: [], reason: null, tools: [], blocking: []};
 					if .reason != null then .
+					elif ($e.type == "agent.tool_use" or $e.type == "agent.mcp_tool_use" or $e.type == "agent.custom_tool_use") then
+						.tools += [{id: ($e.id // ""), name: ($e.name // $e.tool_name // "")}]
 					elif $e.type == "agent.message" then
 						(($e.id // "") as $i
 						| if $i != "" and ((($seen | index($i)) != null) or ((.ids | index($i)) != null)) then .
 						  else .ids += [$i] | .texts += [[$e.content[]? | select(.type == "text") | .text] | join("")] end)
-					elif $e.type == "session.status_idle" then .reason = ($e.stop_reason.type // "end_turn")
+					elif $e.type == "session.status_idle" then
+						.reason = ($e.stop_reason.type // "end_turn") | .blocking = ($e.stop_reason.event_ids // [])
 					elif $e.type == "session.error" then .reason = "error"
 					else . end)' "$batch" 2>/dev/null) || summary=
 			if [ -n "$summary" ]; then
 				printf '%s' "$summary" | jq -r '.ids[]' >>"$ids_file" 2>/dev/null
+				printf '%s' "$summary" | jq -r '.tools[] | "\(.id)\t\(.name)"' >>"$tools_file" 2>/dev/null
+				blocking=$(printf '%s' "$summary" | jq -r '.blocking | join(" ")' 2>/dev/null)
 				chunk=$(printf '%s' "$summary" | jq -r '.texts | join("\n\n")' 2>/dev/null)
 				if [ -n "$chunk" ]; then
 					[ -s "$answer" ] && printf '\n\n' >>"$answer"

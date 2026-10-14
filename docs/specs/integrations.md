@@ -15,7 +15,7 @@ v1 is bearer-token platforms only.
 In: Claude Code plugin, Codex config and hooks, Agent SDK example, the headless inbound runner (`runner/sock-runner`) and the Managed Agents bridge (`runner/sock-bridge`).
 
 Out, tracked in bd:
-- Managed Agents session creation, owner-brokered tool confirmations and webhook delivery: follow-up beads after the bridge below.
+- Managed Agents session creation and webhook delivery: follow-up beads after the bridge below (integrations-0ga, split).
 - Codex app-server live injection (`turn/steer`): a follow-up bead after the runner below.
 - Hosted HTTP surfaces: Responses API hosted MCP, claude.ai, ChatGPT, Managed Agents cloud MCP. sock-mcp is stdio only, and these need a public URL and an OAuth-style credential.
 - Won't do: a `Stop` hook that fetches pending messages. The channel is the inbound path.
@@ -203,7 +203,7 @@ stdin, env and exit codes are `sock-runner`'s (the `sock listen --exec` contract
 4. Open the event stream first (`GET /v1/sessions/$SESSION/events/stream?beta=true`, `accept: text/event-stream`); a stream shows only events after it opens, so it is open before the send. Then send the owner's reply: `POST /v1/sessions/$SESSION/events?beta=true` with `{"events":[{"type":"user.message","content":[{"type":"text","text":"<prompt>"}]}]}`. The prompt is the runner's: a one-line preface and `<sock-message from="owner" conversation=... id=...>` around the text, closing tags broken, so the id is in the session's history and a redelivery can find it.
 5. Follow the stream until the turn ends. Only whole lines are events: the stream file is read by byte offset and a trailing line without its newline waits for the rest. Keep the text blocks of `agent.message` events (buffered events, one per model request) in order, once per event id, and ignore everything else, thinking and tool events included: tool inputs and outputs can hold secrets and never reach sock. The file is bounded (`SOCK_BRIDGE_MAX_STREAM`; past it the bridge exits 1, `stream too large`) and each poll reads only the new bytes in one `jq` pass, so a flood costs linear time and the deadline is checked every poll. The turn ends at `session.status_idle` with `stop_reason.type`:
    - `end_turn`: post the collected text to the owner (an empty or whitespace-only answer posts `the agent finished without a reply`), exit 0.
-   - `requires_action`: a tool call needs an answer the bridge cannot give. Post the fixed text `the agent is waiting for approval of a tool call` (no tool name, no input) and exit 0; the owner answers in the Managed Agents console. Brokering confirmations through sock replies is a follow-up.
+   - `requires_action`: the session is blocked on tool calls (`stop_reason.event_ids`, each an `agent.tool_use`, `agent.mcp_tool_use` or `agent.custom_tool_use` event). The bridge asks the owner, see Owner-brokered confirmations below, and exits 0.
    - `budget_reached`: post `the agent's budget is used up`, exit 0.
    - `session.error`: post `the agent hit an error`, exit 0. A stream that ends without idle exits 1 (`stream dropped`), so the retry finishes from history.
 6. Posting: `sock send` with the text on stdin (the puppet's `NotifyOwner`; argv is visible in `ps`), control characters other than newline and tab removed (an agent's answer can hold terminal escapes), at most 60000 bytes per message, split on blank lines, then lines, then bytes, never inside a UTF-8 character; at most 5 parts, the last saying the rest was cut. After each part the bridge writes `<id> <n>` to `posted.part`, so a retry of a message whose part n failed posts only the remaining parts. Record `replied` (`done.ids`) after the last part, then exit 0. A crash between the last part and the record repeats the last part on redelivery, which is at-least-once.
@@ -218,6 +218,17 @@ stdin, env and exit codes are `sock-runner`'s (the `sock listen --exec` contract
 - One session per bridge, and the session is not driven by anything else at the same moment: two writers interleave turns, and the bridge cannot tell whose answer a `session.status_idle` ends.
 - The owner's reply is data to the agent, in a tag, like everywhere in this repo. What the agent may do is the session's own configuration.
 - The agent's answer goes only to the owner, over the bridge's puppet, as ordinary messages.
+
+### Owner-brokered confirmations
+
+An agent whose tools use the `always_ask` permission policy stops with `requires_action` until each blocking call gets a `user.tool_confirmation` with `result` `allow` or `deny` (events-and-streaming, "Confirm a tool call"). The bridge carries that decision from the owner:
+
+- The question: for each id in `stop_reason.event_ids` the bridge posts `the agent wants to run <name>: reply allow <code> or deny <code>`. `<name>` is the tool's name restricted to `A-Za-z0-9_.:-`, at most 64 characters, or `a tool` when the id has no tool event. The tool's input is never shown: it can hold secrets, and the question is about running that tool. `<code>` is six hex digits of a checksum of the event id. The pending set (`code<TAB>event id`) is written to `pending.<session>` in the state directory (mode 600), replacing the previous set.
+- The answer: an owner message that, trimmed, lower-cased and with runs of blanks squeezed, is `allow <code>` or `deny <code>` is not text for the agent. If the code is pending, the bridge opens the event stream, posts `{"events":[{"type":"user.tool_confirmation","tool_use_id":<event id>,"result":"allow"|"deny"}]}`, removes that line from the pending file and follows the stream to the next idle as for any turn: the answer, or another question. An unknown code, or an answer with nothing pending, is answered `nothing is waiting for approval under <code>` and sends nothing to the session.
+- Any other owner message while a question is open is not forwarded (the session takes no `user.message` until its blocking calls are answered): the bridge replies `the agent is waiting for your approval: reply allow <code> or deny <code> for: <codes>`.
+- Trust: only the owner's messages reach this path (the owner gate runs first), the decision is bound to an event id the session itself named in `event_ids`, and the owner can only choose allow or deny. A redelivery of the first message finds the blocked turn in the history and asks again.
+- At-least-once edge: a crash after the confirmation was posted and before the answer was relayed loses that answer; the session continues and the next owner message starts a new turn.
+- Not here: session creation and webhook delivery (own beads).
 
 ### Tests
 

@@ -235,7 +235,8 @@ func idle(reason string) map[string]any {
 // bnHarness: the runner harness, pointed at the bridge and the fake server.
 type bnHarness struct {
 	*rnHarness
-	api *fakeMA
+	api     *fakeMA
+	answers int // owner messages after the first, for distinct ids
 }
 
 func rnBridgePath(t *testing.T) string {
