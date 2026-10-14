@@ -20,14 +20,16 @@ die_config() {
 	exit 2
 }
 
-# a value with a newline never counts: grep -x would match any one of its lines
-is_uuid() {
+# matches VALUE ERE: the whole value matches. A value with a newline never
+# counts: grep -x would match any one of its lines.
+matches() {
 	case $1 in
 	*'
 '*) return 1 ;;
 	esac
-	printf '%s\n' "$1" | grep -Eqx "$UUID"
+	printf '%s\n' "$1" | grep -Eqx "$2"
 }
+is_uuid() { matches "$1" "$UUID"; }
 
 now() { date +%s; }
 
@@ -163,7 +165,10 @@ read_message() {
 # --- the owner gate ----------------------------------------------------------
 # The sender in the environment and on stdin must be one id, and equal the
 # puppet's owner. The owner id is cached for a minute per token, so a non-owner
-# in a shared conversation costs no network call per message.
+# in a shared conversation costs no network call per message. It also sets
+# puppet_id, the puppet's own account id, cached beside the owner; a caller
+# that sets need_puppet_id=1 takes no cache without it, and a whoami without it
+# is not a puppet token.
 owner_gate() {
 	if [ "$sender" != "$SOCK_SENDER_ID" ]; then
 		log_line "dropped: sender $SOCK_SENDER_ID"
@@ -171,11 +176,17 @@ owner_gate() {
 	fi
 	owner_cache=$state_dir/owner.$(printf '%s' "${SOCK_TOKEN:-}" | hash16)
 	owner=
+	puppet_id=
 	if [ -f "$owner_cache" ]; then
-		read -r cached_at cached_owner <"$owner_cache" 2>/dev/null || true
+		read -r cached_at cached_owner cached_puppet <"$owner_cache" 2>/dev/null || true
+		is_uuid "${cached_puppet:-}" || cached_puppet=
 		case ${cached_at:-} in
 		'' | *[!0-9]*) ;;
-		*) if [ $(($(now) - cached_at)) -lt 60 ] && is_uuid "${cached_owner:-}"; then owner=$cached_owner; fi ;;
+		*) if [ $(($(now) - cached_at)) -lt 60 ] && is_uuid "${cached_owner:-}" &&
+			{ [ -z "${need_puppet_id:-}" ] || [ -n "$cached_puppet" ]; }; then
+			owner=$cached_owner
+			puppet_id=$cached_puppet
+		fi ;;
 		esac
 	fi
 	if [ -z "$owner" ]; then
@@ -184,7 +195,9 @@ owner_gate() {
 			exit 1
 		fi
 		owner=$(printf '%s' "$me" | jq -r 'if (.account.puppet.ownerId | type) == "string" then .account.puppet.ownerId else empty end' 2>/dev/null)
-		if ! is_uuid "$owner"; then
+		puppet_id=$(printf '%s' "$me" | jq -r 'if (.account.id | type) == "string" then .account.id else empty end' 2>/dev/null)
+		is_uuid "$puppet_id" || puppet_id=
+		if ! is_uuid "$owner" || { [ -n "${need_puppet_id:-}" ] && [ -z "$puppet_id" ]; }; then
 			# a human session token, or anything that is not a puppet: acknowledging
 			# would consume that account's own deliveries and lose them, so this is a
 			# configuration error: exit 2, nothing acknowledged
@@ -192,7 +205,7 @@ owner_gate() {
 			log_line "not a puppet token"
 			exit 2
 		fi
-		printf '%s %s\n' "$(now)" "$owner" >"$owner_cache" 2>/dev/null || true
+		printf '%s %s %s\n' "$(now)" "$owner" "$puppet_id" >"$owner_cache" 2>/dev/null || true
 	fi
 	if [ "$sender" != "$owner" ]; then
 		log_line "dropped: sender $sender"

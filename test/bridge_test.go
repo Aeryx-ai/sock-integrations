@@ -266,7 +266,7 @@ func TestBridgeOwnerGateAndHygieneAsTheRunner(t *testing.T) {
 	t.Run("human token exits 2", func(t *testing.T) {
 		h := newBridgeHarness(t)
 		h.api.set(func(f *fakeMA) {})
-		sock := strings.Replace(bnSockStub, `printf '{"account":{"id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","puppet":{"ownerId":"%s","name":"x"}}}\n' "$STUB_OWNER"`, `printf '{"account":{"id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc"}}\n'`, 1)
+		sock := strings.Replace(bnSockStub, `printf '{"account":{"id":"%s","puppet":{"ownerId":"%s","name":"x"}}}\n' "${STUB_ACCOUNT:-cccccccc-cccc-4ccc-8ccc-cccccccccccc}" "$STUB_OWNER"`, `printf '{"account":{"id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc"}}\n'`, 1)
 		if err := os.WriteFile(filepath.Join(h.stubs, "sock"), []byte(sock), 0o755); err != nil {
 			t.Fatal(err)
 		}

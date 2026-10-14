@@ -27,7 +27,7 @@ const bnSockStub = `#!/bin/sh
 echo "$SOCK_TOKEN" >> "$STUB_DIR/sock-token"
 case "$1" in
 whoami)
-  printf '{"account":{"id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","puppet":{"ownerId":"%s","name":"x"}}}\n' "$STUB_OWNER" ;;
+  printf '{"account":{"id":"%s","puppet":{"ownerId":"%s","name":"x"}}}\n' "${STUB_ACCOUNT:-cccccccc-cccc-4ccc-8ccc-cccccccccccc}" "$STUB_OWNER" ;;
 send)
   n=$(ls "$STUB_DIR" | grep -c '^send\.')
   d="$STUB_DIR/send.$n"; mkdir "$d"
@@ -62,6 +62,13 @@ type fakeMA struct {
 	flood    int                // inert events played before the script
 	pre      []any              // events played as soon as the stream opens, before the send: another turn's
 	noEcho   bool               // the stream does not echo the posted user.message
+
+	store      []map[string]any // sessions the session endpoints know, oldest first
+	creates    []string         // session create bodies
+	paths      []string         // path and query of each request, in order
+	dropCreate int              // creates to record and then answer by closing the connection
+	createID   string           // when set, the id a create answers with
+	findPage   int              // when set, the page size of the session list
 }
 
 func newFakeMA(t *testing.T) *fakeMA {
@@ -79,22 +86,59 @@ func (f *fakeMA) next(kind string) int {
 	return 200
 }
 
+// route names a request: "create" and "find" (POST and GET /v1/sessions),
+// "check" (GET /v1/sessions/{id}), "stream", "send" and "list" (the events).
+func route(r *http.Request) (kind, id string) {
+	rest := strings.TrimPrefix(r.URL.Path, "/v1/sessions")
+	if rest == "" {
+		if r.Method == http.MethodPost {
+			return "create", ""
+		}
+		return "find", ""
+	}
+	id, sub, _ := strings.Cut(strings.TrimPrefix(rest, "/"), "/")
+	switch {
+	case sub == "" && r.Method == http.MethodGet:
+		return "check", id
+	case sub == "events/stream":
+		return "stream", id
+	case sub == "events" && r.Method == http.MethodPost:
+		return "send", id
+	case sub == "events":
+		return "list", id
+	}
+	return "unknown", id
+}
+
+// session is the stored session of that id, or nil.
+func (f *fakeMA) session(id string) map[string]any {
+	for _, s := range f.store {
+		if s["id"] == id {
+			return s
+		}
+	}
+	return nil
+}
+
 func (f *fakeMA) handle(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
-	kind := "list"
-	switch {
-	case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/events/stream"):
-		kind = "stream"
-	case r.Method == http.MethodPost:
-		kind = "send"
-	}
+	kind, id := route(r)
 	f.log = append(f.log, kind)
 	f.headers = append(f.headers, r.Header.Clone())
+	f.paths = append(f.paths, r.URL.RequestURI())
 	code := f.next(kind)
+	known := id == bnSession || f.session(id) != nil
 	f.mu.Unlock()
-	if !strings.HasPrefix(r.URL.Path, "/v1/sessions/"+bnSession+"/events") {
+	switch kind {
+	case "create", "find":
+	case "unknown":
 		http.NotFound(w, r)
 		return
+	default:
+		if !known {
+			http.NotFound(w, r)
+			return
+		}
 	}
 	if code != 200 {
 		if f.retryAft != "" {
@@ -104,6 +148,16 @@ func (f *fakeMA) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch kind {
+	case "create":
+		f.create(w, r)
+	case "find":
+		f.find(w, r)
+	case "check":
+		f.mu.Lock()
+		b, _ := json.Marshal(f.session(id))
+		f.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(b)
 	case "stream":
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(200)
@@ -126,11 +180,7 @@ func (f *fakeMA) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		f.mu.Unlock()
 		if drop {
-			if hj, ok := w.(http.Hijacker); ok {
-				if c, _, err := hj.Hijack(); err == nil {
-					_ = c.Close()
-				}
-			}
+			hangUp(w)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -155,6 +205,92 @@ func (f *fakeMA) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"data": h, "next_page": nil})
 	}
+}
+
+// hangUp closes the connection without an answer: a request that may have landed.
+func hangUp(w http.ResponseWriter) {
+	if hj, ok := w.(http.Hijacker); ok {
+		if c, _, err := hj.Hijack(); err == nil {
+			_ = c.Close()
+		}
+	}
+}
+
+// create stores a session from the body, as the API does, and answers with it.
+func (f *fakeMA) create(w http.ResponseWriter, r *http.Request) {
+	b, _ := io.ReadAll(r.Body)
+	var body struct {
+		Agent    any               `json:"agent"`
+		Metadata map[string]string `json:"metadata"`
+	}
+	_ = json.Unmarshal(b, &body)
+	agent, _ := body.Agent.(string)
+	if m, ok := body.Agent.(map[string]any); ok {
+		agent, _ = m["id"].(string)
+	}
+	f.mu.Lock()
+	f.creates = append(f.creates, string(b))
+	id := f.createID
+	if id == "" {
+		id = fmt.Sprintf("sesn_NEW%d", len(f.creates))
+	}
+	meta := map[string]any{}
+	for k, v := range body.Metadata {
+		meta[k] = v
+	}
+	s := map[string]any{"type": "session", "id": id, "status": "idle", "archived_at": nil, "metadata": meta, "agent": map[string]any{"type": "agent", "id": agent}}
+	f.store = append(f.store, s)
+	drop := f.dropCreate > 0
+	if drop {
+		f.dropCreate--
+	}
+	out, _ := json.Marshal(s)
+	f.mu.Unlock()
+	if drop {
+		hangUp(w)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(out)
+}
+
+// find lists the stored sessions of the agent_id, newest first, archived ones
+// only with include_archived, by pages of findPage (or limit).
+func (f *fakeMA) find(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	f.mu.Lock()
+	var all []map[string]any
+	for i := len(f.store) - 1; i >= 0; i-- {
+		s := f.store[i]
+		a, _ := s["agent"].(map[string]any)
+		if q.Get("agent_id") != "" && (a == nil || a["id"] != q.Get("agent_id")) {
+			continue
+		}
+		if s["archived_at"] != nil && q.Get("include_archived") != "true" {
+			continue
+		}
+		all = append(all, s)
+	}
+	size := f.findPage
+	f.mu.Unlock()
+	if size == 0 {
+		_, _ = fmt.Sscanf(q.Get("limit"), "%d", &size)
+	}
+	if size <= 0 {
+		size = 20
+	}
+	from := 0
+	if c := q.Get("page"); c != "" {
+		_, _ = fmt.Sscanf(c, "s%d", &from)
+	}
+	to := min(from+size, len(all))
+	from = min(from, to)
+	var next any
+	if to < len(all) {
+		next = fmt.Sprintf("s%d", to)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"data": all[from:to], "next_page": next})
 }
 
 // play writes any pre events, waits for the send, echoes its user.message as
