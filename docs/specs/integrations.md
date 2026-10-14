@@ -23,7 +23,7 @@ Out, tracked in bd:
 ## Rules
 
 1. One puppet per binding (platform plus machine). A leaked token costs one binding, and the server rate limit (60 sends per minute) is per puppet.
-2. One consumer per puppet. The channel and any `sock_fetch` or `sock_ack` caller consume the same deliveries, so a puppet with the channel on is never used for fetch or ack.
+2. One consumer per puppet. The channel and any `sock_fetch` caller consume the same deliveries, so a puppet with the channel on is never used for fetch. The channel pushes but never acks on push, since Claude Code drops a push it has no channel for and says nothing (integrations-bn5): the model's `sock_send` reply in that conversation acks, and the skill has it call `sock_ack` for a message that needs no reply. An unacknowledged message comes back after a restart.
 3. The token comes from the environment or the plugin's secure `userConfig`. No checked-in file holds it.
 4. Hooks forward what the owner needs to act on and nothing more: the notification text for a permission prompt, and the trailing ask of the last assistant message (fenced code dropped, secret shapes redacted, 600 bytes) when a session is waiting. Nothing is sent when nothing is pending. Until 2026-10-13 this rule said hooks never forward free text; the owner reversed it ("Is something waiting on me, then tell me what I need to do in the sock message") and accepted that text the assistant echoed can leave the machine.
 5. Hooks always exit 0 and never retry. A second call gets a second idempotency key and can double post. The CLI already retries one call internally with one key.
