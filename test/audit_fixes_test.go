@@ -155,3 +155,44 @@ func TestBridgeRetryAfterDateIsReadAsGMT(t *testing.T) {
 		t.Fatalf("Retry-After %q: exit %d after %v, %d sends", when, r.Code, r.Elapsed, len(h.sends()))
 	}
 }
+
+func count(xs []string, x string) int {
+	n := 0
+	for _, v := range xs {
+		if v == x {
+			n++
+		}
+	}
+	return n
+}
+
+// M4: the stream GET retries 429 and 5xx with Retry-After or backoff, a few times
+func TestBridgeStreamOpenRetries(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		codes  []int
+		retry  string
+		want   int
+		opens  int
+		sends  int
+		atLeast time.Duration
+	}{
+		{"429 with Retry-After", []int{429}, "2", 0, 2, 1, 2 * time.Second},
+		{"503 then 502", []int{503, 502}, "", 0, 3, 1, 3 * time.Second},
+		{"persistent 503", []int{503, 503, 503, 503, 503, 503}, "", 1, 4, 0, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := newBridgeHarness(t)
+			h.api.set(func(f *fakeMA) { f.status["stream"] = c.codes; f.retryAft = c.retry })
+			h.script(agentMsg(bnAnswer), idle("end_turn"))
+			r := h.run(rnOpts{Env: map[string]string{"SOCK_BRIDGE_TIMEOUT": "30"}})
+			k := h.api.kinds()
+			if r.Code != c.want || count(k, "stream") != c.opens || len(h.sends()) != c.sends || r.Elapsed < c.atLeast {
+				t.Fatalf("exit %d after %v, requests %v, %d sends, log %q", r.Code, r.Elapsed, k, len(h.sends()), h.bridgeLog())
+			}
+			if c.want != 0 && len(h.api.sentBodies()) != 0 {
+				t.Fatal("a user.message was posted without a stream")
+			}
+		})
+	}
+}

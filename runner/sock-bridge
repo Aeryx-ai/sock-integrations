@@ -131,10 +131,39 @@ retry_wait() {
 	return 0
 }
 
-# api METHOD URL [body file]: sets code and leaves the answer in $resp. 429 is
-# retried, and 5xx and network failures too for a GET; a POST that failed any
-# other way may have landed, so it is not repeated (the redelivery asks the
-# session's history before it sends again).
+# retry_or_exit METHOD CODE [header file]: after a request that failed, exits
+# (2 when the key or session is refused, 1 when the failure is not retried or the
+# tries are used up) or waits as retry_wait does and returns, to try again. 429
+# is retried for any request, and 5xx and network failures (000) too for a GET; a
+# POST that failed any other way may have landed, so it is not repeated (the
+# redelivery asks the session's history before it sends again).
+retry_or_exit() {
+	case $2 in
+	401 | 403 | 404)
+		log_line "http $2"
+		echo "$cmd_name: the Managed Agents API answered $2: check ANTHROPIC_API_KEY and SOCK_BRIDGE_SESSION" >&2
+		exit 2
+		;;
+	429) ;;
+	5?? | 000) [ "$1" = GET ] || {
+		log_line "http $2"
+		exit 1
+	} ;;
+	*)
+		log_line "http $2"
+		exit 1
+		;;
+	esac
+	attempt=$((attempt + 1))
+	if [ "$attempt" -ge 4 ]; then
+		log_line "http $2"
+		exit 1
+	fi
+	retry_wait "${3:-$hdr}"
+}
+
+# api METHOD URL [body file]: sets code and leaves the answer in $resp, retrying
+# as retry_or_exit says
 api() {
 	method=$1
 	url=$2
@@ -151,27 +180,8 @@ api() {
 		code=$(curl "$@" "$url" 2>/dev/null) || code=000
 		case $code in
 		2??) return 0 ;;
-		401 | 403 | 404)
-			log_line "http $code"
-			echo "$cmd_name: the Managed Agents API answered $code: check ANTHROPIC_API_KEY and SOCK_BRIDGE_SESSION" >&2
-			exit 2
-			;;
-		429) ;;
-		5?? | 000) [ "$method" = GET ] || {
-			log_line "http $code"
-			exit 1
-		} ;;
-		*)
-			log_line "http $code"
-			exit 1
-			;;
 		esac
-		attempt=$((attempt + 1))
-		if [ "$attempt" -ge 4 ]; then
-			log_line "http $code"
-			exit 1
-		fi
-		retry_wait
+		retry_or_exit "$method" "$code"
 	done
 }
 
@@ -346,30 +356,33 @@ fi
 
 # --- a fresh turn: stream first, then send, then follow the stream -----------
 write_prompt
-: >"$stream_file"
-: >"$stream_hdr"
-curl -sS -N --config "$cfg" -H 'accept: text/event-stream' -o "$stream_file" -D "$stream_hdr" \
-	--connect-timeout 10 --max-time "$((deadline - $(now)))" "$base/stream?beta=true" >/dev/null 2>&1 &
-stream_pid=$!
-# the stream shows only events after it opens: wait for its status line
-for _ in $(seq 100); do
-	grep -q '^HTTP/' "$stream_hdr" 2>/dev/null && break
-	kill -0 "$stream_pid" 2>/dev/null || break
-	sleep 0.1
+attempt=0
+while :; do
+	left=$((deadline - $(now)))
+	if [ "$left" -le 0 ]; then
+		log_line "timeout"
+		exit 1
+	fi
+	: >"$stream_file"
+	: >"$stream_hdr"
+	curl -sS -N --config "$cfg" -H 'accept: text/event-stream' -o "$stream_file" -D "$stream_hdr" \
+		--connect-timeout 10 --max-time "$left" "$base/stream?beta=true" >/dev/null 2>&1 &
+	stream_pid=$!
+	# the stream shows only events after it opens: wait for its status line
+	for _ in $(seq 100); do
+		grep -q '^HTTP/' "$stream_hdr" 2>/dev/null && break
+		kill -0 "$stream_pid" 2>/dev/null || break
+		sleep 0.1
+	done
+	status=$(sed -n 's/^HTTP\/[0-9.]* \([0-9]*\).*/\1/p' "$stream_hdr" 2>/dev/null | tail -n 1)
+	case ${status:-} in
+	2??) break ;;
+	esac
+	kill "$stream_pid" 2>/dev/null
+	wait "$stream_pid" 2>/dev/null
+	stream_pid=
+	retry_or_exit GET "${status:-000}" "$stream_hdr"
 done
-status=$(sed -n 's/^HTTP\/[0-9.]* \([0-9]*\).*/\1/p' "$stream_hdr" 2>/dev/null | tail -n 1)
-case ${status:-} in
-2??) ;;
-401 | 403 | 404)
-	log_line "http $status"
-	echo "$cmd_name: the Managed Agents API answered $status: check ANTHROPIC_API_KEY and SOCK_BRIDGE_SESSION" >&2
-	exit 2
-	;;
-*)
-	log_line "http ${status:-000}"
-	exit 1
-	;;
-esac
 
 jq -n --rawfile t "$prompt" '{events: [{type: "user.message", content: [{type: "text", text: $t}]}]}' >"$body"
 mark_sent || {
