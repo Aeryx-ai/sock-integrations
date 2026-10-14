@@ -30,6 +30,9 @@ while [ $# -gt 0 ]; do
 done
 
 state_dir=${XDG_STATE_HOME:-${HOME:-/nonexistent}/.local/state}/sock-integrations
+# The CLI prints cleaned paths, so a trailing slash on XDG_STATE_HOME or HOME
+# must not leave a doubled one here.
+while [ "${state_dir#*//}" != "$state_dir" ]; do state_dir=${state_dir//\/\//\/}; done
 log=$state_dir/hook.log
 asks=$state_dir/asks
 # The token and the URL come from the same source, so a token never goes to a
@@ -285,7 +288,7 @@ send_text() {
 		case $send_token in
 		sock_pt_?*) ;;
 		*)
-			log_line "sock puppets ensure: no puppet token in the cache, nothing sent"
+			log_line "sock puppets ensure: no puppet token in the cache, nothing sent: $(scrubbed "$work/ensure.err" "$token")"
 			rm -rf "$work"
 			return 1
 			;;
