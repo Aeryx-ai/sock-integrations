@@ -777,7 +777,7 @@ const machineKey = "sock_mk_11111111-1111-4111-8111-111111111111_" + "MACHINEKEY
 // fakeSockForKeys answers `sock puppets ensure <dir>` the way the CLI does:
 // it writes a puppet token under the state dir's puppets cache and prints the
 // file's path. mode changes that: "fail" exits non-zero with the key on
-// stderr, "slow" sleeps 5 s first, "outside" prints a path outside the cache,
+// stderr, "slow" sleeps 30 s first, "outside" prints a path outside the cache,
 // "notpuppet" writes a token that is not a sock_pt_. `sock send` records its
 // token, its text and its whole environment.
 func fakeSockForKeys(t *testing.T, mode string) (dir, rec string) {
@@ -801,7 +801,7 @@ case "$*" in
 	printf '%s\n' "$last" > "$rec/ensure-dir"
 	case $mode in
 	fail) echo "ensure failed for $SOCK_TOKEN" >&2; exit 3 ;;
-	slow) sleep 5 ;;
+	slow) sleep 30 ;;
 	outside) echo "printed outside for $SOCK_TOKEN" >&2; printf '%s\n' "` + outside + `"; exit 0 ;;
 	linkdir)
 		cache=$(printf '%s' "${XDG_STATE_HOME:-$HOME/.local/state}/sock-integrations/puppets" | tr -s /)
@@ -895,7 +895,9 @@ func TestMachineKeyEnsureIsBoundedByTheWatchdog(t *testing.T) {
 	env := machineKeyEnv(bin)
 	env["SOCK_HOOK_TIMEOUT"] = "1"
 	r := runHook(t, s.URL, hookEnv{Env: env, Stdin: stopInput("k4", "Ship it?")}, "--stop", "--ask-now")
-	if r.Elapsed > 4*time.Second {
+	// Unbounded, the hook outlives the fake's 30 s sleep. The margin below
+	// that is for notify.sh itself, which takes seconds on a loaded machine.
+	if r.Elapsed > 15*time.Second {
 		t.Fatalf("hook took %v with a 1 s timeout", r.Elapsed)
 	}
 	if sent(rec) {
