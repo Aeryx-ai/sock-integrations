@@ -66,6 +66,8 @@ log_line() {
 			: >"$log"
 		fi
 		printf '%s %s\n' "$(date -u +%FT%TZ)" "$msg" >>"$log"
+		# umask covers a new log; an older one may have been made wider.
+		chmod 600 "$log"
 	) 2>/dev/null
 	return 0
 }
@@ -164,9 +166,12 @@ bounded() {
 	shift 3
 	"$@" <"$in" >"$out" 2>"$err" &
 	local pid=$!
+	# TERM first; a command that ignores it gets KILL two seconds later.
 	(
 		sleep "$(hook_timeout)"
-		kill "$pid" 2>/dev/null
+		kill "$pid" 2>/dev/null || exit 0
+		sleep 2
+		kill -9 "$pid" 2>/dev/null
 	) >/dev/null 2>&1 &
 	local watchdog=$!
 	disown "$watchdog" 2>/dev/null # no "Terminated" job notice on stderr when we reap it below

@@ -161,7 +161,7 @@ func TestTokenInvalidNoRetryStorm(t *testing.T) {
 func TestSockMissingFromPath(t *testing.T) {
 	s := newStub(t)
 	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": "/usr/bin:/bin"}}, "x")
-	if r.Code != 0 || strings.Count(r.Log, "\n") != 1 || !strings.Contains(r.Log, "sock") {
+	if r.Code != 0 || strings.Count(r.Log, "\n") != 1 || !strings.Contains(r.Log, "sock not found") {
 		t.Fatalf("%+v", r)
 	}
 }
@@ -869,5 +869,63 @@ func TestLeadingDashProjectKeepsItsName(t *testing.T) {
 	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PROJECT_DIR": "-rf"}, Stdin: stopInput("k9", "Ship it?")}, "--stop", "--ask-now")
 	if g := s.Requests(); len(g) != 1 || g[0].Text != "-rf: Ship it?" {
 		t.Fatalf("%+v", g)
+	}
+}
+
+// --- deferred hook minors (integrations-r3j) --------------------------------
+
+// fakeSock writes a sock that runs body for every call.
+func fakeSock(t *testing.T, body string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "sock"), []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func TestWatchdogKillsASockThatIgnoresTERM(t *testing.T) {
+	s := newStub(t)
+	bin := fakeSock(t, "trap '' TERM\nwhile :; do sleep 1; done")
+	env := map[string]string{"PATH": bin + ":" + hookPathTail, "SOCK_HOOK_TIMEOUT": "1"}
+	r := runHook(t, s.URL, hookEnv{Env: env}, "x")
+	if r.Elapsed > 6*time.Second {
+		t.Fatalf("hook took %v: a TERM-ignoring sock was never killed", r.Elapsed)
+	}
+}
+
+func TestExistingHookLogIsMadePrivate(t *testing.T) {
+	s := newStub(t)
+	state := t.TempDir()
+	dir := filepath.Join(state, "sock-integrations")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	log := filepath.Join(dir, "hook.log")
+	if err := os.WriteFile(log, []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(log, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": "/usr/bin:/bin"}, State: state}, "x")
+	fi, err := os.Stat(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("hook.log mode %v, want 0600", fi.Mode().Perm())
+	}
+}
+
+func TestNULBytesInSockStderrNeverReachTheLog(t *testing.T) {
+	s := newStub(t)
+	bin := fakeSock(t, "printf 'bad\\000news\\001' >&2; exit 4")
+	r := runHook(t, s.URL, hookEnv{Env: map[string]string{"PATH": bin + ":" + hookPathTail}}, "x")
+	if strings.ContainsRune(r.Log, 0) || !strings.Contains(r.Log, "badnews") {
+		t.Fatalf("log %q", r.Log)
+	}
+	if strings.Contains(r.Stderr, "null byte") {
+		t.Fatalf("hook stderr %q", r.Stderr)
 	}
 }
