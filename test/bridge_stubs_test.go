@@ -63,13 +63,14 @@ type fakeMA struct {
 	pre      []any              // events played as soon as the stream opens, before the send: another turn's
 	noEcho   bool               // the stream does not echo the posted user.message
 
-	store         []map[string]any // sessions the session endpoints know, oldest first
-	creates       []string         // session create bodies
-	paths         []string         // path and query of each request, in order
-	dropCreate    int              // creates to record and then answer by closing the connection
-	createID      string           // when set, the id a create answers with
-	findPage      int              // when set, the page size of the session list
-	noAgentFilter bool             // the session list ignores agent_id
+	store          []map[string]any // sessions the session endpoints know, oldest first
+	creates        []string         // session create bodies
+	paths          []string         // path and query of each request, in order
+	dropCreate     int              // creates to record and then answer by closing the connection
+	createID       string           // when set, the id a create answers with
+	findPage       int              // when set, the page size of the session list
+	noAgentFilter  bool
+	createNoBudget bool // a create stores and answers its session without the budget             // the session list ignores agent_id
 }
 
 func newFakeMA(t *testing.T) *fakeMA {
@@ -247,6 +248,9 @@ func (f *fakeMA) create(w http.ResponseWriter, r *http.Request) {
 	}
 	s := map[string]any{"type": "session", "id": id, "status": "idle", "archived_at": nil, "metadata": meta,
 		"agent": map[string]any{"type": "agent", "id": agent, "version": version}, "environment_id": body.Environment, "budget": body.Budget}
+	if f.createNoBudget {
+		delete(s, "budget")
+	}
 	f.store = append(f.store, s)
 	drop := f.dropCreate > 0
 	if drop {
