@@ -214,29 +214,46 @@ extract_ask() {
 }
 
 # redact replaces the plugin token and common secret shapes with [redacted]:
-# private keys (BEGIN through END, every line between), a URL's user part,
-# sock and Tailscale tokens, AWS access key ids, GitHub and OpenAI style keys,
-# bearer values, NAME=value or NAME: value (quoted or not) where NAME names a
-# key, token, secret or password, NAME value for such an env-style NAME, and
-# the query string of any URL. It narrows what an echoed secret can leak; it
+# private keys (BEGIN through END, every line between, PGP blocks too), a URL's
+# user part, Slack webhook paths, JWTs, Slack, Tailscale, GitLab, Google, npm,
+# Stripe, sock, AWS, GitHub and OpenAI style tokens, Authorization and bearer
+# values, NAME=value or NAME: value (a quoted value whole) where NAME names a
+# key, token, secret or password in any case, NAME value for such a NAME with
+# an underscore, pass= and pwd=, and the query string of any URL. It narrows what an echoed secret can leak; it
 # does not close it.
 redact() {
-	local s=$1
+	local s=$1 q="'"
 	if [ -n "$token" ]; then s=${s//"$token"/[redacted]}; fi
+	# a name that names a key, token, secret or password, any case
+	local alt='([Kk][Ee][Yy]|[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd])'
+	local name="[A-Za-z0-9_]*${alt}[A-Za-z0-9_]*"
+	local sep="[\"$q]?[[:space:]]*[:=][[:space:]]*"
+	local envname="[A-Za-z0-9_]*_[A-Za-z0-9_]*${alt}[A-Za-z0-9_]*|${alt}_[A-Za-z0-9_]+"
 	# The C locale and a 64 KiB cap keep it linear: GNU sed in a UTF-8 locale
 	# backtracks the NAME value rule quadratically.
 	printf '%s' "$s" | head -c 65536 | LC_ALL=C sed -E \
-		-e 's/-----BEGIN[A-Z ]*PRIVATE KEY-----.*-----END[A-Z ]*PRIVATE KEY-----/[redacted]/g' \
-		-e '/-----BEGIN[A-Z ]*PRIVATE KEY-----/,/-----END[A-Z ]*PRIVATE KEY-----/s/.*/[redacted]/' \
+		-e 's/-----BEGIN[A-Z ]*PRIVATE KEY[A-Z ]*-----.*-----END[A-Z ]*PRIVATE KEY[A-Z ]*-----/[redacted]/g' \
+		-e '/-----BEGIN[A-Z ]*PRIVATE KEY[A-Z ]*-----/,/-----END[A-Z ]*PRIVATE KEY[A-Z ]*-----/s/.*/[redacted]/' \
 		-e 's#(://)[^/@[:space:]]+@#\1[redacted]@#g' \
+		-e 's#hooks\.slack\.com/services/[A-Za-z0-9/_-]+#hooks.slack.com/services/[redacted]#g' \
+		-e 's/eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)?/[redacted]/g' \
+		-e 's/xox[abposr]-[A-Za-z0-9-]+/[redacted]/g' \
 		-e 's/tskey-[A-Za-z0-9-]+/[redacted]/g' \
+		-e 's/glpat-[A-Za-z0-9_-]+/[redacted]/g' \
+		-e 's/AIza[0-9A-Za-z_-]{30,}/[redacted]/g' \
+		-e 's/npm_[A-Za-z0-9]{30,}/[redacted]/g' \
+		-e 's/(sk|rk)_(live|test)_[A-Za-z0-9]+/[redacted]/g' \
 		-e 's/sock_(pt|st|ot|mk|rt|ct)_[A-Za-z0-9_-]+/[redacted]/g' \
 		-e 's/AKIA[0-9A-Z]{16}/[redacted]/g' \
 		-e 's/(ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]+/[redacted]/g' \
 		-e 's/sk-[A-Za-z0-9_-]{16,}/[redacted]/g' \
+		-e "s/([Aa]uthorization[\"$q]?[[:blank:]]*[:=][[:blank:]]*[\"$q]?)([A-Za-z]+[[:blank:]]+)?[^[:space:]\"$q]+/\\1\\2[redacted]/g" \
 		-e 's/[Bb]earer [A-Za-z0-9._~+\/=-]+/Bearer [redacted]/g' \
-		-e 's/([A-Za-z0-9_]*([Kk][Ee][Yy]|[Tt][Oo][Kk][Ee][Nn]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd])[A-Za-z0-9_]*)(["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"']?)[^[:space:]"'"'"',]+/\1\3[redacted]/g' \
-		-e 's/([A-Z0-9_]*_[A-Z0-9_]*(KEY|TOKEN|SECRET|PASSWORD)[A-Z0-9_]*|(KEY|TOKEN|SECRET|PASSWORD)_[A-Z0-9_]+)[[:blank:]]+[^[:space:]]+/\1 [redacted]/g' \
+		-e "s/($name)($sep)\"[^\"]*\"/\\1\\3\"[redacted]\"/g" \
+		-e "s/($name)($sep)${q}[^$q]*${q}/\\1\\3${q}[redacted]$q/g" \
+		-e "s/($name)(${sep}[\"$q]?)[^[:space:]\"$q,]+/\\1\\3[redacted]/g" \
+		-e "s/($envname)[[:blank:]]+[^[:space:]]+/\\1 [redacted]/g" \
+		-e 's/(^|[^A-Za-z0-9_])([Pp][Aa][Ss][Ss]|[Pp][Ww][Dd])=[^[:space:]&]+/\1\2=[redacted]/g' \
 		-e 's#(https?://[^[:space:]?]*)\?[^[:space:]]*#\1?[redacted]#g'
 }
 

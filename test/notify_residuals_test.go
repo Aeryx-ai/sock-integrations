@@ -55,19 +55,37 @@ func TestMoreSecretShapesAreRedacted(t *testing.T) {
 		"pem body":      {"Should I install this key?\n-----BEGIN RSA PRIVATE KEY-----\nMIIEpQIBAAKCAQEAbody\n-----END RSA PRIVATE KEY-----", "MIIEpQIBAAKCAQEAbody"},
 		"one line pem":  {"Install -----BEGIN PRIVATE KEY-----MIIEoneline-----END PRIVATE KEY----- here?", "MIIEoneline"},
 		"indented code": {"Run this?\n\n    export PATH=/opt/Zq9code:$PATH", "Zq9code"},
+		"jwt":           {"Is eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJKd3RCb2R5In0.c2lnSnd0U2ln the session?", "eyJzdWIiOiJKd3RCb2R5In0"},
+		"slack token":   {"Post with xoxb-1234-5678-SlackTokBody?", "SlackTokBody"},
+		"slack webhook": {"Use https://hooks.slack.com/services/T000/B000/HookBodyXyz for alerts?", "HookBodyXyz"},
+		"basic auth":    {"Send Authorization: Basic dXNlcjpCYXNpY0JvZHk= to the API?", "dXNlcjpCYXNpY0JvZHk="},
+		"gitlab":        {"Use glpat-GitLabBody1234567890ab?", "GitLabBody1234567890ab"},
+		"google":        {"Use AIzaSyGoogleBody0123456789abcdefghijk?", "SyGoogleBody0123456789"},
+		"npm":           {"Publish with npm_NpmBody0123456789abcdefghijklmnopq?", "NpmBody0123456789"},
+		"stripe live":   {"Charge with sk_live_StripeBody123 or rk_live_StripeRest456?", "StripeBody123"},
+		"stripe restr":  {"Charge with rk_live_StripeRest456?", "StripeRest456"},
+		"pgp block":     {"Import this?\n-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBPgpBody\n-----END PGP PRIVATE KEY BLOCK-----", "lQOYBPgpBody"},
+		"quoted spaces": {`Keep password = "correct horse QuotedBody" in the file?`, "QuotedBody"},
+		"lowercase env": {"Set aws_secret_access_key LowerEnvBody9 in CI?", "LowerEnvBody9"},
+		"pass param":    {"Connect with ?x=1 pass=PassBody7 or pwd=PwdBody8 now?", "PassBody7"},
+		"pwd param":     {"Connect with pwd=PwdBody8 now?", "PwdBody8"},
 	}
-	for name, c := range cases {
-		t.Run(name, func(t *testing.T) {
-			s := newStub(t)
-			runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PROJECT_DIR": "/x/proj"}, Stdin: stopInput("s22", c.msg)}, "--stop", "--ask-now")
-			g := s.Requests()
-			if len(g) != 1 {
-				t.Fatalf("%+v", g)
-			}
-			if strings.Contains(g[0].Text, c.secret) {
-				t.Fatalf("%q reached the owner: %q", c.secret, g[0].Text)
-			}
-		})
+	for sedName, sed := range sedPaths() {
+		for name, c := range cases {
+			t.Run(sedName+" "+name, func(t *testing.T) {
+				s := newStub(t)
+				env := map[string]string{"CLAUDE_PROJECT_DIR": "/x/proj"}
+				withSed(t, env, sed)
+				runHook(t, s.URL, hookEnv{Env: env, Stdin: stopInput("s22", c.msg)}, "--stop", "--ask-now")
+				g := s.Requests()
+				if len(g) != 1 {
+					t.Fatalf("%+v", g)
+				}
+				if strings.Contains(g[0].Text, c.secret) {
+					t.Fatalf("%q reached the owner: %q", c.secret, g[0].Text)
+				}
+			})
+		}
 	}
 }
 
@@ -136,6 +154,24 @@ func TestAnEncryptedKeyBodyBeforeATrailingListIsRedacted(t *testing.T) {
 // Redaction stays linear: GNU sed in a UTF-8 locale backtracks the env-style
 // rule quadratically, so the seds run in the C locale on capped input.
 func TestRedactionOfALongNameRunIsFast(t *testing.T) {
+	seds := sedPaths()
+	msg := strings.Repeat("KEY_", 8192) + "?"
+	for name, sed := range seds {
+		t.Run(name, func(t *testing.T) {
+			s := newStub(t)
+			env := map[string]string{"CLAUDE_PROJECT_DIR": "/x/proj", "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8"}
+			withSed(t, env, sed)
+			r := runHook(t, s.URL, hookEnv{Env: env, Stdin: stopInput("s26", msg)}, "--stop", "--ask-now")
+			if r.Elapsed > 8*time.Second {
+				t.Fatalf("hook took %v on 32 KB of KEY_", r.Elapsed)
+			}
+		})
+	}
+}
+
+// sedPaths is the system sed ("") and GNU sed when this machine has it: GNU
+// sed comes first on the owner's PATH, the hook tests' PATH has the system one.
+func sedPaths() map[string]string {
 	seds := map[string]string{"system": ""}
 	if p, err := exec.LookPath("gsed"); err == nil {
 		seds["gnu"] = p
@@ -143,25 +179,21 @@ func TestRedactionOfALongNameRunIsFast(t *testing.T) {
 		p, _ := exec.LookPath("sed")
 		seds["gnu"] = p
 	}
-	msg := strings.Repeat("KEY_", 8192) + "?"
-	for name, sed := range seds {
-		t.Run(name, func(t *testing.T) {
-			s := newStub(t)
-			env := map[string]string{"CLAUDE_PROJECT_DIR": "/x/proj", "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8"}
-			if sed != "" {
-				bin := t.TempDir()
-				if err := os.Symlink(sed, filepath.Join(bin, "sed")); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Symlink(sockBin(t), filepath.Join(bin, "sock")); err != nil {
-					t.Fatal(err)
-				}
-				env["PATH"] = bin + ":" + hookPathTail
-			}
-			r := runHook(t, s.URL, hookEnv{Env: env, Stdin: stopInput("s26", msg)}, "--stop", "--ask-now")
-			if r.Elapsed > 8*time.Second {
-				t.Fatalf("hook took %v on 32 KB of KEY_", r.Elapsed)
-			}
-		})
+	return seds
+}
+
+// withSed puts sed (and the real sock) first on the hook's PATH.
+func withSed(t *testing.T, env map[string]string, sed string) {
+	t.Helper()
+	if sed == "" {
+		return
 	}
+	bin := t.TempDir()
+	if err := os.Symlink(sed, filepath.Join(bin, "sed")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(sockBin(t), filepath.Join(bin, "sock")); err != nil {
+		t.Fatal(err)
+	}
+	env["PATH"] = bin + ":" + hookPathTail
 }
