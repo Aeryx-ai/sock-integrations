@@ -76,7 +76,7 @@ Entity, owned by `Connection`. A platform's webhook registration for one event o
 | `event` | `EventName` | `owner.reply`, the only event in v1 |
 | `webhookUrl` | string | `https` only, public address only (checked at subscribe time and again before each delivery), at most 2048 characters |
 | `secretCiphertext` | bytes | The platform's `whsec_` secret (24 to 64 bytes decoded), encrypted like the puppet token; signs every delivery |
-| `cursor` | int64 | The `seq` of the last delivery the platform acknowledged on this subscription, 0 at creation; returned on subscribe and re-subscribe so a platform resumes |
+| `cursor` | int64 | The number of events this subscription delivered and the platform accepted, 0 at creation; returned on subscribe and re-subscribe. It is a progress count, not a replay position: the hub queue is the replay mechanism (an undelivered message comes back on the next stream), and a cursor sent on subscribe is accepted and ignored |
 | `createdAt` | Timestamp | |
 
 Closure is not a field. A closed subscription has a `SubscriptionClosure` row.
@@ -90,7 +90,7 @@ Closure is not a field. A closed subscription has a `SubscriptionClosure` row.
 ### Invariants
 
 - The secret decrypts only to sign a delivery and is never returned, logged or echoed.
-- Deliveries to one subscription are in `seq` order; `cursor` never decreases.
+- Deliveries to one subscription follow the hub stream order; `cursor` increases by one per accepted event and never decreases. `seq` is per conversation and travels in `data`, never as the cursor.
 - A subscription whose connection closed is closed with `grantRevoked` before the connection row goes.
 
 ### States
@@ -139,7 +139,7 @@ Value object, never stored. One owner delivery as a platform sees it.
 | `data.messageId` | UUID | |
 | `data.seq` | int64 | |
 | `data.text` | string | The owner's Markdown, as sent, up to 65536 bytes |
-| `cursor` | int64 | `seq` |
+| `cursor` | int64 | The subscription's accepted-delivery count after this event |
 
 The event schema (`payloadSchema` in `events/list`) is this object; `inputSchema` for `events/subscribe` is empty: a subscription covers every reply to the connection's puppet.
 
