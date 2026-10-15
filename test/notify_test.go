@@ -2,6 +2,7 @@ package test
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1052,7 +1053,24 @@ func TestNULBytesInSockStderrNeverReachTheLog(t *testing.T) {
 // fakeSockAsPuppet records each call's argv (one per line), stdin and
 // environment under rec. With refuse set it fails the way sock v0.2.5 does
 // when it finds no puppet credential.
+// fakeConversation is the conversation fakeSockAsPuppet's posted message is in.
+const fakeConversation = "0d6f9c7e-1111-4222-8333-444455556666"
+
 func fakeSockAsPuppet(t *testing.T, refuse bool) (dir, rec string) {
+	t.Helper()
+	if refuse {
+		return fakeSockAsPuppetBody(t, "echo 'sock: send --as-puppet: no puppet credential; set SOCK_TOKEN, or run sock machine-key use or sock puppets use' >&2\nexit 1")
+	}
+	return fakeSockAsPuppetPrinting(t, `{"id":"m1","conversationId":"`+fakeConversation+`"}`)
+}
+
+// fakeSockAsPuppetPrinting is a sock that prints out as `send --json` does.
+func fakeSockAsPuppetPrinting(t *testing.T, out string) (dir, rec string) {
+	t.Helper()
+	return fakeSockAsPuppetBody(t, "printf '%s\\n' '"+out+"'")
+}
+
+func fakeSockAsPuppetBody(t *testing.T, tail string) (dir, rec string) {
 	t.Helper()
 	dir = t.TempDir()
 	rec = filepath.Join(dir, "rec")
@@ -1065,9 +1083,7 @@ printf '%s\n' "$@" > "$rec/args"
 env > "$rec/env"
 cat > "$rec/text"
 `
-	if refuse {
-		body += "echo 'sock: send --as-puppet: no puppet credential; set SOCK_TOKEN, or run sock machine-key use or sock puppets use' >&2\nexit 1"
-	}
+	body += tail
 	return fakeSock(t, body), rec
 }
 
@@ -1105,7 +1121,7 @@ func TestCodexPluginRouteSendsAsThePluginPuppet(t *testing.T) {
 	s := newStub(t)
 	bin, rec := fakeSockAsPuppet(t, false)
 	r := runHook(t, s.URL, hookEnv{Env: codexPluginEnv(bin), Stdin: codexStopInput("z1", "Ship it?")}, "--stop", "--ask-now")
-	if got := readRec(t, rec, "args"); got != "send\n--as-puppet\n--project\n/x/plugin" {
+	if got := readRec(t, rec, "args"); got != "send\n--as-puppet\n--project\n/x/plugin\n--json" {
 		t.Fatalf("argv %q", got)
 	}
 	if got := readRec(t, rec, "text"); got != "proj: Ship it?" {
@@ -1148,7 +1164,7 @@ func TestCodexPluginRouteIgnoresAnExportedSockToken(t *testing.T) {
 	env := codexPluginEnv(bin)
 	env["SOCK_TOKEN"] = token
 	runHook(t, s.URL, hookEnv{Env: env, Stdin: codexPermission}, "--permission")
-	if got := readRec(t, rec, "args"); got != "send\n--as-puppet\n--project\n/x/plugin" {
+	if got := readRec(t, rec, "args"); got != "send\n--as-puppet\n--project\n/x/plugin\n--json" {
 		t.Fatalf("argv %q", got)
 	}
 	if e := readRec(t, rec, "env"); regexp.MustCompile(`(?m)^SOCK_TOKEN=`).MatchString(e) || strings.Contains(e, token) {
@@ -1287,7 +1303,7 @@ func TestCodexRouteIgnoresAnAmbientPluginOption(t *testing.T) {
 	env := codexPluginEnv(bin)
 	env["CLAUDE_PLUGIN_OPTION_SOCK_TOKEN"] = "sock_pt_other_other"
 	runHook(t, s.URL, hookEnv{Env: env, Stdin: codexPermission}, "--permission")
-	if got := readRec(t, rec, "args"); got != "send\n--as-puppet\n--project\n/x/plugin" {
+	if got := readRec(t, rec, "args"); got != "send\n--as-puppet\n--project\n/x/plugin\n--json" {
 		t.Fatalf("argv %q", got)
 	}
 	if e := readRec(t, rec, "env"); strings.Contains(e, "sock_pt_other_other") {
@@ -1612,7 +1628,7 @@ func TestClaudeHookWithNoTokenSendsAsTheProjectPuppet(t *testing.T) {
 	bin, rec := fakeSockAsPuppet(t, false)
 	env := map[string]string{"PATH": bin + ":" + hookPathTail, "SOCK_TOKEN": "", "CLAUDE_PLUGIN_ROOT": "/x/cplugin", "CLAUDE_PROJECT_DIR": "/x/proj", "SOCK_ACCESS_GATE": "gate-secret"}
 	runHook(t, s.URL, hookEnv{Env: env, Stdin: stopInput("z3", "Ship it?")}, "--stop", "--ask-now")
-	if got := readRec(t, rec, "args"); got != "send\n--as-puppet\n--project\n/x/proj" {
+	if got := readRec(t, rec, "args"); got != "send\n--as-puppet\n--project\n/x/proj\n--json" {
 		t.Fatalf("argv %q", got)
 	}
 	if got := readRec(t, rec, "text"); got != "proj: Ship it?" {
@@ -1623,5 +1639,40 @@ func TestClaudeHookWithNoTokenSendsAsTheProjectPuppet(t *testing.T) {
 		if strings.Contains(got, "\n"+v) || strings.HasPrefix(got, v) {
 			t.Fatalf("%s reached sock send", v)
 		}
+	}
+}
+
+// integrations-2ol: a Codex hook that sent records which session asked, from
+// the hook's session_id and the posted message's conversation, so the owner's
+// reply goes back into that session.
+func TestCodexPluginRouteRecordsTheSessionAsk(t *testing.T) {
+	s := newStub(t)
+	bin, rec := fakeSockAsPuppet(t, false)
+	state := t.TempDir()
+	runHook(t, s.URL, hookEnv{Env: codexPluginEnv(bin), Stdin: codexStopInput("01a141ab-b265-75d0", "Ship it?"), State: state}, "--stop", "--ask-now")
+	if got := readRec(t, rec, "args"); got != "send\n--as-puppet\n--project\n/x/plugin\n--json" {
+		t.Fatalf("argv %q", got)
+	}
+	b, err := os.ReadFile(filepath.Join(state, "sock-integrations", "codex-asks", fakeConversation))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := strings.Fields(string(b))
+	if len(f) != 2 || f[0] != "01a141ab-b265-75d0" || !regexp.MustCompile(`^[0-9]{10}$`).MatchString(f[1]) {
+		t.Fatalf("ask %q", b)
+	}
+	if fi, _ := os.Stat(filepath.Join(state, "sock-integrations", "codex-asks", fakeConversation)); fi.Mode().Perm() != 0o600 {
+		t.Fatalf("mode %v", fi.Mode())
+	}
+}
+
+// A conversation id that is not a lowercase UUID never names a file.
+func TestCodexPluginRouteIgnoresABadConversationID(t *testing.T) {
+	s := newStub(t)
+	bin, _ := fakeSockAsPuppetPrinting(t, `{"id":"m1","conversationId":"../../x"}`)
+	state := t.TempDir()
+	runHook(t, s.URL, hookEnv{Env: codexPluginEnv(bin), Stdin: codexStopInput("s1", "Ship it?"), State: state}, "--stop", "--ask-now")
+	if _, err := os.Stat(filepath.Join(state, "sock-integrations", "codex-asks")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("asks dir: %v", err)
 	}
 }

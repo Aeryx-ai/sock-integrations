@@ -342,6 +342,28 @@ scrubbed() {
 	printf '%s' "$detail" | head -c 300
 }
 
+# record_ask notes that this Codex session asked in the conversation the
+# message posted to (`sock send --json` output in $1), so the owner's reply goes
+# back into it (docs/specs/codex-inbound.md, "Session ask"). The file is named by
+# the conversation id, so only a lowercase UUID is used; the session is the
+# hook's sanitized session_id. Best effort: a failure is logged, never fatal.
+record_ask() {
+	[ "$have_jq" = 1 ] || return 0
+	local conv dir
+	conv=$(head -c 65536 "$1" | jq -r 'select(type == "object") | .conversationId | strings' 2>/dev/null | head -n 1)
+	printf '%s\n' "$conv" | grep -Eqx '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' || return 0
+	[ -n "$(field session_id)" ] || return 0
+	dir=${XDG_STATE_HOME:-$HOME/.local/state}/sock-integrations/codex-asks
+	{
+		mkdir -p "$dir" && chmod 700 "$dir" &&
+			(umask 077 && printf '%s %s\n' "$session" "$(date +%s)" >"$dir/.ask.$$") &&
+			mv -f "$dir/.ask.$$" "$dir/$conv"
+	} 2>/dev/null || {
+		rm -f "$dir/.ask.$$" 2>/dev/null
+		log_line "session ask not recorded"
+	}
+}
+
 # send_as_puppet sends $1 as the puppet the plugin's sock-mcp resolves. The
 # config file picks the server and gate as it does for sock-mcp, which never
 # sees the shell's SOCK_TOKEN, SOCK_URL or SOCK_ACCESS_GATE, and CLAUDE_PROJECT_DIR would
@@ -357,12 +379,14 @@ send_as_puppet() {
 		return 1
 	}
 	printf '%s' "$1" >"$work/text"
-	bounded "$work/text" /dev/null "$work/send.err" \
-		env -u SOCK_TOKEN -u SOCK_URL -u SOCK_ACCESS_GATE -u CLAUDE_PROJECT_DIR sock send --as-puppet --project "$puppet_project"
+	bounded "$work/text" "$work/out" "$work/send.err" \
+		env -u SOCK_TOKEN -u SOCK_URL -u SOCK_ACCESS_GATE -u CLAUDE_PROJECT_DIR sock send --as-puppet --project "$puppet_project" --json
 	rc=$?
 	send_rc=$rc
 	if [ "$rc" -ne 0 ]; then
 		log_line "sock send exit $rc: $(scrubbed "$work/send.err")"
+	elif [ -n "$(field turn_id)" ]; then
+		record_ask "$work/out"
 	fi
 	rm -rf "$work"
 	[ "$rc" -eq 0 ]
