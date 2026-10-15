@@ -239,3 +239,28 @@ func TestServiceInstallRefuses(t *testing.T) {
 		})
 	}
 }
+
+// integrations-2ol: SOCK_RUNNER_AGENT=codex-live installs sock-codex, which
+// injects into the project's live Codex sessions, and needs its injector.
+func TestServiceInstallCodexLive(t *testing.T) {
+	h := newServiceHarness(t, "Darwin")
+	env := map[string]string{"SOCK_RUNNER_AGENT": "codex-live"}
+	if code, out := h.run(env, "install", h.proj); code != 2 || !strings.Contains(out, "sock-codex-inject") {
+		t.Fatalf("without an injector: exit %d %s", code, out)
+	}
+	writeFakeExec(t, filepath.Join(h.dir, "bin", "sock-codex-inject"), "#!/bin/sh\nexit 0\n")
+	code, out := h.run(env, "install", h.proj)
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, out)
+	}
+	b, _ := os.ReadFile(h.units(launchAgents)[0])
+	plist := string(b)
+	for _, want := range []string{
+		"<string>--exec</string>\n\t\t<string>" + filepath.Join(root, "runner", "sock-codex") + "</string>",
+		"<key>SOCK_RUNNER_AGENT</key>\n\t\t<string>codex-live</string>",
+	} {
+		if !strings.Contains(plist, want) {
+			t.Errorf("plist lacks %q:\n%s", want, plist)
+		}
+	}
+}

@@ -1,0 +1,94 @@
+#!/bin/sh
+# sock-codex: the command `sock listen --exec` runs once per message. It puts
+# the owner's reply into a Codex session of the project through the Codex
+# app-server, as a user turn (docs/specs/codex-inbound.md).
+#
+# Exit 0 acknowledges the message (injected, a duplicate, or dropped as not the
+# owner's or malformed). Exit 1 leaves it pending for a retry: no Codex session
+# in the project, the app-server refused, or it is not running. Exit 2 is a bad
+# configuration: nothing ran and the message stays pending.
+#
+# Needs jq, sock and sock-codex-inject. The message text reaches the injector
+# on stdin only: never in argv, the environment, a log or a file other than the
+# private prompt file.
+# shellcheck source-path=SCRIPTDIR
+# shellcheck disable=SC2034,SC2154 # the settings lib.sh reads, and what it sets
+set -u
+umask 077
+
+cmd_name=sock-codex
+here=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=lib.sh
+. "$here/lib.sh"
+
+# --- configuration -----------------------------------------------------------
+workdir=${SOCK_RUNNER_WORKDIR:-}
+[ -n "$workdir" ] && [ -d "$workdir" ] || die_config "SOCK_RUNNER_WORKDIR must be an existing directory"
+for c in jq sock sock-codex-inject; do
+	command -v "$c" >/dev/null 2>&1 || die_config "$c not found on PATH"
+done
+
+# one injection is a few round trips on a local socket
+timeout=60
+state_dir=${SOCK_RUNNER_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/sock-integrations}
+log_name=runner.log
+lock_name=runner.lock
+ledger_name=done.ids
+lib_init
+install_traps
+
+read_message
+owner_gate
+drop_if_done
+take_lock
+drop_if_done
+write_prompt
+
+# --- the injection -------------------------------------------------------------
+# The injector gets the project and ids in argv and the tagged prompt on stdin;
+# none of the listen variables, the runner's settings or the token: it talks
+# only to the local app-server.
+scrub=
+for n in $(env | sed -n 's/^\(SOCK_RUNNER_[A-Za-z0-9_]*\)=.*/\1/p') SOCK_MESSAGE_ID SOCK_CONVERSATION_ID SOCK_SENDER_ID SOCK_TOKEN SOCK_URL SOCK_ACCESS_GATE; do
+	scrub="$scrub -u $n"
+done
+# shellcheck disable=SC2086 # $scrub is a list of -u NAME pairs
+env $scrub sock-codex-inject --project "$workdir" --conversation "$stdin_conv" --message-id "$stdin_id" <"$prompt" >"$prompt.out" 2>/dev/null
+code=$?
+# the injector's one line: an outcome word and session=/turn= ids, kept only
+# when they are that shape
+detail=$(head -n 1 "$prompt.out" 2>/dev/null | tr -cd 'A-Za-z0-9_= -' | grep -oE '(session|turn)=[A-Za-z0-9_-]{1,64}' | tr '\n' ' ' | sed 's/ $//')
+rm -f "$prompt.out"
+case $code in
+0)
+	record_done
+	log_line "injected${detail:+ $detail}"
+	exit 0
+	;;
+3)
+	record_done
+	log_line "duplicate in session${detail:+ $detail}"
+	exit 0
+	;;
+4)
+	log_line "no session"
+	exit 1
+	;;
+5)
+	log_line "refused${detail:+ $detail}"
+	exit 1
+	;;
+6)
+	log_line "daemon unavailable"
+	exit 1
+	;;
+2)
+	log_line "injector config"
+	echo "$cmd_name: sock-codex-inject refused its arguments" >&2
+	exit 2
+	;;
+*)
+	log_line "injector exit $code"
+	exit 1
+	;;
+esac
