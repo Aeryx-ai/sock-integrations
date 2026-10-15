@@ -16,7 +16,7 @@ sock listen --exec /path/to/runner/sock-runner
 
 - The owner sees the puppet working from the moment a message passes the owner gate (`sock activity`, refreshed every 10 s, idle at exit) until it replies.
 - Only the owner's messages run the agent; anything else is acknowledged and dropped. `bypassPermissions` (claude) and `danger-full-access` (codex) also need `SOCK_RUNNER_ALLOW_BYPASS=1`.
-- Exit 0 acknowledges, 1 retries (`sock listen` tries five times), 2 is a configuration error and runs nothing. The log is `runner.log` in `SOCK_RUNNER_STATE` (default `~/.local/state/sock-integrations`), one line per message, never the text.
+- Exit 0 acknowledges, 1 retries (`sock listen` tries five times), 2 is a configuration error and runs nothing. With sock-mcp v0.3.4 or later the runner checks the reply actually posted (`sock-mcp replied`): a run that replied is done even if the agent then failed, and an agent that exits 0 without replying is retried once, then given up. The log is `runner.log` in `SOCK_RUNNER_STATE` (default `~/.local/state/sock-integrations`), one line per message, never the text.
 - The agent replies with `sock_send` through sock-mcp. Run sock-mcp for this puppet without the channel, and call neither `sock_fetch` nor `sock_ack`: `sock listen` is its one consumer.
 - Under `codex` the agent's environment keeps `SOCK_TOKEN` and `SOCK_URL` (its sock-mcp needs them); under `claude` it does not.
 

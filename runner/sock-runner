@@ -164,6 +164,8 @@ run_agent() {
 	watchdog_pgid=
 	set +m
 }
+# whole seconds, rounded down: a reply at or after the start counts
+run_start=$(date +%s)
 run_agent
 
 # a stored session claude no longer has: nothing ran, so the message runs once
@@ -175,15 +177,53 @@ if [ -n "$own_session" ] && [ "$session_flag" = --resume ] && [ "$code" -ne 0 ] 
 	run_agent
 fi
 
+# --- did the reply post? ------------------------------------------------------
+# The agent's own exit status cannot say: a model that never calls sock_send
+# exits 0, and one that posted and then failed or timed out exits nonzero.
+# sock-mcp records each post that went out; `sock-mcp replied` exits 0 when
+# one went to this conversation since the run started, 1 when none did, and
+# anything else (an older sock-mcp, none on PATH) when it cannot say.
+replied=unknown
+if command -v sock-mcp >/dev/null 2>&1; then
+	sock-mcp replied --conversation "$stdin_conv" --since "$run_start" >/dev/null 2>&1
+	case $? in
+	0) replied=yes ;;
+	1) replied=no ;;
+	esac
+fi
+
+finish() {
+	record_done
+	log_line "$1"
+	exit 0
+}
+# A reply posted is the work done, whatever happened after it: a retry would
+# post a second one.
+if [ "$replied" = yes ]; then
+	if [ -e "$prompt.timeout" ]; then finish "replied, timeout"; fi
+	if [ "$code" -ne 0 ]; then finish "replied, agent exit $code"; fi
+	finish "ran"
+fi
 # a timeout first: an agent that exits 0 on the watchdog's TERM did not finish
 if [ -e "$prompt.timeout" ]; then
 	log_line "timeout"
 	exit 1
 fi
+if [ "$code" -eq 0 ] && [ "$replied" = unknown ]; then finish "ran"; fi
 if [ "$code" -eq 0 ]; then
-	record_done
-	log_line "ran"
-	exit 0
+	# Two runs that end without a reply and the message is given up on, so a
+	# model that will not answer costs two runs, not every retry sock listen has.
+	tries_file=$state_dir/noreply.ids
+	tries=$(grep -cxF "$stdin_id" "$tries_file" 2>/dev/null)
+	if [ "${tries:-0}" -ge 1 ]; then
+		finish "no reply after 2 runs"
+	fi
+	{
+		printf '%s\n' "$stdin_id" >>"$tries_file"
+		tail -n 200 "$tries_file" >"$tries_file.tmp" && mv "$tries_file.tmp" "$tries_file"
+	} 2>/dev/null || true
+	log_line "agent exited 0 without replying"
+	exit 1
 fi
 # the status only: its stderr can echo the owner's text, its output or a secret
 log_line "agent exit $code"

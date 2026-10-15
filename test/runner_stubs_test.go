@@ -76,6 +76,13 @@ nopuppet) printf '{"account":{"id":"%s"}}\n' "$STUB_OWNER" ;;
 esac
 `
 
+// sock-mcp replied: exit STUB_REPLIED and record the call. The default, 2, is
+// a sock-mcp that cannot say, so the agent's exit status decides.
+const rnMCPStub = `#!/bin/sh
+printf '%s\n' "$*" >> "$STUB_DIR/replied"
+exit "${STUB_REPLIED:-2}"
+`
+
 // rnMessage renders a protojson-like Message with random whitespace between tokens.
 func rnMessage(fields map[string]any) string {
 	ws := func() string {
@@ -142,7 +149,7 @@ func newRunnerHarness(t *testing.T) *rnHarness {
 			t.Fatal(err)
 		}
 	}
-	for name, body := range map[string]string{"sock": rnSockStub, "claude": rnAgentStub, "codex": rnAgentStub} {
+	for name, body := range map[string]string{"sock": rnSockStub, "sock-mcp": rnMCPStub, "claude": rnAgentStub, "codex": rnAgentStub} {
 		writeFakeExec(t, filepath.Join(h.stubs, name), body)
 	}
 	h.env = map[string]string{
