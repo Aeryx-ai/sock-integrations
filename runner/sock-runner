@@ -36,6 +36,7 @@ lib_init
 # --- cleanup: the agent's group first, then the library's (lock, prompt file) --
 agent_pgid=
 watchdog_pgid=
+activity_pid=
 # shellcheck disable=SC2329 # run by the library's EXIT trap
 extra_cleanup() {
 	if [ -n "$agent_pgid" ]; then
@@ -50,12 +51,32 @@ extra_cleanup() {
 	fi
 	[ -n "$watchdog_pgid" ] && kill -KILL -- "-$watchdog_pgid" 2>/dev/null
 	[ -n "$prompt" ] && rm -f "$prompt.err"
+	if [ -n "$activity_pid" ]; then
+		kill "$activity_pid" 2>/dev/null
+		# detached: the owner's client also drops working at its TTL
+		(activity idle &) 2>/dev/null
+	fi
 }
 install_traps
 
 read_message
 owner_gate
 drop_if_done
+
+# --- the owner sees the agent working, before the lock wait and the run ------
+# sock activity (sock.v1 SetActivity) marks the puppet working in the
+# conversation for 30 s; the loop refreshes it every 10 s until the run ends,
+# and cleanup sets idle. A failing call (an older sock, the hub down) changes
+# nothing: it is a hint, never part of the outcome.
+activity() { sock activity --conversation "$stdin_conv" "$1" >/dev/null 2>&1; }
+(
+	while :; do
+		activity working
+		sleep 10
+	done
+) </dev/null >/dev/null 2>&1 &
+activity_pid=$!
+
 take_lock
 drop_if_done
 write_prompt
@@ -117,8 +138,8 @@ run_agent() {
 	set -m
 	# shellcheck disable=SC2086 # $scrub is a list of -u NAME pairs
 	case $agent in
-	claude) env $scrub SOCK_HEADLESS=1 claude -p "$session_flag" "$session" --permission-mode "$mode" --allowedTools "$claude_tools" --disallowedTools "$claude_denied" --permission-prompts none <"$prompt" >/dev/null 2>"$prompt.err" & ;;
-	codex) env $scrub SOCK_HEADLESS=1 codex exec --sandbox "$mode" resume "$session" - <"$prompt" >/dev/null 2>/dev/null & ;;
+	claude) env $scrub SOCK_HEADLESS=1 claude -p "$session_flag" "$session" --permission-mode "$mode" ${model:+--model} ${model:+"$model"} --allowedTools "$claude_tools" --disallowedTools "$claude_denied" --permission-prompts none <"$prompt" >/dev/null 2>"$prompt.err" & ;;
+	codex) env $scrub SOCK_HEADLESS=1 codex exec --sandbox "$mode" ${model:+-m} ${model:+"$model"} resume "$session" - <"$prompt" >/dev/null 2>/dev/null & ;;
 	esac
 	agent_pgid=$!
 	# the lock wait counted against the timeout: the run gets what take_lock left

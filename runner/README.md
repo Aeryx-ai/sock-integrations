@@ -10,9 +10,11 @@ export SOCK_RUNNER_AGENT=claude      # or codex
 # SOCK_RUNNER_SESSION: optional for claude (the runner makes and keeps its own session), required for codex
 export SOCK_RUNNER_WORKDIR=/path/to/project
 export SOCK_RUNNER_PERMISSION=default # claude: --permission-mode; codex: --sandbox (read-only, workspace-write)
+export SOCK_RUNNER_MODEL=haiku       # optional: a small fast model answers a chat quickly
 sock listen --exec /path/to/runner/sock-runner
 ```
 
+- The owner sees the puppet working from the moment a message passes the owner gate (`sock activity`, refreshed every 10 s, idle at exit) until it replies.
 - Only the owner's messages run the agent; anything else is acknowledged and dropped. `bypassPermissions` (claude) and `danger-full-access` (codex) also need `SOCK_RUNNER_ALLOW_BYPASS=1`.
 - Exit 0 acknowledges, 1 retries (`sock listen` tries five times), 2 is a configuration error and runs nothing. The log is `runner.log` in `SOCK_RUNNER_STATE` (default `~/.local/state/sock-integrations`), one line per message, never the text.
 - The agent replies with `sock_send` through sock-mcp. Run sock-mcp for this puppet without the channel, and call neither `sock_fetch` nor `sock_ack`: `sock listen` is its one consumer.

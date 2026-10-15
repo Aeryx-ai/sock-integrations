@@ -63,6 +63,10 @@ exit "${STUB_EXIT:-0}"
 `
 
 const rnSockStub = `#!/bin/sh
+if [ "$1" = activity ]; then
+  printf '%s %s\n' "$(date +%s)" "$*" >> "$STUB_DIR/activity"
+  exit "${STUB_ACTIVITY_EXIT:-0}"
+fi
 echo "$SOCK_TOKEN" >> "$STUB_DIR/sock-token"
 if [ "$1 $2" != "whoami --json" ]; then exit 64; fi
 case "$STUB_WHOAMI" in

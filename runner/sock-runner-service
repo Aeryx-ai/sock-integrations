@@ -10,7 +10,8 @@
 #
 # Settings come from the environment as for sock-runner: SOCK_RUNNER_AGENT
 # (default claude), SOCK_RUNNER_PERMISSION (default default), and when set
-# SOCK_RUNNER_SESSION, SOCK_RUNNER_TIMEOUT and SOCK_RUNNER_ALLOW_BYPASS. The
+# SOCK_RUNNER_SESSION, SOCK_RUNNER_MODEL, SOCK_RUNNER_TIMEOUT and
+# SOCK_RUNNER_ALLOW_BYPASS. The
 # unit holds no credential: `sock listen --as-puppet` resolves the project's
 # puppet from the sock config file each time it starts. Exit 2 is a refusal.
 # shellcheck source-path=SCRIPTDIR
@@ -80,7 +81,7 @@ mkdir -p "$state" "$(dirname "$unit")" || die_config "cannot create $state or $(
 runner_env() {
 	printf '%s\n' "PATH=$PATH" "SOCK_RUNNER_AGENT=$agent" "SOCK_RUNNER_PERMISSION=$mode" \
 		"SOCK_RUNNER_WORKDIR=$project" "SOCK_RUNNER_STATE=$state"
-	for n in SOCK_RUNNER_SESSION SOCK_RUNNER_TIMEOUT SOCK_RUNNER_ALLOW_BYPASS; do
+	for n in SOCK_RUNNER_SESSION SOCK_RUNNER_MODEL SOCK_RUNNER_TIMEOUT SOCK_RUNNER_ALLOW_BYPASS; do
 		eval "v=\${$n:-}"
 		# shellcheck disable=SC2154 # v is set by the eval
 		[ -z "$v" ] || printf '%s=%s\n' "$n" "$v"

@@ -34,8 +34,8 @@ is_uuid() { matches "$1" "$UUID"; }
 now() { date +%s; }
 
 # --- sock-runner's settings ---------------------------------------------------
-# runner_config reads and checks them (agent, session, workdir, mode and
-# own_session), exiting 2 on a bad one. sock-runner-service runs it at install,
+# runner_config reads and checks them (agent, session, workdir, mode, model
+# and own_session), exiting 2 on a bad one. sock-runner-service runs it at install,
 # so a unit never starts with a configuration the runner would refuse.
 runner_config() {
 	agent=${SOCK_RUNNER_AGENT:-}
@@ -68,6 +68,9 @@ runner_config() {
 		;;
 	*) die_config "SOCK_RUNNER_PERMISSION must be one of the $agent modes, got '$mode'" ;;
 	esac
+	model=${SOCK_RUNNER_MODEL:-}
+	[ -z "$model" ] || matches "$model" '[A-Za-z0-9][A-Za-z0-9._:-]{0,63}' ||
+		die_config "SOCK_RUNNER_MODEL must be 1 to 64 characters of A-Z a-z 0-9 . _ : -, starting with a letter or digit"
 	command -v "$agent" >/dev/null 2>&1 || die_config "$agent is not on PATH"
 	command -v jq >/dev/null 2>&1 || die_config "jq is not on PATH"
 	command -v sock >/dev/null 2>&1 || die_config "sock is not on PATH"
