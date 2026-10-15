@@ -129,4 +129,33 @@ for name in $names; do
 	*) fail "$name received '$got', want only 'for-$name': $(cat "$work/fetch.err")" ;;
 	esac
 done
+# --- the runner service's command: listen as the project puppet, exec gets it --
+# `sock listen --as-puppet --project <dir> --exec` is what sock-runner-service
+# installs; the exec child must run as that project's puppet (SOCK_TOKEN and
+# SOCK_URL from listen), which sock-runner's owner gate relies on.
+# shellcheck disable=SC2086 # $names is two words
+set -- $names
+first=$1
+eval "fid=\$id_$first"
+probe=$work/probe.sh
+cat >"$probe" <<'PROBE'
+#!/bin/sh
+cat >/dev/null
+sock whoami --json | jq -r '.account.id' >"$PROBE_OUT"
+PROBE
+chmod +x "$probe"
+# shellcheck disable=SC2154 # fid is set by the eval
+c=$(conv_of "$fid")
+sock send --conversation "$c" "for-exec" >/dev/null 2>"$work/send.err" || fail "owner send for exec: $(cat "$work/send.err")"
+(cd "$work/$first" && PROBE_OUT=$work/probe.out exec sock listen --as-puppet --project "$work/$first" --exec "$probe") >/dev/null 2>"$work/listen.err" &
+listen_pid=$!
+for _ in $(seq 1 50); do
+	[ -s "$work/probe.out" ] && break
+	sleep 0.2
+done
+kill "$listen_pid" 2>/dev/null
+wait "$listen_pid" 2>/dev/null
+[ "$(cat "$work/probe.out" 2>/dev/null)" = "$fid" ] ||
+	fail "listen --as-puppet exec ran as '$(cat "$work/probe.out" 2>/dev/null)', want $first's puppet $fid: $(cat "$work/listen.err")"
+echo "ok: listen --as-puppet --exec ran as $first's puppet"
 echo "PASS"
