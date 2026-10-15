@@ -257,7 +257,28 @@ awk_cut='
 		return n
 	}'
 # the text goes on stdin: argv is visible in ps to the same user
-post_one() { printf '%s' "$1" | sock send >/dev/null 2>&1; }
+# post_one KEY TEXT posts TEXT under the idempotency key <message id>.KEY,
+# the same on every rerun of this message, so a send the hub took whose answer
+# was lost posts once (sock-cli v0.2.8 --idempotency-key). The hub refusing
+# the key for a different text means this message already posted that part.
+# An older sock without the flag posts unkeyed. Its stderr is read for that
+# refusal only; the CLI never echoes the text.
+send_keyed=
+post_one() {
+	if [ -z "$send_keyed" ]; then
+		send_keyed=no
+		sock send --help 2>/dev/null | grep -q -- '--idempotency-key' && send_keyed=yes
+	fi
+	if [ "$send_keyed" = no ]; then
+		printf '%s' "$2" | sock send >/dev/null 2>&1
+		return
+	fi
+	post_err=$(printf '%s' "$2" | sock send --idempotency-key "$stdin_id.$1" 2>&1 >/dev/null) && return 0
+	case $post_err in
+	*"idempotency key reused"*) return 0 ;;
+	esac
+	return 1
+}
 # clean_text removes the control characters but newline and tab: C0 (CR among
 # them), DEL, and C1 (U+0080 to U+009F, the UTF-8 pairs C2 80 to C2 9F: C2 only
 # ever leads a character, so no other one is cut), and the characters that can
@@ -324,7 +345,7 @@ post_text() {
 				BEGIN { ord_init() } { buf = buf (NR > 1 ? "\n" : "") $0 } END { print substr(buf, 1, cut_at(buf, max)) }')
 [cut: the rest of the answer was not sent]"
 		fi
-		post_one "$part" || {
+		post_one "$i" "$part" || {
 			log_line "send failed"
 			exit 1
 		}
@@ -616,7 +637,7 @@ halted() {
 	fi
 	log_line "create halted"
 	if [ "${h_posted:-}" != posted ]; then
-		post_one "the bridge cannot start a session that fits its configuration; check SOCK_BRIDGE_AGENT, SOCK_BRIDGE_ENVIRONMENT and SOCK_BRIDGE_BUDGET" &&
+		post_one halt "the bridge cannot start a session that fits its configuration; check SOCK_BRIDGE_AGENT, SOCK_BRIDGE_ENVIRONMENT and SOCK_BRIDGE_BUDGET" &&
 			halt_put posted
 	fi
 	echo "$cmd_name: session creation is halted for this configuration: a create answered a session the bridge cannot use. Fix SOCK_BRIDGE_AGENT, SOCK_BRIDGE_ENVIRONMENT or SOCK_BRIDGE_BUDGET, or delete $halt_file" >&2
@@ -686,7 +707,7 @@ EOF
 		log_line "session created"
 	fi
 	if [ -n "$notice" ]; then
-		post_one "$notice" || {
+		post_one notice "$notice" || {
 			log_line "send failed"
 			exit 1
 		}

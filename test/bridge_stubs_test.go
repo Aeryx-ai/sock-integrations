@@ -24,6 +24,11 @@ const (
 
 // bnSockStub records `sock send` argv and environment, and answers whoami like rnSockStub.
 const bnSockStub = `#!/bin/sh
+# the flag probe is not a call on the hub: it is not counted
+if [ "$1 $2" = "send --help" ]; then
+  [ -n "$STUB_NO_IDEM" ] || echo "      --idempotency-key string   a key per message"
+  exit 0
+fi
 echo "$SOCK_TOKEN" >> "$STUB_DIR/sock-token"
 case "$1" in
 whoami)
@@ -31,11 +36,15 @@ whoami)
 send)
   n=$(ls "$STUB_DIR" | grep -c '^send\.')
   d="$STUB_DIR/send.$n"; mkdir "$d"
-  shift; [ "$1" = "--" ] && shift
+  shift; key=
+  if [ "$1" = "--idempotency-key" ]; then key=$2; shift 2; fi
+  [ "$1" = "--" ] && shift
   printf '%s\n' "$@" > "$d/argv"
+  printf '%s' "$key" > "$d/key"
   if [ $# -gt 0 ]; then printf '%s' "$1" > "$d/text"; else cat > "$d/text"; fi
   env > "$d/env"
   [ "$STUB_SEND_FAIL_N" = "$n" ] && exit 1
+  if [ "$STUB_SEND_MISMATCH_N" = "$n" ]; then echo "sock: idempotency key reused with a different message" >&2; exit 1; fi
   exit 0 ;;
 *) exit 64 ;;
 esac
@@ -473,7 +482,7 @@ func newBridgeHarnessNoParallel(t *testing.T) *bnHarness {
 	return &bnHarness{rnHarness: h, api: api}
 }
 
-type bnSend struct{ Text, Env string }
+type bnSend struct{ Text, Env, Key string }
 
 // sends are the `sock send` calls the bridge made, in order.
 func (h *bnHarness) sends() []bnSend {
@@ -486,7 +495,8 @@ func (h *bnHarness) sends() []bnSend {
 			break
 		}
 		eb, _ := os.ReadFile(filepath.Join(d, "env"))
-		out = append(out, bnSend{Text: string(tb), Env: string(eb)})
+		kb, _ := os.ReadFile(filepath.Join(d, "key"))
+		out = append(out, bnSend{Text: string(tb), Env: string(eb), Key: string(kb)})
 	}
 	return out
 }
