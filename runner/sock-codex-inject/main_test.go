@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -267,17 +268,17 @@ func TestNewestWhenTheAskedSessionIsGone(t *testing.T) {
 }
 
 func TestOnlyInteractiveSessionsInTheProject(t *testing.T) {
-	p := project(t)
+	p := gitInit(t, project(t))
 	sub := filepath.Join(p, "pkg", "x")
 	if err := os.MkdirAll(sub, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	other := project(t)
-	exec := "exec"
+	execSrc := "exec"
 	f := &fakeServer{
 		threads: []thread{
 			{ID: "ephemeral", Cwd: p, Ephemeral: true, ThreadSource: user(), UpdatedAt: 900},
-			{ID: "title", Cwd: p, ThreadSource: &exec, UpdatedAt: 800},
+			{ID: "title", Cwd: p, ThreadSource: &execSrc, UpdatedAt: 800},
 			{ID: "elsewhere", Cwd: other, ThreadSource: user(), UpdatedAt: 700},
 			{ID: "sibling", Cwd: p + "-other", ThreadSource: user(), UpdatedAt: 650},
 			{ID: "subdir", Cwd: sub, ThreadSource: user(), UpdatedAt: 10},
@@ -301,25 +302,101 @@ func TestListedSessionWithoutThreadSourceCounts(t *testing.T) {
 	}
 }
 
-func TestNotLoadedIsResumedBeforeTheTurn(t *testing.T) {
+// A session the daemon does not have loaded is not injected into: resuming it
+// would run under whatever the daemon derives at resume, not the settings the
+// person started it with. The reply waits for a session to be open.
+func TestNotLoadedIsNotACandidate(t *testing.T) {
 	p := project(t)
 	f := &fakeServer{threads: []thread{{ID: "cold", Cwd: p, ThreadSource: user(), UpdatedAt: 1}, {ID: "x", Cwd: "/nowhere", ThreadSource: user()}}}
-	r := inject(t, serve(t, f), p, writeAsk(t, ""), prompt)
-	if r.code != 0 {
+	r := inject(t, serve(t, f), p, writeAsk(t, "cold 1792100000\n"), prompt)
+	if r.code != 4 || r.stdout != "no-session\n" {
 		t.Fatalf("got %+v", r)
 	}
-	order := strings.Join(f.order(), ",")
-	if !strings.Contains(order, "thread/resume") || strings.Index(order, "thread/resume") > strings.Index(order, "turn/start") {
-		t.Fatalf("order %s", order)
+	if f.called("thread/resume") || f.called("turn/start") {
+		t.Fatalf("order %v", f.order())
 	}
-	var rp struct {
-		ThreadID     string `json:"threadId"`
-		ExcludeTurns bool   `json:"excludeTurns"`
+}
+
+// The project is the puppet's: a nested repository inside the project is
+// another project, whatever its path says.
+func TestNestedRepositoryIsAnotherProject(t *testing.T) {
+	p := gitInit(t, project(t))
+	nested := gitInit(t, filepath.Join(p, "vendor", "n"))
+	f := &fakeServer{
+		threads: []thread{{ID: "own", Cwd: p, UpdatedAt: 1}, {ID: "nested", Cwd: nested, UpdatedAt: 9}},
+		loaded:  []string{"own", "nested"},
 	}
-	_ = json.Unmarshal(f.params["thread/resume"], &rp)
-	if rp.ThreadID != "cold" || !rp.ExcludeTurns {
-		t.Fatalf("resume %s", f.params["thread/resume"])
+	r := inject(t, serve(t, f), p, writeAsk(t, "nested 1792100000\n"), prompt)
+	if r.code != 0 || r.stdout != "accepted session=own turn=turn-1\n" {
+		t.Fatalf("got %+v", r)
 	}
+}
+
+// A linked worktree outside the repository speaks as the repository's
+// puppet, so its session is the project's.
+func TestWorktreeOutsideIsTheSameProject(t *testing.T) {
+	p := gitInit(t, project(t))
+	git(t, p, "commit", "-q", "--allow-empty", "-m", "x")
+	wt := filepath.Join(project(t), "wt")
+	git(t, p, "worktree", "add", "-q", wt)
+	f := &fakeServer{
+		threads: []thread{{ID: "main", Cwd: p, UpdatedAt: 1}, {ID: "tree", Cwd: wt, UpdatedAt: 2}},
+		loaded:  []string{"main", "tree"},
+	}
+	r := inject(t, serve(t, f), p, writeAsk(t, ""), prompt)
+	if r.code != 0 || r.stdout != "accepted session=tree turn=turn-1\n" {
+		t.Fatalf("got %+v", r)
+	}
+}
+
+// A retry that would choose another session still finds the earlier delivery.
+func TestDuplicateInAnotherSessionOfTheProject(t *testing.T) {
+	p := project(t)
+	f := &fakeServer{
+		threads:   []thread{{ID: "first", Cwd: p, UpdatedAt: 1}, {ID: "second", Cwd: p, UpdatedAt: 2}},
+		loaded:    []string{"first", "second"},
+		clientIDs: map[string][]string{"first": {msgID}},
+	}
+	r := inject(t, serve(t, f), p, writeAsk(t, ""), prompt)
+	if r.code != 3 || r.stdout != "duplicate session=first\n" {
+		t.Fatalf("got %+v", r)
+	}
+	if f.called("turn/start") {
+		t.Fatal("injected a duplicate")
+	}
+}
+
+// The list asks for interactive sources by name, not by the daemon's default.
+func TestListNamesItsSourceKinds(t *testing.T) {
+	p := project(t)
+	f := &fakeServer{threads: []thread{{ID: "s", Cwd: p, UpdatedAt: 1}}, loaded: []string{"s"}}
+	if r := inject(t, serve(t, f), p, writeAsk(t, ""), prompt); r.code != 0 {
+		t.Fatalf("got %+v (an empty first page with a cursor must not end the list)", r)
+	}
+	var lp struct {
+		SourceKinds []string `json:"sourceKinds"`
+	}
+	_ = json.Unmarshal(f.params["thread/list"], &lp)
+	if strings.Join(lp.SourceKinds, ",") != "cli,vscode" {
+		t.Fatalf("sourceKinds %v", lp.SourceKinds)
+	}
+}
+
+func git(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir, "-c", "user.email=t@t", "-c", "user.name=t"}, args...)...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v %s", args, err, out)
+	}
+}
+
+func gitInit(t *testing.T, dir string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	git(t, dir, "init", "-q")
+	return dir
 }
 
 func TestDuplicateClientIDIsNotInjectedAgain(t *testing.T) {
