@@ -9,10 +9,10 @@ Integrations that let coding agents talk to a sock server through a puppet accou
 /plugin install sock@sock-integrations
 ```
 
-Set the credential when the plugin prompts for it. It is stored in the plugin's secure userConfig.
+Leave the plugin's `sock_token` empty. The plugin then uses the machine key in the sock config file.
 
-- A machine key, the default: run `sock login` once, then `sock machine-key create --label "$(hostname -s)"` and paste the `sock_mk_` value. Every project then gets its own puppet the first time a session runs in it, named `<project> on <host>`, so each message shows which project sent it and you reply in that puppet's thread. Worktrees of one repository share its puppet. A repository that is moved or deleted loses its puppet at the next start. Tokens are cached in `${XDG_STATE_HOME:-~/.local/state}/sock-integrations/puppets` (mode 600). The key itself can only make and erase the puppets it made: it cannot read or send your messages. Erase a project's puppet from the app like any other puppet.
-- A puppet token (`sock_pt_`): every session on the machine shares that one puppet, and replies race between sessions. If the prompt never appeared or you need to change the value, run `claude plugin configure sock@sock-integrations`. `sock` and `sock-mcp` must both be on the `PATH` of the Claude Code process. `make install-bins` installs them to `$(go env GOPATH)/bin` (usually `~/go/bin`), which Claude Code's `PATH` often lacks.
+- A machine key, the default: run `sock login` once, then `sock machine-key create | sock machine-key use`. Every project then gets its own puppet the first time a session runs in it, named `<project> on <host>`, so each message shows which project sent it and you reply in that puppet's thread. Worktrees of one repository share its puppet. A repository that is moved or deleted loses its puppet at the next start. Tokens are cached in `${XDG_STATE_HOME:-~/.local/state}/sock-integrations/puppets` (mode 600). The key itself can only make and erase the puppets it made: it cannot read or send your messages. Erase a project's puppet from the app like any other puppet.
+- A puppet token (`sock_pt_`) set as the plugin's `sock_token`: every session on the machine shares that one puppet, and replies race between sessions. If the prompt never appeared or you need to change the value, run `claude plugin configure sock@sock-integrations`. `sock` and `sock-mcp` must both be on the `PATH` of the Claude Code process. `make install-bins` installs them to `$(go env GOPATH)/bin` (usually `~/go/bin`), which Claude Code's `PATH` often lacks.
 
 Step-by-step setup on a Mac, the runner service (the default for chat) and the channel, is in `docs/setup-mac.md`.
 

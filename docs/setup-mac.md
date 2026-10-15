@@ -18,17 +18,13 @@ There are two ways for an agent to hear you. Use the runner for chat: it answers
    sock login
    ```
 
-3. Create a machine key. Keep it in the sock config file and set it as the plugin's key, so the runner and the agent's tools resolve the same project puppet:
+3. Create a machine key and keep it in the sock config file. Leave the plugin's `sock_token` empty: the runner, the agent's tools and the hooks then resolve the same project puppet from that file.
 
    ```sh
-   key=$(sock machine-key create)
-   printf '%s' "$key" | sock machine-key use
-   printf '%s\n' "$key"   # paste this into the next command's prompt
-   claude plugin configure sock@sock-integrations
-   unset key
+   sock machine-key create | sock machine-key use
    ```
 
-   Each project gets its own puppet, named `<project> on <host>`.
+   Each project gets its own puppet, named `<project> on <host>`. An old `sock_token` in the plugin overrides the key and makes every session one puppet: clear it with `claude plugin configure sock@sock-integrations`.
 
 4. Start the runner for a project. Run this once per project:
 

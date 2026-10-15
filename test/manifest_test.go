@@ -86,8 +86,10 @@ func TestPluginManifest(t *testing.T) {
 	if p.Name != "sock" || p.License != "MIT" {
 		t.Fatalf("%+v", p)
 	}
-	if c := p.UserConfig["sock_token"]; !c.Sensitive || !c.Required {
-		t.Fatalf("sock_token must be sensitive and required: %+v", c)
+	// Optional: with none set, sock-mcp and the hooks take the machine key
+	// `sock login` keeps in the config file and make the project's puppet.
+	if c := p.UserConfig["sock_token"]; !c.Sensitive || c.Required {
+		t.Fatalf("sock_token must be sensitive and optional: %+v", c)
 	}
 	if _, ok := p.UserConfig["sock_url"]; !ok {
 		t.Fatal("missing userConfig sock_url")

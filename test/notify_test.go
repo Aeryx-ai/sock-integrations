@@ -1603,3 +1603,25 @@ func TestHooksNeverTouchSockSend(t *testing.T) {
 		}
 	}
 }
+
+// A Claude Code hook with no token set (plugin option or SOCK_TOKEN) sends as
+// the project's puppet that the plugin's sock-mcp resolves from the config
+// file, so a plugin installed with nothing configured still reaches the owner.
+func TestClaudeHookWithNoTokenSendsAsTheProjectPuppet(t *testing.T) {
+	s := newStub(t)
+	bin, rec := fakeSockAsPuppet(t, false)
+	env := map[string]string{"PATH": bin + ":" + hookPathTail, "SOCK_TOKEN": "", "CLAUDE_PLUGIN_ROOT": "/x/cplugin", "CLAUDE_PROJECT_DIR": "/x/proj", "SOCK_ACCESS_GATE": "gate-secret"}
+	runHook(t, s.URL, hookEnv{Env: env, Stdin: stopInput("z3", "Ship it?")}, "--stop", "--ask-now")
+	if got := readRec(t, rec, "args"); got != "send\n--as-puppet\n--project\n/x/proj" {
+		t.Fatalf("argv %q", got)
+	}
+	if got := readRec(t, rec, "text"); got != "proj: Ship it?" {
+		t.Fatalf("stdin %q", got)
+	}
+	got := readRec(t, rec, "env")
+	for _, v := range []string{"SOCK_TOKEN=", "SOCK_URL=", "SOCK_ACCESS_GATE=", "CLAUDE_PROJECT_DIR="} {
+		if strings.Contains(got, "\n"+v) || strings.HasPrefix(got, v) {
+			t.Fatalf("%s reached sock send", v)
+		}
+	}
+}

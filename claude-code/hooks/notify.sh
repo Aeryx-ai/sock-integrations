@@ -131,8 +131,16 @@ session=$(field session_id | LC_ALL=C tr -cd 'A-Za-z0-9_-' | LC_ALL=C cut -c1-64
 # sock-cli v0.2.5), never the login token. An exported SOCK_TOKEN or plugin
 # option is ignored here; $token keeps it only for redaction.
 as_puppet=0
+puppet_project=
 if [ -n "${PLUGIN_ROOT:-}" ] && [ -n "$(field turn_id)" ]; then
 	as_puppet=1
+	puppet_project=$PLUGIN_ROOT
+elif [ -z "$token" ]; then
+	# No token anywhere (the plugin's sock_token is optional): send as the
+	# project's puppet that the plugin's sock-mcp, given an empty SOCK_TOKEN,
+	# resolves from the config file's machine key for this project.
+	as_puppet=1
+	puppet_project=$project_dir
 fi
 
 # utf8_cap prints stdin cut to $1 bytes, less a UTF-8 sequence the cut left
@@ -350,7 +358,7 @@ send_as_puppet() {
 	}
 	printf '%s' "$1" >"$work/text"
 	bounded "$work/text" /dev/null "$work/send.err" \
-		env -u SOCK_TOKEN -u SOCK_URL -u SOCK_ACCESS_GATE -u CLAUDE_PROJECT_DIR sock send --as-puppet --project "$PLUGIN_ROOT"
+		env -u SOCK_TOKEN -u SOCK_URL -u SOCK_ACCESS_GATE -u CLAUDE_PROJECT_DIR sock send --as-puppet --project "$puppet_project"
 	rc=$?
 	send_rc=$rc
 	if [ "$rc" -ne 0 ]; then
@@ -512,10 +520,6 @@ send_text() {
 	if [ "$as_puppet" = 1 ]; then
 		send_as_puppet "$text"
 		return
-	fi
-	if [ -z "$token" ]; then
-		log_line "no token: set SOCK_TOKEN or the plugin's sock_token option"
-		return 1
 	fi
 	if ! command -v sock >/dev/null 2>&1; then
 		log_line "sock not found on PATH"
