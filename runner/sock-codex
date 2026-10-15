@@ -67,7 +67,7 @@ case $code in
 	;;
 3)
 	record_done
-	log_line "duplicate in session${detail:+ $detail}"
+	log_line "duplicate${detail:+ $detail}"
 	exit 0
 	;;
 4)

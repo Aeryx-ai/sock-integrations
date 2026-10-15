@@ -72,7 +72,7 @@ func TestSockCodexOutcomes(t *testing.T) {
 		exit, want int
 		log        string
 	}{
-		"duplicate":          {3, 0, "duplicate in session"},
+		"duplicate":          {3, 0, "duplicate session=s1"},
 		"no session":         {4, 1, "no session"},
 		"refused":            {5, 1, "refused"},
 		"daemon unavailable": {6, 1, "daemon unavailable"},
