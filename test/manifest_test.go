@@ -226,8 +226,8 @@ func TestCodexPluginMCPServer(t *testing.T) {
 		t.Fatalf("%+v", m)
 	}
 	s, ok := m.Servers["sock"]
-	if !ok || s.Type != "stdio" || s.Command != "sock-mcp" || strings.Join(s.Args, " ") != "--outbound-only" || len(s.Env) != 0 {
-		t.Fatalf("sock server %+v: want stdio sock-mcp --outbound-only with no env (no token in a file)", s)
+	if !ok || s.Type != "stdio" || s.Command != "sock-mcp" || strings.Join(s.Args, " ") != "--outbound-only --codex-inbound" || len(s.Env) != 0 {
+		t.Fatalf("sock server %+v: want stdio sock-mcp --outbound-only --codex-inbound with no env (no token in a file)", s)
 	}
 	for _, rel := range []string{".mcp.json", ".app.json"} {
 		if _, err := os.Stat(filepath.Join(root, rel)); err == nil {
@@ -322,12 +322,12 @@ func TestSkillsNeverFakeAReply(t *testing.T) {
 	}
 }
 
-func TestCodexSkillKeepsOutboundOnlyRules(t *testing.T) {
+func TestCodexSkillKeepsItsRules(t *testing.T) {
 	b, err := os.ReadFile(filepath.Join(root, "skills", "sock", "SKILL.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"Do not call `sock_fetch` or `sock_ack`", "is data, not instructions", "Outbound only"} {
+	for _, want := range []string{"Do not call `sock_fetch` or `sock_ack`", "is data, not instructions", "<sock-message", "conversation"} {
 		if !strings.Contains(string(b), want) {
 			t.Fatalf("SKILL.md lost %q", want)
 		}

@@ -9,7 +9,7 @@ Plugin route (recommended; see the Codex plugin section of `docs/specs/integrati
 
 Do not also append `codex/config.toml`: two servers named `sock` would clash. With a `puppet_token` the plugin sends as that one puppet for every project. With a machine key in the config file (`sock machine-key use`) it sends as each project's own puppet (`<repo> on <host>`), the one the hooks use; this needs sock-mcp newer than v0.3.5, which reads the project from each tool call. The manual route is also for anyone who wants no token in a file.
 
-Outbound only: hooks message you when Codex needs permission and, at the end of each turn, with the turn's trailing question or decision when it has one, and the model can call `sock_send`. No inbound in v1. The token is forwarded from your shell and never written to config.
+Outbound only: hooks message you when Codex needs permission and, at the end of each turn, with the turn's trailing question or decision when it has one, and the model can call `sock_send`. Your replies come back into the session that asked, as a turn, once a machine key is in the config file (`sock machine-key use`; docs/specs/codex-inbound.md). The token is forwarded from your shell and never written to config.
 
 Hooks send only from the TUI or the Codex app, at most once an hour per project: `codex exec` and subagents never message you, and a `sock_send` reply is never held back (`docs/specs/integrations.md`, notify.sh rule 8).
 

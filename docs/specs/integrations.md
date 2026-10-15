@@ -12,11 +12,10 @@ Caller class: puppet device (`sock_pt_`). A machine key (`sock_mk_`) is accepted
 
 v1 is bearer-token platforms only.
 
-In: Claude Code plugin, Codex config and hooks, Agent SDK example, the headless inbound runner (`runner/sock-runner`) and the Managed Agents bridge (`runner/sock-bridge`).
+In: Claude Code plugin, Codex config and hooks, Codex inbound through the plugin's server ([codex-inbound.md](codex-inbound.md)), Agent SDK example, the headless inbound runner (`runner/sock-runner`) and the Managed Agents bridge (`runner/sock-bridge`).
 
 Out, tracked in bd:
 - Managed Agents webhook delivery: a follow-up bead after the bridge below, declined. Session creation and owner-brokered tool confirmations are built (below).
-- Codex app-server live injection: designed in [codex-inbound.md](codex-inbound.md) (integrations-2ol), not built.
 - Hosted HTTP surfaces: Responses API hosted MCP, claude.ai, ChatGPT, Managed Agents cloud MCP. sock-mcp is stdio only, and these need a public URL and an OAuth-style credential.
 - Won't do: a `Stop` hook that fetches pending messages. The channel is the inbound path.
 

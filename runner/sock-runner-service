@@ -9,7 +9,7 @@
 #   sock-runner-service uninstall <project dir>
 #
 # Settings come from the environment as for sock-runner: SOCK_RUNNER_AGENT
-# (default claude; codex-live installs sock-codex instead), SOCK_RUNNER_PERMISSION (default default), and when set
+# (default claude), SOCK_RUNNER_PERMISSION (default default), and when set
 # SOCK_RUNNER_SESSION, SOCK_RUNNER_MODEL, SOCK_RUNNER_TIMEOUT and
 # SOCK_RUNNER_ALLOW_BYPASS. The
 # unit holds no credential: `sock listen --as-puppet` resolves the project's
@@ -69,18 +69,7 @@ fi
 SOCK_RUNNER_AGENT=${SOCK_RUNNER_AGENT:-claude}
 SOCK_RUNNER_PERMISSION=${SOCK_RUNNER_PERMISSION:-default}
 SOCK_RUNNER_WORKDIR=$project
-if [ "$SOCK_RUNNER_AGENT" = codex-live ]; then
-	# sock-codex puts each reply into the project's live Codex sessions through
-	# the app-server (docs/specs/codex-inbound.md); the session's own sandbox
-	# and approvals apply, so no permission setting
-	agent=codex-live
-	mode=$SOCK_RUNNER_PERMISSION
-	exec_cmd=sock-codex
-	command -v sock-codex-inject >/dev/null 2>&1 || die_config "sock-codex-inject not found on PATH: make install-bins"
-else
-	runner_config
-	exec_cmd=sock-runner
-fi
+runner_config
 sock_bin=$(command -v sock)
 sock listen --help 2>/dev/null | grep -q -- '--as-puppet' ||
 	die_config "this sock has no 'listen --as-puppet': install a sock-cli that has it"
@@ -120,7 +109,7 @@ if [ "$kind" = launchd ]; then
 		<string>--project</string>
 		<string>$project</string>
 		<string>--exec</string>
-		<string>$here/$exec_cmd</string>
+		<string>$here/sock-runner</string>
 	</array>
 	<key>WorkingDirectory</key>
 	<string>$project</string>
@@ -156,7 +145,7 @@ Description=sock-runner for $project
 After=network-online.target
 
 [Service]
-ExecStart=$sock_bin listen --as-puppet --project $project --exec $here/$exec_cmd
+ExecStart=$sock_bin listen --as-puppet --project $project --exec $here/sock-runner
 WorkingDirectory=$project
 EOF
 		runner_env | sed 's/^/Environment=/'

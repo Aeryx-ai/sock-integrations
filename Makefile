@@ -12,16 +12,13 @@ build: deps
 		echo "claude not found, skipping plugin validation"; \
 	fi
 	cd test && go vet ./...
-	cd runner/sock-codex-inject && go vet ./... && go build ./...
 
 test: deps
-	cd runner/sock-codex-inject && go test -race -count=1 ./...
 	cd test && go test -race -count=1 -timeout 30m ./...
 
 lint:
-	shellcheck -x claude-code/hooks/notify.sh scripts/smoke.sh runner/sock-runner runner/sock-runner-service runner/sock-bridge runner/sock-codex runner/lib.sh scripts/e2e-dev.sh
+	shellcheck -x claude-code/hooks/notify.sh scripts/smoke.sh runner/sock-runner runner/sock-runner-service runner/sock-bridge runner/lib.sh scripts/e2e-dev.sh
 	cd test && golangci-lint run ./...
-	cd runner/sock-codex-inject && golangci-lint run ./...
 
 check: build lint test
 
@@ -30,7 +27,6 @@ check: build lint test
 install-bins:
 	$(MAKE) -C ../cli install
 	$(MAKE) -C ../mcp install
-	cd runner/sock-codex-inject && go install .
 
 install: install-bins
 	claude plugin marketplace add "$(CURDIR)"

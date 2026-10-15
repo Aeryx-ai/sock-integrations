@@ -4,7 +4,7 @@
     "sock": {
       "type": "stdio",
       "command": "sock-mcp",
-      "args": ["--outbound-only"]
+      "args": ["--outbound-only", "--codex-inbound"]
     }
   }
 }
