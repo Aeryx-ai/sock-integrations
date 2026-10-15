@@ -7,7 +7,7 @@ Needs `sock`, `jq` and the agent (`claude` or `codex`) on `PATH`.
 ```sh
 export SOCK_TOKEN=sock_pt_...        # the runner's own puppet, no other consumer
 export SOCK_RUNNER_AGENT=claude      # or codex
-export SOCK_RUNNER_SESSION=<a session id nobody has open>
+# SOCK_RUNNER_SESSION: optional for claude (the runner makes and keeps its own session), required for codex
 export SOCK_RUNNER_WORKDIR=/path/to/project
 export SOCK_RUNNER_PERMISSION=default # claude: --permission-mode; codex: --sandbox (read-only, workspace-write)
 sock listen --exec /path/to/runner/sock-runner

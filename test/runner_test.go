@@ -404,8 +404,6 @@ func TestRunnerBadConfigExits2(t *testing.T) {
 	}{
 		{"missing agent", nil, []string{"SOCK_RUNNER_AGENT"}},
 		{"unknown agent", map[string]string{"SOCK_RUNNER_AGENT": "bogus"}, nil},
-		{"missing session", nil, []string{"SOCK_RUNNER_SESSION"}},
-		{"empty session", map[string]string{"SOCK_RUNNER_SESSION": ""}, nil},
 		{"session with slash", map[string]string{"SOCK_RUNNER_SESSION": "a/b"}, nil},
 		{"session with dotdot slash", map[string]string{"SOCK_RUNNER_SESSION": "../x"}, nil},
 		{"session with space", map[string]string{"SOCK_RUNNER_SESSION": "a b"}, nil},

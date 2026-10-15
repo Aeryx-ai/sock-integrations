@@ -45,6 +45,10 @@ env > "$r/env"
 pwd > "$r/pwd"
 echo $$ > "$r/pid"
 cat > "$r/stdin"
+if [ -n "$STUB_GONE" ] && [ "$2" = "--resume" ]; then
+  echo "No conversation found with session ID: $3" >&2
+  exit 1
+fi
 [ -n "$STUB_IGNORE_TERM" ] && trap '' TERM
 echo start >> "$STUB_DIR/events"
 if [ -n "$STUB_OUT" ]; then echo "$STUB_OUT"; fi

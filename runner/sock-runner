@@ -29,8 +29,16 @@ case $agent in
 claude | codex) ;;
 *) die_config "SOCK_RUNNER_AGENT must be claude or codex" ;;
 esac
-printf '%s\n' "$session" | grep -Eqx '[A-Za-z0-9_][A-Za-z0-9._-]{0,127}' ||
-	die_config "SOCK_RUNNER_SESSION must be 1 to 128 characters of A-Z a-z 0-9 . _ -, not starting with . or -"
+# Unset, claude runs in a session the runner made and keeps in the state
+# directory (own_session); codex has no way to name a new session up front.
+own_session=
+if [ -z "$session" ]; then
+	[ "$agent" = claude ] || die_config "SOCK_RUNNER_SESSION is required for codex"
+	own_session=1
+else
+	printf '%s\n' "$session" | grep -Eqx '[A-Za-z0-9_][A-Za-z0-9._-]{0,127}' ||
+		die_config "SOCK_RUNNER_SESSION must be 1 to 128 characters of A-Z a-z 0-9 . _ -, not starting with . or -"
+fi
 [ -n "$workdir" ] && [ -d "$workdir" ] || die_config "SOCK_RUNNER_WORKDIR must be an existing directory"
 # exactly the modes each agent has: nothing else reaches its argv
 case "$agent:$mode" in
@@ -73,6 +81,7 @@ extra_cleanup() {
 		kill -KILL -- "-$agent_pgid" 2>/dev/null
 	fi
 	[ -n "$watchdog_pgid" ] && kill -KILL -- "-$watchdog_pgid" 2>/dev/null
+	[ -n "$prompt" ] && rm -f "$prompt.err"
 }
 install_traps
 
@@ -106,38 +115,76 @@ if [ "$agent" = claude ]; then scrub="$scrub -u SOCK_TOKEN -u SOCK_URL"; fi
 # SOCK_HEADLESS keeps the agent's notify.sh hooks quiet: the run answers the
 # owner with sock_send, and a resumed Codex session keeps the TUI's source.
 
+# --- the runner's own session: resumed when stored, else made ----------------
+# The file holds one lowercase uuid; anything else is replaced, never passed
+# to claude. Read and written under the lock, so two runs never make two.
+session_file=$state_dir/session
+session_flag=--resume
+new_session() {
+	session=$(uuidgen | tr '[:upper:]' '[:lower:]')
+	is_uuid "$session" || {
+		log_line "session id failed"
+		exit 1
+	}
+	if ! { printf '%s\n' "$session" >"$session_file.tmp" && mv -f "$session_file.tmp" "$session_file"; }; then
+		log_line "session not writable"
+		exit 1
+	fi
+	session_flag=--session-id
+}
+if [ -n "$own_session" ]; then
+	session=$(head -n 1 "$session_file" 2>/dev/null | head -c 64)
+	is_uuid "$session" || new_session
+fi
+
 cd "$workdir" || {
 	log_line "agent exit 71"
 	exit 1
 }
-set -m
-# shellcheck disable=SC2086 # $scrub is a list of -u NAME pairs
-case $agent in
-claude) env $scrub SOCK_HEADLESS=1 claude -p --resume "$session" --permission-mode "$mode" --allowedTools "$claude_tools" --disallowedTools "$claude_denied" --permission-prompts none <"$prompt" >/dev/null 2>/dev/null & ;;
-codex) env $scrub SOCK_HEADLESS=1 codex exec --sandbox "$mode" resume "$session" - <"$prompt" >/dev/null 2>/dev/null & ;;
-esac
-agent_pgid=$!
-# the lock wait counted against the timeout: the run gets what take_lock left
-left=$((deadline - $(now)))
-[ "$left" -gt 0 ] || left=1
-(
-	sleep "$left"
-	# an agent whose group is gone finished before the deadline: no timeout
-	kill -0 -- "-$agent_pgid" 2>/dev/null || exit 0
-	: >"$prompt.timeout"
-	kill -TERM -- "-$agent_pgid" 2>/dev/null
-	sleep 5
-	kill -KILL -- "-$agent_pgid" 2>/dev/null
-) >/dev/null 2>&1 &
-watchdog_pgid=$!
-wait "$agent_pgid"
-code=$?
-agent_pgid=
-kill -KILL -- "-$watchdog_pgid" 2>/dev/null
-# reap it here, so a shell that announces a killed job does so into /dev/null
-{ wait "$watchdog_pgid"; } 2>/dev/null
-watchdog_pgid=
-set +m
+
+# run_agent starts the agent in its own process group under the watchdog and
+# sets code. claude's stderr goes to a private file beside the prompt, read
+# only for the missing-session error and removed with the prompt; never logged.
+run_agent() {
+	set -m
+	# shellcheck disable=SC2086 # $scrub is a list of -u NAME pairs
+	case $agent in
+	claude) env $scrub SOCK_HEADLESS=1 claude -p "$session_flag" "$session" --permission-mode "$mode" --allowedTools "$claude_tools" --disallowedTools "$claude_denied" --permission-prompts none <"$prompt" >/dev/null 2>"$prompt.err" & ;;
+	codex) env $scrub SOCK_HEADLESS=1 codex exec --sandbox "$mode" resume "$session" - <"$prompt" >/dev/null 2>/dev/null & ;;
+	esac
+	agent_pgid=$!
+	# the lock wait counted against the timeout: the run gets what take_lock left
+	left=$((deadline - $(now)))
+	[ "$left" -gt 0 ] || left=1
+	(
+		sleep "$left"
+		# an agent whose group is gone finished before the deadline: no timeout
+		kill -0 -- "-$agent_pgid" 2>/dev/null || exit 0
+		: >"$prompt.timeout"
+		kill -TERM -- "-$agent_pgid" 2>/dev/null
+		sleep 5
+		kill -KILL -- "-$agent_pgid" 2>/dev/null
+	) >/dev/null 2>&1 &
+	watchdog_pgid=$!
+	wait "$agent_pgid"
+	code=$?
+	agent_pgid=
+	kill -KILL -- "-$watchdog_pgid" 2>/dev/null
+	# reap it here, so a shell that announces a killed job does so into /dev/null
+	{ wait "$watchdog_pgid"; } 2>/dev/null
+	watchdog_pgid=
+	set +m
+}
+run_agent
+
+# a stored session claude no longer has: nothing ran, so the message runs once
+# more in a new session, within what is left of the timeout
+if [ -n "$own_session" ] && [ "$session_flag" = --resume ] && [ "$code" -ne 0 ] && [ ! -e "$prompt.timeout" ] &&
+	grep -q 'No conversation found with session ID' "$prompt.err" 2>/dev/null; then
+	log_line "session gone"
+	new_session
+	run_agent
+fi
 
 # a timeout first: an agent that exits 0 on the watchdog's TERM did not finish
 if [ -e "$prompt.timeout" ]; then
