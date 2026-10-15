@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := build
-.PHONY: build deps test install install-bins redeploy check lint smoke
+.PHONY: build deps test install install-bins redeploy check lint smoke e2e-dev
 
 deps:
 	$(MAKE) -C ../cli build
@@ -17,7 +17,7 @@ test: deps
 	cd test && go test -race -count=1 -timeout 30m ./...
 
 lint:
-	shellcheck -x claude-code/hooks/notify.sh scripts/smoke.sh runner/sock-runner runner/sock-runner-service runner/sock-bridge runner/lib.sh
+	shellcheck -x claude-code/hooks/notify.sh scripts/smoke.sh runner/sock-runner runner/sock-runner-service runner/sock-bridge runner/lib.sh scripts/e2e-dev.sh
 	cd test && golangci-lint run ./...
 
 check: build lint test
@@ -38,3 +38,8 @@ redeploy:
 
 smoke: deps
 	scripts/smoke.sh
+
+# Zero-config puppets end to end on the local dev hub: no sign-in, no browser,
+# no production credential. Needs the dev hub up (~/.config/sock-dev).
+e2e-dev: install-bins
+	scripts/e2e-dev.sh
