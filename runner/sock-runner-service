@@ -1,0 +1,168 @@
+#!/bin/sh
+# sock-runner-service: install or remove the per-project user service that
+# keeps `sock listen --as-puppet --project <dir> --exec sock-runner` running: a
+# launchd agent on macOS, a systemd --user unit on Linux. The service manager
+# restarts it on exit and starts it at login (docs/specs/integrations.md,
+# "Runner service").
+#
+#   sock-runner-service install <project dir>
+#   sock-runner-service uninstall <project dir>
+#
+# Settings come from the environment as for sock-runner: SOCK_RUNNER_AGENT
+# (default claude), SOCK_RUNNER_PERMISSION (default default), and when set
+# SOCK_RUNNER_SESSION, SOCK_RUNNER_TIMEOUT and SOCK_RUNNER_ALLOW_BYPASS. The
+# unit holds no credential: `sock listen --as-puppet` resolves the project's
+# puppet from the sock config file each time it starts. Exit 2 is a refusal.
+# shellcheck source-path=SCRIPTDIR
+# shellcheck disable=SC2034 # cmd_name is read by lib.sh
+set -u
+umask 077
+
+cmd_name=sock-runner-service
+here=$(cd -P "$(dirname "$0")" && pwd)
+# shellcheck source=lib.sh
+. "$here/lib.sh"
+
+usage() { die_config "usage: sock-runner-service install|uninstall <project dir>"; }
+[ $# -eq 2 ] || usage
+action=$1
+[ -d "$2" ] || die_config "$2 is not a directory"
+project=$(cd -P "$2" && pwd) || die_config "cannot resolve $2"
+
+# Paths go into a unit file and through `sh -c` in sock listen: refuse what
+# either would have to quote.
+safe='[A-Za-z0-9._/@+-]+'
+matches "$project" "$safe" || die_config "the project path may hold only A-Z a-z 0-9 . _ / @ + -: $project"
+matches "$here" "$safe" || die_config "the runner path may hold only A-Z a-z 0-9 . _ / @ + -: $here"
+matches "$PATH" '[A-Za-z0-9._/@+:-]+' || die_config "PATH may hold only A-Z a-z 0-9 . _ / @ + - and :"
+
+id=$(printf '%s' "$project" | hash16)
+case $(uname -s) in
+Darwin) kind=launchd ;;
+Linux) kind=systemd ;;
+*) die_config "no service manager for $(uname -s): run sock listen --exec $here/sock-runner yourself" ;;
+esac
+if [ "$kind" = launchd ]; then
+	label=ai.aeryx.sock-runner.$id
+	unit=$HOME/Library/LaunchAgents/$label.plist
+	domain=gui/$(id -u)
+else
+	label=sock-runner-$id.service
+	unit=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/$label
+fi
+
+if [ "$action" = uninstall ]; then
+	if [ "$kind" = launchd ]; then
+		launchctl bootout "$domain/$label" 2>/dev/null
+	else
+		systemctl --user disable --now "$label" 2>/dev/null
+	fi
+	rm -f "$unit"
+	[ "$kind" = systemd ] && systemctl --user daemon-reload
+	echo "removed $label"
+	exit 0
+fi
+[ "$action" = install ] || usage
+
+# The runner's own checks, with the defaults the service passes it.
+SOCK_RUNNER_AGENT=${SOCK_RUNNER_AGENT:-claude}
+SOCK_RUNNER_PERMISSION=${SOCK_RUNNER_PERMISSION:-default}
+SOCK_RUNNER_WORKDIR=$project
+runner_config
+sock_bin=$(command -v sock)
+sock listen --help 2>/dev/null | grep -q -- '--as-puppet' ||
+	die_config "this sock has no 'listen --as-puppet': install a sock-cli that has it"
+
+state=${XDG_STATE_HOME:-$HOME/.local/state}/sock-integrations/runner/$id
+mkdir -p "$state" "$(dirname "$unit")" || die_config "cannot create $state or $(dirname "$unit")"
+
+# name=value lines of the runner's environment, the optional ones when set
+runner_env() {
+	printf '%s\n' "PATH=$PATH" "SOCK_RUNNER_AGENT=$agent" "SOCK_RUNNER_PERMISSION=$mode" \
+		"SOCK_RUNNER_WORKDIR=$project" "SOCK_RUNNER_STATE=$state"
+	for n in SOCK_RUNNER_SESSION SOCK_RUNNER_TIMEOUT SOCK_RUNNER_ALLOW_BYPASS; do
+		eval "v=\${$n:-}"
+		# shellcheck disable=SC2154 # v is set by the eval
+		[ -z "$v" ] || printf '%s=%s\n' "$n" "$v"
+	done
+}
+for line in $(runner_env); do
+	matches "$line" '[A-Za-z_]+=[A-Za-z0-9._/@+:-]+' || die_config "a setting holds a character a unit file would need quoted: ${line%%=*}"
+done
+
+tmp=$unit.tmp
+if [ "$kind" = launchd ]; then
+	{
+		cat <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>$label</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>$sock_bin</string>
+		<string>listen</string>
+		<string>--as-puppet</string>
+		<string>--project</string>
+		<string>$project</string>
+		<string>--exec</string>
+		<string>$here/sock-runner</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>$project</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+EOF
+		runner_env | while IFS='=' read -r k v; do
+			printf '\t\t<key>%s</key>\n\t\t<string>%s</string>\n' "$k" "$v"
+		done
+		cat <<EOF
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+	<key>StandardErrorPath</key>
+	<string>$state/listen.log</string>
+</dict>
+</plist>
+EOF
+	} >"$tmp" || die_config "cannot write $tmp"
+	mv -f "$tmp" "$unit" || die_config "cannot write $unit"
+	# bootout first so a reinstall picks up the new file; none loaded is fine
+	launchctl bootout "$domain/$label" 2>/dev/null
+	launchctl bootstrap "$domain" "$unit" || die_config "launchctl bootstrap $domain $unit failed"
+else
+	{
+		cat <<EOF
+[Unit]
+Description=sock-runner for $project
+After=network-online.target
+
+[Service]
+ExecStart=$sock_bin listen --as-puppet --project $project --exec $here/sock-runner
+WorkingDirectory=$project
+EOF
+		runner_env | sed 's/^/Environment=/'
+		cat <<EOF
+Restart=always
+RestartSec=5
+StandardError=append:$state/listen.log
+
+[Install]
+WantedBy=default.target
+EOF
+	} >"$tmp" || die_config "cannot write $tmp"
+	mv -f "$tmp" "$unit" || die_config "cannot write $unit"
+	systemctl --user daemon-reload || die_config "systemctl --user daemon-reload failed"
+	systemctl --user enable --now "$label" || die_config "systemctl --user enable --now $label failed"
+	# enable --now leaves a running unit on its old file: restart picks up this one
+	systemctl --user restart "$label" || die_config "systemctl --user restart $label failed"
+fi
+echo "installed $label"
+echo "unit:  $unit"
+echo "state: $state (runner.log, listen.log)"

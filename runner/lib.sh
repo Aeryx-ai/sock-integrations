@@ -1,5 +1,5 @@
 # shellcheck shell=sh
-# shellcheck disable=SC2154 # the settings the caller sets, listed below
+# shellcheck disable=SC2154,SC2034 # the settings the caller sets, listed below, and those runner_config sets for it
 # Shared by runner/sock-runner and runner/sock-bridge, the two commands
 # `sock listen --exec` runs once per message (docs/specs/integrations.md). Source
 # it: it defines functions and runs nothing. A caller sets
@@ -32,6 +32,46 @@ matches() {
 is_uuid() { matches "$1" "$UUID"; }
 
 now() { date +%s; }
+
+# --- sock-runner's settings ---------------------------------------------------
+# runner_config reads and checks them (agent, session, workdir, mode and
+# own_session), exiting 2 on a bad one. sock-runner-service runs it at install,
+# so a unit never starts with a configuration the runner would refuse.
+runner_config() {
+	agent=${SOCK_RUNNER_AGENT:-}
+	session=${SOCK_RUNNER_SESSION:-}
+	workdir=${SOCK_RUNNER_WORKDIR:-}
+	mode=${SOCK_RUNNER_PERMISSION:-}
+
+	case $agent in
+	claude | codex) ;;
+	*) die_config "SOCK_RUNNER_AGENT must be claude or codex" ;;
+	esac
+	# Unset, claude runs in a session the runner made and keeps in the state
+	# directory (own_session); codex has no way to name a new session up front.
+	own_session=
+	if [ -z "$session" ]; then
+		[ "$agent" = claude ] || die_config "SOCK_RUNNER_SESSION is required for codex"
+		own_session=1
+	else
+		printf '%s\n' "$session" | grep -Eqx '[A-Za-z0-9_][A-Za-z0-9._-]{0,127}' ||
+			die_config "SOCK_RUNNER_SESSION must be 1 to 128 characters of A-Z a-z 0-9 . _ -, not starting with . or -"
+	fi
+	[ -n "$workdir" ] && [ -d "$workdir" ] || die_config "SOCK_RUNNER_WORKDIR must be an existing directory"
+	# exactly the modes each agent has: nothing else reaches its argv
+	case "$agent:$mode" in
+	claude:acceptEdits | claude:default | claude:dontAsk | claude:manual) ;;
+	claude:plan) die_config "plan mode blocks sock_send even when it is allowed (the model says it could not send and claude still exits 0): use default or dontAsk" ;;
+	codex:read-only | codex:workspace-write) ;;
+	claude:auto | claude:bypassPermissions | codex:danger-full-access)
+		[ "${SOCK_RUNNER_ALLOW_BYPASS:-}" = 1 ] || die_config "$mode needs SOCK_RUNNER_ALLOW_BYPASS=1"
+		;;
+	*) die_config "SOCK_RUNNER_PERMISSION must be one of the $agent modes, got '$mode'" ;;
+	esac
+	command -v "$agent" >/dev/null 2>&1 || die_config "$agent is not on PATH"
+	command -v jq >/dev/null 2>&1 || die_config "jq is not on PATH"
+	command -v sock >/dev/null 2>&1 || die_config "sock is not on PATH"
+}
 
 # the start time is compared as text: pin the locale and zone it is printed in
 start_of() { LC_ALL=C TZ=UTC ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //'; }

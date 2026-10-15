@@ -20,39 +20,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 . "$here/lib.sh"
 
 # --- configuration -----------------------------------------------------------
-agent=${SOCK_RUNNER_AGENT:-}
-session=${SOCK_RUNNER_SESSION:-}
-workdir=${SOCK_RUNNER_WORKDIR:-}
-mode=${SOCK_RUNNER_PERMISSION:-}
-
-case $agent in
-claude | codex) ;;
-*) die_config "SOCK_RUNNER_AGENT must be claude or codex" ;;
-esac
-# Unset, claude runs in a session the runner made and keeps in the state
-# directory (own_session); codex has no way to name a new session up front.
-own_session=
-if [ -z "$session" ]; then
-	[ "$agent" = claude ] || die_config "SOCK_RUNNER_SESSION is required for codex"
-	own_session=1
-else
-	printf '%s\n' "$session" | grep -Eqx '[A-Za-z0-9_][A-Za-z0-9._-]{0,127}' ||
-		die_config "SOCK_RUNNER_SESSION must be 1 to 128 characters of A-Z a-z 0-9 . _ -, not starting with . or -"
-fi
-[ -n "$workdir" ] && [ -d "$workdir" ] || die_config "SOCK_RUNNER_WORKDIR must be an existing directory"
-# exactly the modes each agent has: nothing else reaches its argv
-case "$agent:$mode" in
-claude:acceptEdits | claude:default | claude:dontAsk | claude:manual) ;;
-claude:plan) die_config "plan mode blocks sock_send even when it is allowed (the model says it could not send and claude still exits 0): use default or dontAsk" ;;
-codex:read-only | codex:workspace-write) ;;
-claude:auto | claude:bypassPermissions | codex:danger-full-access)
-	[ "${SOCK_RUNNER_ALLOW_BYPASS:-}" = 1 ] || die_config "$mode needs SOCK_RUNNER_ALLOW_BYPASS=1"
-	;;
-*) die_config "SOCK_RUNNER_PERMISSION must be one of the $agent modes, got '$mode'" ;;
-esac
-command -v "$agent" >/dev/null 2>&1 || die_config "$agent is not on PATH"
-command -v jq >/dev/null 2>&1 || die_config "jq is not on PATH"
-command -v sock >/dev/null 2>&1 || die_config "sock is not on PATH"
+runner_config
 
 timeout=${SOCK_RUNNER_TIMEOUT:-900}
 case $timeout in

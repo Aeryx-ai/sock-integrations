@@ -17,7 +17,7 @@ test: deps
 	cd test && go test -race -count=1 -timeout 30m ./...
 
 lint:
-	shellcheck -x claude-code/hooks/notify.sh scripts/smoke.sh runner/sock-runner runner/sock-bridge runner/lib.sh
+	shellcheck -x claude-code/hooks/notify.sh scripts/smoke.sh runner/sock-runner runner/sock-runner-service runner/sock-bridge runner/lib.sh
 	cd test && golangci-lint run ./...
 
 check: build lint test

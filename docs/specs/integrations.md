@@ -180,7 +180,7 @@ There is no prompt to answer in a headless run, and an MCP tool that is not pre-
 
 ### Rules that follow
 
-- The runner's puppet is its own: sock-mcp for that puppet runs without the channel and nothing calls `sock_fetch` or `sock_ack` for it (rule 2). The `listen` process is the single consumer.
+- The `listen` process is the single consumer of the runner's puppet: nothing calls `sock_fetch` or `sock_ack` for it, and no session that accepted the development channel runs as it (rule 2). Under the runner service that puppet is the project's (Runner service).
 - Use one `SOCK_RUNNER_STATE` per runner: two runners sharing the default directory share one lock, one ledger and one log (and the directory `notify.sh` logs to).
 - `sock listen --exec` runs its command through `/bin/sh -c`, so the runner's path must contain no spaces or shell metacharacters.
 - A session the runner resumes must be one no one has open: a resume while the same session is open in an interactive client interleaves two writers on one transcript. Leave `SOCK_RUNNER_SESSION` unset under `claude` and the runner makes and keeps its own.
@@ -188,11 +188,21 @@ There is no prompt to answer in a headless run, and an MCP tool that is not pre-
 - Message text is untrusted data even from the owner: the permission mode is the control, and the default is the most restrictive.
 - At-least-once: the agent may see a message twice. The prompt carries the message id so the session can recognise a repeat.
 
+### Runner service
+
+`runner/sock-runner-service install <project dir>` keeps `sock listen --as-puppet --project <dir> --exec <repo>/runner/sock-runner` running for one project as a user service: a launchd agent (`~/Library/LaunchAgents/ai.aeryx.sock-runner.<id>.plist`, `RunAtLoad`, `KeepAlive`, `ThrottleInterval` 10) on macOS, a systemd `--user` unit (`sock-runner-<id>.service`, `Restart=always`, `RestartSec=5`, `WantedBy=default.target`) on Linux. `<id>` is the first 16 hex of the SHA-256 of the project's physical path, so a project has one unit and reinstalling replaces it (launchd: `bootout` then `bootstrap` in `gui/<uid>`; systemd: `daemon-reload`, `enable --now`, `restart`). `uninstall <project dir>` stops and removes it.
+
+- No credential in the unit. `sock listen --as-puppet` (sock-cli, requested from sock-ops) resolves the project's puppet as `sock send --as-puppet` and the plugin's sock-mcp do (sock-client `ResolvePuppet`: `SOCK_TOKEN`, else the config file's `machine_key` through `puppets ensure` for the project, else `puppet_token`), and passes the resolved token and URL to the `--exec` child as `SOCK_TOKEN` and `SOCK_URL`. So the runner listens as the same puppet the agent's sock-mcp replies as, and the conversation ids it hands the agent are that puppet's. The installer refuses (exit 2) a `sock` whose `listen --help` lacks `--as-puppet`.
+- The unit carries the runner's settings: `SOCK_RUNNER_AGENT` (default `claude`), `SOCK_RUNNER_PERMISSION` (default `default`), `SOCK_RUNNER_WORKDIR` (the project), `SOCK_RUNNER_STATE` (`${XDG_STATE_HOME:-~/.local/state}/sock-integrations/runner/<id>`, one per project, so runners never share a lock or ledger), the installing shell's `PATH` (the agent, `jq` and `sock` must resolve under launchd), and `SOCK_RUNNER_SESSION`, `SOCK_RUNNER_TIMEOUT` and `SOCK_RUNNER_ALLOW_BYPASS` when set. The installer runs the runner's own configuration check (`runner_config` in `lib.sh`) first, so a unit never starts with settings the runner would refuse at every message. `listen`'s stderr goes to `listen.log` in the state directory.
+- Values go into a plist or unit file unquoted and through `sh -c`, so paths and settings are limited to `A-Za-z0-9._/@+-` (and `:` in `PATH`); anything else exits 2.
+- One consumer per project puppet: the service, or an interactive Claude Code session that accepted the development channel for that project, never both. Both would consume the same deliveries (rule 2). With sock-mcp v0.3.3 a session without an accepted channel does not consume, so ordinary interactive sessions in the project are fine beside the service.
+- Linux needs `loginctl enable-linger $USER` for the unit to run without a login session.
+
 ### Managed Agents bridge: sock-bridge
 
 A Claude Managed Agents session runs on Anthropic's side and is steered by events: the owner's reply goes in as a `user.message`, and the agent's answer comes back as `agent.message` events. `runner/sock-bridge` is the `sock listen --exec` command that carries one owner reply into one session and the agent's answer back to the owner. Conformist downstream of two upstreams, `sock listen --exec` and Anthropic's Managed Agents API (beta header `managed-agents-2026-04-01`; [events and streaming](https://platform.claude.com/docs/en/managed-agents/events-and-streaming)); it adds no server surface and no domain model, and it is the anti-corruption layer between the two vocabularies: a sock message in, session events out, never a session event vocabulary inside sock.
 
-Not a daemon. A daemon wrapping `sock listen` would duplicate what `listen --exec` already does (reconnect, backoff, at-least-once, ordering, ack on exit 0) and keep a second copy of stream state. A command run once per message, like `sock-runner`, reuses all of it: the turn is synchronous inside the command, and the ack is the exit code. The cost is that one long agent turn holds the stream; the timeout bounds it, and Managed Agents queues events anyway. No service means no rookery scaffold.
+Not a daemon of its own. A daemon wrapping `sock listen` would duplicate what `listen --exec` already does (reconnect, backoff, at-least-once, ordering, ack on exit 0) and keep a second copy of stream state. A command run once per message, like `sock-runner`, reuses all of it: the turn is synchronous inside the command, and the ack is the exit code. The cost is that one long agent turn holds the stream; the timeout bounds it, and Managed Agents queues events anyway. Keeping `sock listen` itself running is the OS service manager's job, not a daemon of this repo's: see "Runner service" (the earlier "no service" line is superseded there).
 
 ### Invocation
 
@@ -434,6 +444,7 @@ This repo handles a secret and an agent-to-human trust boundary. Before merge, a
 - Async plus a self-bound over a host timeout: the host does not enforce `timeout` on async hooks, and a synchronous permission hook would delay the agent whenever sock is down.
 - Fixed phrase over forwarding `message` (superseded 2026-10-13): the fixed phrases told the owner nothing, so the hooks now forward the notification text and the trailing ask of the last assistant message. The residual risk, text the assistant echoed leaving the machine, is accepted by the owner; code blocks are dropped and the ask is capped at 600 bytes.
 - Plugin `userConfig` for the token: secure storage, one prompt, and hooks and the MCP server both receive it without a file.
+- The runner runs as a user service (2026-10-14, the orchestrator for the product owner): the product requirement is that nothing needs babysitting, and a `sock listen` started by hand dies with its terminal, a reboot or a logout. This supersedes "No service means no rookery scaffold" for the runner. Still no daemon of this repo's: the OS service manager supervises the CLI's `sock listen`, which keeps reconnect, backoff and ack-on-exit; launchd and systemd add restart and start-at-login. Rookery's daemon+CLI shape does not fit a unit that only runs an existing command.
 
 ## Follow-ups outside this repo
 
