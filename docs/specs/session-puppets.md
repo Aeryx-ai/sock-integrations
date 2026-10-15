@@ -168,7 +168,10 @@ Recorded exception to the local-state rule (SQLite): the cache is ADR 10's file 
 
 `internal/asks`, notify.sh `record_ask`, the injector's project matching and session choice, and the per-project subscriptions. Project puppets are left on the hub, unused.
 
+## Decisions
+
+1. A session with no name yet (a Claude Code session never renamed, a Codex thread before its first turn) is named for its project directory and the first 8 characters of its session id, and renamed once it has a name (owner, 2026-10-15).
+
 ## Open questions
 
-1. Claude Code sessions without a `custom-title`: the fallback name, or wait for the owner to name one?
-2. A Claude Code session resumed with `--resume` in a different directory: same session id, so the same puppet. Assumed fine.
+1. A Claude Code session resumed with `--resume` in a different directory: same session id, so the same puppet. Assumed fine.
