@@ -226,8 +226,11 @@ func TestCodexPluginMCPServer(t *testing.T) {
 		t.Fatalf("%+v", m)
 	}
 	s, ok := m.Servers["sock"]
-	if !ok || s.Type != "stdio" || s.Command != "sock-mcp" || strings.Join(s.Args, " ") != "--outbound-only --codex-inbound" || len(s.Env) != 0 {
-		t.Fatalf("sock server %+v: want stdio sock-mcp --outbound-only --codex-inbound with no env (no token in a file)", s)
+	if !ok || s.Type != "stdio" || s.Command != "sock-mcp" || strings.Join(s.Args, " ") != "--outbound-only --codex-inbound" ||
+		len(s.Env) != 1 || s.Env["SOCK_MCP_MESSAGE_OWNER"] != "1" {
+		// the one setting: the session may message its owner, as the Claude
+		// Code plugin's message_owner option does by default; never a token
+		t.Fatalf("sock server %+v: want stdio sock-mcp --outbound-only --codex-inbound with only SOCK_MCP_MESSAGE_OWNER=1", s)
 	}
 	for _, rel := range []string{".mcp.json", ".app.json"} {
 		if _, err := os.Stat(filepath.Join(root, rel)); err == nil {
