@@ -1,6 +1,6 @@
 # Codex inbound: the owner's reply reaches the Codex session
 
-Pass 1 (2026-10-15). Bead integrations-2ol. Decision record: [ADR 1](../adr/0001-codex-replies-enter-through-the-app-server.md).
+Pass 2 (2026-10-15): open questions 1 and 2 decided by the owner. Bead integrations-2ol. Decision record: [ADR 1](../adr/0001-codex-replies-enter-through-the-app-server.md).
 
 A Codex session asks the owner something through sock. The owner answers in sock. The answer arrives in that Codex session as a turn, whether a person has the session open or not.
 
@@ -103,7 +103,7 @@ stateDiagram-v2
   Choosing --> DaemonUnavailable: socket absent or handshake fails (retry)
 ```
 
-Anything unlisted does not happen. `no session` is open question 1.
+Anything unlisted does not happen. `no session` leaves the reply pending (decision 1).
 
 ### Choosing the session (rule on the injection, no aggregate of its own)
 
@@ -157,7 +157,7 @@ Caller classes:
 | Interface | Caller | Authn | Authz | Request | Response | Errors | Idempotency | Behavior |
 |---|---|---|---|---|---|---|---|---|
 | `sock-codex` (a `sock listen --exec` command) | sock listen | Same user; `SOCK_TOKEN` resolved by `--as-puppet` | Owner gate (`lib.sh`) | protojson `sock.v1.Message` on stdin; `SOCK_MESSAGE_ID`, `SOCK_CONVERSATION_ID`, `SOCK_SENDER_ID` | exit 0 ack, 1 retry, 2 config | `lib.sh` taxonomy plus `no session`, `refused`, `daemon unavailable` | `done.ids` ledger, then the session history's `clientUserMessageId` | Choose session, inject |
-| `sock-codex-inject <project> <conversation>` (Go, the ACL) | sock-codex | Same user; Unix socket permissions | none beyond the socket | prompt on stdin (already tagged by `lib.sh`), message id in `SOCK_MESSAGE_ID` | stdout one line: outcome, session id, turn id when accepted | exit codes per outcome | as above | `thread/loaded/list`, `thread/list`, `thread/read`, `thread/resume`, `thread/items/list`, `turn/start` |
+| `sock-codex-inject --project DIR --conversation UUID --message-id UUID` (Go, the ACL) | sock-codex | Same user; Unix socket permissions | none beyond the socket | prompt on stdin (already tagged by `lib.sh`), at most 1 MiB | stdout one line: outcome, then `session=<id>` and `turn=<id>` when known | exit 0 accepted, 3 duplicate, 4 no session, 5 refused, 6 daemon unavailable, 2 usage; `sock-codex` maps 0 and 3 to ack, 4 to 6 to retry, 2 to configuration | as above | `thread/loaded/list`, `thread/list`, `thread/read`, `thread/resume`, `thread/items/list`, `turn/start` |
 | Session ask write | sock-mcp, notify.sh | Same user; file mode 0600 | none | conversation id, session id, time | none | a failed write is logged and never fails the send | replace-if-newer | `SessionAsk.record` |
 
 The prompt is `lib.sh`'s: the one-line preface and `<sock-message from="owner" conversation=… id=…>` with closing tags broken. The owner's text reaches Codex as user input inside that tag, never bare.
@@ -186,12 +186,19 @@ Location shared by writers and reader: sock-mcp and `notify.sh` run in the Codex
 | Session ask recorded | sock-mcp send, notify.sh send | none (local) | `codex-asks` |
 | Owner reply injected | `sock-codex` exit 0 | none: the ack is the record upstream | `done.ids` |
 | Duplicate | `sock-codex` exit 0 | none | `done.ids` or session history |
-| No session | open question 1 | | |
+| No session | `sock-codex` exit 1 | none | none: the reply stays pending at the hub |
+
+## Decisions
+
+1. No interactive Codex session in the project: the reply stays pending (exit 1). `sock listen` retries it five times with backoff, then holds it until it reconnects. Nothing starts a session on the owner's behalf.
+2. A turn that needs a tool approval while nobody has the session open waits until someone opens it. The `PermissionRequest` hook tells the owner; approving from sock is out of scope.
+
+## Running it
+
+`SOCK_RUNNER_AGENT=codex-live runner/sock-runner-service install <project>` keeps `sock listen --as-puppet --project <project> --exec runner/sock-codex` running, as for sock-runner. Needs `sock-codex-inject` on `PATH` (`make install-bins`).
 
 ## Open questions
 
-1. No interactive Codex session in the project: hold the reply pending (exit 1, `sock listen` retries five times, then holds it until it reconnects), or start a new session with it?
-2. A turn that needs a tool approval while nobody has the session open waits until someone does. The `PermissionRequest` hook tells the owner, who cannot approve from sock. Accept for pass 1?
-3. `thread/resume` of a session the daemon no longer has loaded (after a reboot or a daemon update) is in the schema and not yet run live.
-4. The app-server protocol is marked experimental and the daemon updates itself (0.163.0 while the CLI is 0.162.1). The injector pins nothing; a protocol change shows as `refused` and the reply stays pending.
-5. Several runner services and the Codex desktop app share one daemon. Only the project's own runner injects into that project's sessions; the desktop app is unaffected. Not yet checked with the app open.
+1. `thread/resume` of a session the daemon no longer has loaded (after a reboot or a daemon update) is in the schema and not yet run live.
+2. The app-server protocol is marked experimental and the daemon updates itself (0.163.0 while the CLI is 0.162.1). The injector pins nothing; a protocol change shows as `refused` and the reply stays pending.
+3. Several runner services and the Codex desktop app share one daemon. Only the project's own runner injects into that project's sessions; the desktop app is unaffected. Not yet checked with the app open.
