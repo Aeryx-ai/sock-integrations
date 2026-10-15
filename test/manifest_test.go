@@ -101,6 +101,10 @@ func TestPluginManifest(t *testing.T) {
 	if d := p.UserConfig["sock_url"].Default; d != any("https://api.sock.aeryx.ai") {
 		t.Fatalf("sock_url default %q", d)
 	}
+	// The owner hears from their puppets by default; the hub rate limits it.
+	if c := p.UserConfig["message_owner"]; c.Type != "boolean" || c.Default != any(true) {
+		t.Fatalf("message_owner must be a boolean defaulting to true: %+v", c)
+	}
 	if len(p.Channels) != 1 || p.Channels[0].Server != "sock" {
 		t.Fatalf("channels %+v", p.Channels)
 	}
@@ -119,7 +123,8 @@ func TestMCPConfigNeverHoldsLiteralToken(t *testing.T) {
 	if s.Command != "sock-mcp" || len(s.Args) != 1 || s.Args[0] != "--channel" {
 		t.Fatalf("%+v", s)
 	}
-	if s.Env["SOCK_TOKEN"] != "${user_config.sock_token}" || s.Env["SOCK_URL"] != "${user_config.sock_url}" {
+	if s.Env["SOCK_TOKEN"] != "${user_config.sock_token}" || s.Env["SOCK_URL"] != "${user_config.sock_url}" ||
+		s.Env["SOCK_MCP_MESSAGE_OWNER"] != "${user_config.message_owner}" {
 		t.Fatalf("env %+v", s.Env)
 	}
 }
@@ -284,24 +289,36 @@ func TestCodexMarketplace(t *testing.T) {
 	}
 }
 
-// Background sessions never message the owner and sock-mcp refuses an
-// unsolicited owner message, so no skill may steer a model toward one, or
-// toward posting into the owner's conversation as a fake reply.
-func TestSkillsNeverMessageTheOwnerUnprompted(t *testing.T) {
+// No skill steers a model toward posting into the owner's conversation as a
+// fake reply. Codex sessions have no message_owner option, so its skill keeps
+// the no-unprompted-message rule; the Claude Code skill says how to reach the
+// owner instead.
+func TestSkillsNeverFakeAReply(t *testing.T) {
 	for _, rel := range []string{"claude-code/skills/sock/SKILL.md", "skills/sock/SKILL.md"} {
 		b, err := os.ReadFile(filepath.Join(root, rel))
 		if err != nil {
 			t.Fatal(err)
 		}
 		s := string(b)
-		for _, bad := range []string{"long task finishes", "find the owner's conversation", "Message the owner when"} {
+		for _, bad := range []string{"long task finishes", "find the owner's conversation"} {
 			if strings.Contains(s, bad) {
 				t.Errorf("%s still says %q", rel, bad)
 			}
 		}
-		if !strings.Contains(s, "Never message the owner unprompted") {
-			t.Errorf("%s lacks the no-unprompted-message rule", rel)
-		}
+	}
+	codex, err := os.ReadFile(filepath.Join(root, "skills/sock/SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(codex), "Never message the owner unprompted") {
+		t.Error("Codex skill lacks the no-unprompted-message rule")
+	}
+	cc, err := os.ReadFile(filepath.Join(root, "claude-code/skills/sock/SKILL.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(cc), "Never message the owner unprompted") || !strings.Contains(string(cc), "without `conversation_id`") {
+		t.Error("Claude Code skill must say how to message the owner, not forbid it")
 	}
 }
 

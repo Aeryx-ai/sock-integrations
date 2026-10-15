@@ -9,7 +9,7 @@ Tools: `sock_whoami`, `sock_list_conversations`, `sock_send`, `sock_fetch`, `soc
 
 With a machine key each project sends as its own puppet, so the owner sees one contact per project, named `<repo> on <host>`.
 
-Never message the owner unprompted. The hooks tell the owner when this session waits on them, at most once an hour, and sock refuses an owner message that is not a reply. Do not post into the owner's conversation to get around that.
+To message the owner when they asked you to or something needs them, call `sock_send` without `conversation_id`. sock rate limits it; on `RATE_LIMITED` batch or drop rather than retry. If the owner turned the plugin's `message_owner` option off, sock refuses it; then do not post into the owner's conversation to get around that.
 
 Reply to a `<channel source="sock" ...>` message with `sock_send` and the tag's `conversation_id`. Keep it to one or two sentences. Do not send transcripts, file contents or secrets.
 

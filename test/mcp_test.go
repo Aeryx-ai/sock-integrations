@@ -15,9 +15,9 @@ const mcpSendText = "smoke: mcp"
 // over stdio, to a NotifyOwner endpoint. By default the endpoint is the stub
 // and the test asserts the stub saw one authenticated request with the text.
 // With SOCK_SMOKE=1 it targets SOCK_URL with SOCK_TOKEN from the environment
-// (scripts/smoke.sh) and asserts only that the call succeeded. Only the
-// digest channel session may message the owner unprompted (sock-mcp
-// SOCK_MCP_DIGEST_CHANNEL=1).
+// (scripts/smoke.sh) and asserts only that the call succeeded. Only a session
+// configured to message the owner may (sock-mcp SOCK_MCP_MESSAGE_OWNER, the
+// plugin's message_owner option).
 func TestMCPSend(t *testing.T) {
 	url, tok := "", token
 	var s *stub
@@ -30,7 +30,7 @@ func TestMCPSend(t *testing.T) {
 		s = newStub(t)
 		url = s.URL
 	}
-	c := startMCP(t, url, tok, "SOCK_MCP_DIGEST_CHANNEL=1")
+	c := startMCP(t, url, tok, "SOCK_MCP_MESSAGE_OWNER=true")
 	line := c.request(2, "tools/call", `{"name":"sock_send","arguments":{"text":"`+mcpSendText+`"}}`)
 	var resp struct {
 		Error  json.RawMessage `json:"error"`
