@@ -153,9 +153,9 @@ session_title() {
 	local transcript
 	transcript=$(field transcript_path)
 	[ -n "$transcript" ] && [ -f "$transcript" ] && [ -r "$transcript" ] || return 0
-	LC_ALL=C grep -F '"custom-title"' "$transcript" 2>/dev/null | tail -n 1 |
+	LC_ALL=C grep -F '"custom-title"' "$transcript" 2>/dev/null |
 		jq -r 'select(.type == "custom-title") | .customTitle | if type == "string" then . else empty end' 2>/dev/null |
-		LC_ALL=C tr -d '[:cntrl:]' | utf8_cap 64
+		tail -n 1 | LC_ALL=C tr -d '[:cntrl:]' | utf8_cap 64
 }
 
 # utf8_cap prints stdin cut to $1 bytes, less a UTF-8 sequence the cut left

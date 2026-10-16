@@ -26,4 +26,4 @@ Claude Code hands each MCP server its session's inbox: a Unix socket (`CLAUDE_CO
 - Inbound works in every interactive Claude Code session with the plugin, with no flag.
 - The inbox is not a documented interface. A Claude Code release can change or remove it; the owner's replies then wait at the hub, and the tools keep working.
 - Claude Code frames the reply as a peer session's message, so the model treats it as a teammate's request, not the user's own input. The skill names it as the owner's reply.
-- Sessions no longer share the project puppet, so integrations-bof and integrations-fdh do not arise with a machine key. A puppet token still makes one puppet for every session.
+- Sessions no longer share the project puppet, so integrations-bof and integrations-fdh do not arise with a machine key. With a puppet token every session would share one puppet, so such a server does not listen at all.

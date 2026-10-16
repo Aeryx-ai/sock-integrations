@@ -38,7 +38,7 @@ Hooks never fail the agent. They log one line per failure to `${XDG_STATE_HOME:-
 - `sock` or `sock-mcp` is not on the `PATH` of the Claude Code process, for example installed to `~/go/bin` which that `PATH` lacks.
 - The server rejected the request: a revoked or mistyped token, or a URL that does not match the token's server.
 - A reply never reaches the session: the session has a puppet only once it messaged you, and its server logs `listening for the owner's replies` (in `~/Library/Caches/claude-cli-nodejs/*/mcp-logs-plugin-sock-sock/`). `no session inbox` means the Claude Code release changed the inbox (ADR 4); the reply waits at the hub.
-- With a puppet token instead of a machine key, every session on the machine shares one puppet and replies race between them.
+- With a puppet token instead of a machine key, every session on the machine shares one puppet, so no session hears replies; use a machine key.
 
 ## Make targets
 

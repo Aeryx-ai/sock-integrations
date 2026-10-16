@@ -105,7 +105,8 @@ erDiagram
 - `sock-mcp --outbound-only --claude-inbound` reads `CLAUDE_CODE_SESSION_ID` at start and takes the session's run lock (`flock` on `run/<platform>-<session id>.lock` in the cache directory, held for the process's life) before it listens.
 - Any tool call ensures the session puppet, then runs as it. The listener subscribes as the session puppet once it is cached: at start when it already is, right after the first call, or within 2 seconds of a hook's send caching it.
 - Each owner reply is written into the session's inbox (`CLAUDE_CODE_MESSAGING_SOCKET`, an auth line with `CLAUDE_CODE_MESSAGING_TOKEN`, then a `user` line holding the `<sock-message from="owner">` prompt) and acknowledged once the inbox took it. An inbox that refuses is retried 5 times with backoff, then the reply waits at the hub. No inbox in the environment: no listener, tools only.
-- Without a machine key or session id the server runs as the project's puppet and listens as it from the start.
+- Only the puppet's owner reaches the session; `SOCK_CHANNEL_ALLOW` adds no one, since the prompt says the owner sent it.
+- Without a machine key or session id the server runs as the project's puppet and serves the tools only: every session would share the puppet and each would act on every reply (security review 2026-10-16).
 - At start with a cached puppet: `Unarchive`. At exit (stdin closed, SIGTERM): `Archive`.
 - The name: the last `custom-title` line of `${CLAUDE_CONFIG_DIR:-~/.claude}/projects/*/<session id>.jsonl`, read at start and at each call (only what was appended since); `Rename` once the session has a title. A session never titled keeps the name it was made with.
 - `notify.sh`: `sock send --as-puppet --session claude-code:<session_id> [--session-name <title>]`, the title read from the hook's `transcript_path` the same way and passed only when there is one.

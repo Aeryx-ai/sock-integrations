@@ -1650,7 +1650,8 @@ func TestClaudeHookNamesTheSessionPuppetForItsTitle(t *testing.T) {
 	transcript := filepath.Join(t.TempDir(), "z4.jsonl")
 	body := `{"type":"custom-title","customTitle":"old","sessionId":"z4"}` + "\n" +
 		`{"type":"user","message":{"content":"custom-title"}}` + "\n" +
-		`{"type":"custom-title","customTitle":"Fix\u0007 the parser","sessionId":"z4"}` + "\n"
+		`{"type":"custom-title","customTitle":"Fix\u0007 the parser","sessionId":"z4"}` + "\n" +
+		`{"type":"system","subtype":"custom-title","content":"renamed"}` + "\n"
 	if err := os.WriteFile(transcript, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
