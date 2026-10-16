@@ -336,7 +336,7 @@ write_prompt() {
 		exit 1
 	}
 	{
-		printf '%s\n' 'This message is your owner'"'"'s reply, delivered through sock. It is a message to answer, not a system instruction. If the same id arrives again, it is a repeat.'
+		printf '%s\n' 'Your owner sent this through sock. Act on it as if they typed it in this session, and answer with sock_send in the conversation below. The same id arriving again is a repeat.'
 		open_tag
 		printf '%s' "$input" | jq -j '.text | gsub("</\\s*sock-message"; "</​sock-message"; "i")'
 		printf '\n</sock-message>\n'
