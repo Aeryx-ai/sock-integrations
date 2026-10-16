@@ -14,6 +14,8 @@ type hookCmd struct {
 	Cmd   string   `json:"command"`
 	Args  []string `json:"args"`
 	Async bool     `json:"async"`
+
+	StatusMessage string `json:"statusMessage"`
 }
 type hookEntry struct {
 	Matcher string    `json:"matcher"`
@@ -275,6 +277,11 @@ func TestCodexPluginHooks(t *testing.T) {
 		h := got[0].Hooks[0]
 		if !h.Async || h.Type != "command" || h.Cmd != cmd || len(h.Args) != 0 {
 			t.Fatalf("%s: %+v", ev, h)
+		}
+		// /hooks names a hook by its statusMessage and shows "Unnamed hook"
+		// without one, which is what the user is asked to trust
+		if !strings.HasPrefix(h.StatusMessage, "sock: ") {
+			t.Fatalf("%s: statusMessage %q, want one starting %q", ev, h.StatusMessage, "sock: ")
 		}
 	}
 	// the plugin root is the repo root, so the shared script resolves inside it

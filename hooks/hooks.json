@@ -6,7 +6,8 @@
           {
             "type": "command",
             "command": "\"${PLUGIN_ROOT}/claude-code/hooks/notify.sh\" --permission",
-            "async": true
+            "async": true,
+            "statusMessage": "sock: tell your human a permission is waiting"
           }
         ]
       }
@@ -17,7 +18,8 @@
           {
             "type": "command",
             "command": "\"${PLUGIN_ROOT}/claude-code/hooks/notify.sh\" --stop --ask-now",
-            "async": true
+            "async": true,
+            "statusMessage": "sock: send your human this turn's ask"
           }
         ]
       }
