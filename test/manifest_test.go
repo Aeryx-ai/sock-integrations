@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -78,9 +79,7 @@ func TestPluginManifest(t *testing.T) {
 			Required  bool   `json:"required"`
 			Default   any    `json:"default"`
 		} `json:"userConfig"`
-		Channels []struct {
-			Server string `json:"server"`
-		} `json:"channels"`
+		Channels []any `json:"channels"`
 	}
 	readJSON(t, "claude-code/.claude-plugin/plugin.json", &p)
 	if p.Name != "sock" || p.License != "MIT" {
@@ -105,7 +104,10 @@ func TestPluginManifest(t *testing.T) {
 	if c := p.UserConfig["message_owner"]; c.Type != "boolean" || c.Default != any(true) {
 		t.Fatalf("message_owner must be a boolean defaulting to true: %+v", c)
 	}
-	if len(p.Channels) != 1 || p.Channels[0].Server != "sock" {
+	// Replies enter through the session inbox (ADR 4); a declared channel
+	// would make sock-mcp a second consumer in a session started with the
+	// development flag.
+	if len(p.Channels) != 0 {
 		t.Fatalf("channels %+v", p.Channels)
 	}
 }
@@ -120,7 +122,7 @@ func TestMCPConfigNeverHoldsLiteralToken(t *testing.T) {
 	}
 	readJSON(t, "claude-code/.mcp.json", &m)
 	s := m.MCPServers["sock"]
-	if s.Command != "sock-mcp" || len(s.Args) != 1 || s.Args[0] != "--channel" {
+	if s.Command != "sock-mcp" || !slices.Equal(s.Args, []string{"--outbound-only", "--claude-inbound"}) {
 		t.Fatalf("%+v", s)
 	}
 	if s.Env["SOCK_TOKEN"] != "${user_config.sock_token}" || s.Env["SOCK_URL"] != "${user_config.sock_url}" ||
@@ -170,16 +172,21 @@ func TestCodexHooks(t *testing.T) {
 	}
 }
 
-func TestSkillKeepsOneConsumerRule(t *testing.T) {
+func TestSkillAnswersTheInboxReply(t *testing.T) {
 	b, err := os.ReadFile(filepath.Join(root, "claude-code", "skills", "sock", "SKILL.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	// sock-mcp --channel acks only when the model acts (integrations-bn5), so
-	// the skill must tell it how to clear a message that needs no reply
-	for _, want := range []string{"pass the `message_ids` you are answering; that acks them", "Call `sock_ack` for a message that needs no reply", "Do not call `sock_fetch`"} {
+	// sock-mcp --claude-inbound acks once the inbox took the reply (ADR 4):
+	// the model answers in the tag's conversation, never through SendMessage
+	for _, want := range []string{"<sock-message from=\"owner\"", "has already acknowledged it", "answer with `sock_send` and the tag's `conversation`", "Do not answer with SendMessage"} {
 		if !strings.Contains(string(b), want) {
 			t.Fatalf("SKILL.md lacks %q", want)
+		}
+	}
+	for _, gone := range []string{"sock_fetch", "sock_ack", "message_ids"} {
+		if strings.Contains(string(b), gone) {
+			t.Fatalf("SKILL.md names %s, which the plugin's server does not serve", gone)
 		}
 	}
 }

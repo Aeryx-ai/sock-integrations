@@ -1620,14 +1620,15 @@ func TestHooksNeverTouchSockSend(t *testing.T) {
 }
 
 // A Claude Code hook with no token set (plugin option or SOCK_TOKEN) sends as
-// the project's puppet that the plugin's sock-mcp resolves from the config
-// file, so a plugin installed with nothing configured still reaches the owner.
-func TestClaudeHookWithNoTokenSendsAsTheProjectPuppet(t *testing.T) {
+// the session's own puppet, the one the plugin's sock-mcp --claude-inbound
+// listens as (ADR 3 and 4), so the owner's answer reaches this session and a
+// plugin installed with nothing configured still reaches the owner.
+func TestClaudeHookWithNoTokenSendsAsTheSessionPuppet(t *testing.T) {
 	s := newStub(t)
 	bin, rec := fakeSockAsPuppet(t, false)
 	env := map[string]string{"PATH": bin + ":" + hookPathTail, "SOCK_TOKEN": "", "CLAUDE_PLUGIN_ROOT": "/x/cplugin", "CLAUDE_PROJECT_DIR": "/x/proj", "SOCK_ACCESS_GATE": "gate-secret"}
 	runHook(t, s.URL, hookEnv{Env: env, Stdin: stopInput("z3", "Ship it?")}, "--stop", "--ask-now")
-	if got := readRec(t, rec, "args"); got != "send\n--as-puppet\n--project\n/x/proj" {
+	if got := readRec(t, rec, "args"); got != "send\n--as-puppet\n--session\nclaude-code:z3" {
 		t.Fatalf("argv %q", got)
 	}
 	if got := readRec(t, rec, "text"); got != "proj: Ship it?" {
@@ -1638,5 +1639,25 @@ func TestClaudeHookWithNoTokenSendsAsTheProjectPuppet(t *testing.T) {
 		if strings.Contains(got, "\n"+v) || strings.HasPrefix(got, v) {
 			t.Fatalf("%s reached sock send", v)
 		}
+	}
+}
+
+// The session's /rename title names its puppet: the last custom-title entry of
+// the transcript, control characters dropped.
+func TestClaudeHookNamesTheSessionPuppetForItsTitle(t *testing.T) {
+	s := newStub(t)
+	bin, rec := fakeSockAsPuppet(t, false)
+	transcript := filepath.Join(t.TempDir(), "z4.jsonl")
+	body := `{"type":"custom-title","customTitle":"old","sessionId":"z4"}` + "\n" +
+		`{"type":"user","message":{"content":"custom-title"}}` + "\n" +
+		`{"type":"custom-title","customTitle":"Fix\u0007 the parser","sessionId":"z4"}` + "\n"
+	if err := os.WriteFile(transcript, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	in := hookJSON(map[string]any{"session_id": "z4", "transcript_path": transcript, "hook_event_name": "Stop", "last_assistant_message": "Ship it?", "stop_hook_active": false})
+	env := map[string]string{"PATH": bin + ":" + hookPathTail, "SOCK_TOKEN": "", "CLAUDE_PLUGIN_ROOT": "/x/cplugin", "CLAUDE_PROJECT_DIR": "/x/proj"}
+	runHook(t, s.URL, hookEnv{Env: env, Stdin: in}, "--stop", "--ask-now")
+	if got := readRec(t, rec, "args"); got != "send\n--as-puppet\n--session\nclaude-code:z4\n--session-name\nFix the parser" {
+		t.Fatalf("argv %q", got)
 	}
 }

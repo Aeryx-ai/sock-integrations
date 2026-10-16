@@ -132,16 +132,31 @@ session=$(field session_id | LC_ALL=C tr -cd 'A-Za-z0-9_-' | LC_ALL=C cut -c1-64
 # option is ignored here; $token keeps it only for redaction.
 as_puppet=0
 puppet_project=
+claude_session=
 if [ -n "${PLUGIN_ROOT:-}" ] && [ -n "$(field turn_id)" ]; then
 	as_puppet=1
 	puppet_project=$PLUGIN_ROOT
 elif [ -z "$token" ]; then
 	# No token anywhere (the plugin's sock_token is optional): send as the
-	# project's puppet that the plugin's sock-mcp, given an empty SOCK_TOKEN,
-	# resolves from the config file's machine key for this project.
+	# session's own puppet, the one the plugin's sock-mcp --claude-inbound
+	# listens as (sock-integrations ADR 3 and 4); without a session id, as the
+	# project's puppet that sock-mcp resolves from the config file.
 	as_puppet=1
 	puppet_project=$project_dir
+	if [ "$(field session_id)" = "$session" ]; then claude_session=$session; fi
 fi
+
+# session_title prints the Claude Code session's /rename title: the last
+# custom-title entry of its transcript, or nothing.
+session_title() {
+	[ "$have_jq" = 1 ] || return 0
+	local transcript
+	transcript=$(field transcript_path)
+	[ -n "$transcript" ] && [ -f "$transcript" ] && [ -r "$transcript" ] || return 0
+	LC_ALL=C grep -F '"custom-title"' "$transcript" 2>/dev/null | tail -n 1 |
+		jq -r 'select(.type == "custom-title") | .customTitle | if type == "string" then . else empty end' 2>/dev/null |
+		LC_ALL=C tr -d '[:cntrl:]' | utf8_cap 64
+}
 
 # utf8_cap prints stdin cut to $1 bytes, less a UTF-8 sequence the cut left
 # incomplete: the CLI refuses text that is not valid UTF-8.
@@ -363,6 +378,12 @@ send_as_puppet() {
 	if [ -n "$(field turn_id)" ] && [ -n "$(field session_id)" ]; then
 		bounded "$work/text" /dev/null "$work/send.err" \
 			env -u SOCK_TOKEN -u SOCK_URL -u SOCK_ACCESS_GATE -u CLAUDE_PROJECT_DIR sock send --as-puppet --session "codex:$session"
+	elif [ -n "$claude_session" ]; then
+		# named for the working directory until the owner gives it a title
+		local title
+		title=$(session_title)
+		bounded "$work/text" /dev/null "$work/send.err" \
+			env -u SOCK_TOKEN -u SOCK_URL -u SOCK_ACCESS_GATE -u CLAUDE_PROJECT_DIR sock send --as-puppet --session "claude-code:$claude_session" ${title:+--session-name "$title"}
 	else
 		bounded "$work/text" /dev/null "$work/send.err" \
 			env -u SOCK_TOKEN -u SOCK_URL -u SOCK_ACCESS_GATE -u CLAUDE_PROJECT_DIR sock send --as-puppet --project "$puppet_project"

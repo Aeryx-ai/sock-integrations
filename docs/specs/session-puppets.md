@@ -1,6 +1,6 @@
 # Session puppets
 
-Pass 1 (2026-10-15). Bead integrations-ad2. Decisions: [ADR 3](../adr/0003-a-puppet-per-agent-session.md), [sock-contract ADR 27](https://github.com/aeryx-ai/sock-contract/blob/main/docs/adr/0027-a-puppet-per-agent-session-archived-when-it-ends.md). Hub contract: sock-contract `api.md` (`CreatePuppet`, `MintPuppetToken`, `UpdateDisplayName`, `ArchivePuppet`, `UnarchivePuppet`, `Subscribe`).
+Pass 2 (2026-10-16): Claude Code replies enter through the session inbox. Beads integrations-ad2, integrations-ard. Decisions: [ADR 3](../adr/0003-a-puppet-per-agent-session.md), [ADR 4](../adr/0004-claude-replies-enter-through-the-session-inbox.md), [sock-contract ADR 27](https://github.com/aeryx-ai/sock-contract/blob/main/docs/adr/0027-a-puppet-per-agent-session-archived-when-it-ends.md). Hub contract: sock-contract `api.md` (`CreatePuppet`, `MintPuppetToken`, `UpdateDisplayName`, `ArchivePuppet`, `UnarchivePuppet`, `Subscribe`).
 
 ## Context map
 
@@ -9,7 +9,7 @@ Supporting subdomain. Integrations is conformist downstream of the hub's Identit
 ```mermaid
 flowchart LR
   subgraph Claude[Claude Code session]
-    CM[sock-mcp --channel]
+    CM[sock-mcp --claude-inbound]
     CH[notify.sh]
   end
   subgraph Codex[Codex daemon]
@@ -29,6 +29,7 @@ flowchart LR
   XH -->|sock send --as-puppet --session| SP
   SP -->|CreatePuppet, Archive, Unarchive| P
   CM -->|Subscribe as the session puppet| P
+  CM -->|inbox: owner reply as a user line| Claude
   XM -->|Subscribe per loaded thread, turn/start| TH
 ```
 
@@ -101,11 +102,13 @@ erDiagram
 
 ### Claude Code
 
-- `sock-mcp --channel` reads `CLAUDE_CODE_SESSION_ID` at start and takes the session's run lock (`flock` on `run/<platform>-<session id>.lock` in the cache directory, held for the process's life).
-- A send (`sock_send`) ensures the session puppet, then posts as it. The channel subscribes as the session puppet once it is cached: at start when it already is, else right after the first send.
+- `sock-mcp --outbound-only --claude-inbound` reads `CLAUDE_CODE_SESSION_ID` at start and takes the session's run lock (`flock` on `run/<platform>-<session id>.lock` in the cache directory, held for the process's life) before it listens.
+- Any tool call ensures the session puppet, then runs as it. The listener subscribes as the session puppet once it is cached: at start when it already is, right after the first call, or within 2 seconds of a hook's send caching it.
+- Each owner reply is written into the session's inbox (`CLAUDE_CODE_MESSAGING_SOCKET`, an auth line with `CLAUDE_CODE_MESSAGING_TOKEN`, then a `user` line holding the `<sock-message from="owner">` prompt) and acknowledged once the inbox took it. An inbox that refuses is retried 5 times with backoff, then the reply waits at the hub. No inbox in the environment: no listener, tools only.
+- Without a machine key or session id the server runs as the project's puppet and listens as it from the start.
 - At start with a cached puppet: `Unarchive`. At exit (stdin closed, SIGTERM): `Archive`.
-- The name: the last `custom-title` line of `${CLAUDE_CONFIG_DIR:-~/.claude}/projects/<project dir with / and . as ->/<session id>.jsonl`, read at start and at each send; `Rename` when it changed.
-- `notify.sh`: `sock send --as-puppet --session claude-code:<session_id> --session-name <title>`, the title read from the hook's `transcript_path` the same way.
+- The name: the last `custom-title` line of `${CLAUDE_CONFIG_DIR:-~/.claude}/projects/*/<session id>.jsonl`, read at start and at each call (only what was appended since); `Rename` once the session has a title. A session never titled keeps the name it was made with.
+- `notify.sh`: `sock send --as-puppet --session claude-code:<session_id> [--session-name <title>]`, the title read from the hook's `transcript_path` the same way and passed only when there is one.
 
 ### Codex
 
@@ -117,7 +120,7 @@ erDiagram
 
 | Platform | Archive when | Unarchive when | Reconciled by |
 |---|---|---|---|
-| Claude Code | its `sock-mcp` exits | its `sock-mcp` starts with the puppet cached | any `sock-mcp` start: cached Claude Code session puppets whose run lock is free are archived (a server that crashed) |
+| Claude Code | its `sock-mcp` exits (stdin closed, SIGINT, SIGTERM) | its `sock-mcp` listens with the puppet cached | any `sock-mcp` start: cached Claude Code session puppets whose run lock is free are archived (a server that crashed) |
 | Codex | the daemon no longer has the thread loaded | the thread is loaded again | the listener's rescans |
 
 A failed archive call is retried at the next reconciliation; it never blocks a send or a start.
@@ -139,7 +142,8 @@ A failed archive call is retried at the next reconciliation; it never blocks a s
 |---|---|---|
 | sock-client `SessionPuppets` (`Ensure`, `Cached`, `Rename`, `Archive`, `Unarchive`, `Reconcile`) | sock-mcp, sock-cli | new; replaces `ProjectPuppet` for agents |
 | `sock send --as-puppet --session <platform>:<id> [--session-name <name>]` | notify.sh | new flags (sock-cli) |
-| `sock-mcp` | Claude Code, Codex | session from the environment or `_meta`, as above |
+| `sock-mcp --claude-inbound` | Claude Code | session from the environment, as above |
+| Session inbox (Claude Code, undocumented) | sock-mcp | auth line, then a `user` line; nothing answered on success |
 
 ### Events
 

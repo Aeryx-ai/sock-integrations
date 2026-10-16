@@ -11,18 +11,10 @@ Integrations that let coding agents talk to a sock server through a puppet accou
 
 Leave the plugin's `sock_token` empty. The plugin then uses the machine key in the sock config file.
 
-- A machine key, the default: run `sock login` once, then `sock machine-key create | sock machine-key use`. Every project then gets its own puppet the first time a session runs in it, named `<project> on <host>`, so each message shows which project sent it and you reply in that puppet's thread. Worktrees of one repository share its puppet. A repository that is moved or deleted loses its puppet at the next start. Tokens are cached in `${XDG_STATE_HOME:-~/.local/state}/sock-integrations/puppets` (mode 600). The key itself can only make and erase the puppets it made: it cannot read or send your messages. Erase a project's puppet from the app like any other puppet.
+- A machine key, the default: run `sock login` once, then `sock machine-key create | sock machine-key use`. Every session then gets its own puppet the first time it messages you, named `<project> <first 8 of the session id> on <host>` until you `/rename` the session, then for its title. Reply in that puppet's thread and the reply appears in that session, idle or busy, with no flag ([ADR 4](docs/adr/0004-claude-replies-enter-through-the-session-inbox.md)). A session's puppet is archived when the session ends and comes back when it is resumed. Tokens are cached in `${XDG_STATE_HOME:-~/.local/state}/sock-integrations/puppets` (mode 600). The key itself can only make and erase the puppets it made: it cannot read or send your messages. Erase a project's puppet from the app like any other puppet.
 - A puppet token (`sock_pt_`) set as the plugin's `sock_token`: every session on the machine shares that one puppet, and replies race between sessions. If the prompt never appeared or you need to change the value, run `claude plugin configure sock@sock-integrations`. `sock` and `sock-mcp` must both be on the `PATH` of the Claude Code process. `make install-bins` installs them to `$(go env GOPATH)/bin` (usually `~/go/bin`), which Claude Code's `PATH` often lacks.
 
-Step-by-step setup on a Mac, the runner service (the default for chat) and the channel, is in `docs/setup-mac.md`.
-
-Inbound messages (channel) need the development channel flag:
-
-```
-claude --dangerously-load-development-channels plugin:sock@sock-integrations
-```
-
-Channels are a research preview, work in interactive sessions only, and Team and Enterprise orgs must enable them.
+Step-by-step setup on a Mac and the runner service (chat with a headless session per project) are in `docs/setup-mac.md`.
 
 ## Codex
 
@@ -35,7 +27,7 @@ See `agent-sdk/example.ts`.
 ## Rules
 
 - One puppet per binding. With a machine key that is one per project per machine, made for you; do not share a puppet token between agents or machines.
-- One consumer per puppet. Channel mode and a `sock_fetch`/`sock_ack` caller consume the same deliveries, so run only one against a given puppet.
+- One consumer per puppet. A session's server is its puppet's only consumer; the runner service listens as the project's puppet, a different one.
 
 ## Troubleshooting
 
@@ -45,8 +37,8 @@ Hooks never fail the agent. They log one line per failure to `${XDG_STATE_HOME:-
 - No token: the plugin option is unset, or `SOCK_TOKEN` is not exported where the hook runs.
 - `sock` or `sock-mcp` is not on the `PATH` of the Claude Code process, for example installed to `~/go/bin` which that `PATH` lacks.
 - The server rejected the request: a revoked or mistyped token, or a URL that does not match the token's server.
-- Tools work but a reply from the app says `Channel messages from "plugin:sock:sock" are unavailable: this connection's protocol version has no channel delivery path`: Claude Code 2.1.292 and later negotiate MCP revision 2026-07-28 with local servers, and on that revision it registers no channel. `sock-mcp` 0.1.1 declines that revision when `--channel` is set; on an older `sock-mcp`, start Claude Code with `MCP_PROTOCOL_NEGOTIATION=legacy` in its environment.
-- Several Claude Code sessions in one project share that project's puppet. With a puppet token instead of a machine key, every session on the machine shares one puppet and replies race between them.
+- A reply never reaches the session: the session has a puppet only once it messaged you, and its server logs `listening for the owner's replies` (in `~/Library/Caches/claude-cli-nodejs/*/mcp-logs-plugin-sock-sock/`). `no session inbox` means the Claude Code release changed the inbox (ADR 4); the reply waits at the hub.
+- With a puppet token instead of a machine key, every session on the machine shares one puppet and replies race between them.
 
 ## Make targets
 
@@ -63,5 +55,5 @@ Hooks never fail the agent. They log one line per failure to `${XDG_STATE_HOME:-
 ## Manual checks per release
 
 - Plugin loads in Claude Code and the `sock` skill and hooks appear.
-- Channel delivers an inbound message with the development flag.
+- A reply from the app reaches an idle interactive session without any flag.
 - Codex trusts and runs the hook.

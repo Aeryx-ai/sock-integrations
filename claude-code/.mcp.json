@@ -2,7 +2,7 @@
   "mcpServers": {
     "sock": {
       "command": "sock-mcp",
-      "args": ["--channel"],
+      "args": ["--outbound-only", "--claude-inbound"],
       "env": {
         "SOCK_TOKEN": "${user_config.sock_token}",
         "SOCK_URL": "${user_config.sock_url}",

@@ -1,6 +1,6 @@
 # Set up a sock agent on a Mac
 
-There are two ways for an agent to hear you. Use the runner for chat: it answers from a small, fresh or resumed session per project, keeps running after a reboot or logout, and never touches a long-lived working session. Use the channel only while you are sitting at an interactive session.
+There are two ways for an agent to hear you. Use the runner for chat: it answers from a small, fresh or resumed session per project, keeps running after a reboot or logout, and never touches a long-lived working session. An interactive session hears replies sent to its own puppet while it runs.
 
 ## Runner (default)
 
@@ -44,24 +44,16 @@ There are two ways for an agent to hear you. Use the runner for chat: it answers
 
 Remove it with `runner/sock-runner-service uninstall ~/projects/<project>`.
 
-## Channel (interactive, while you are at the session)
+## Interactive sessions
 
-Start Claude Code in the project with the development channel and accept the development channels dialog it shows:
-
-```sh
-claude --dangerously-load-development-channels plugin:sock@sock-integrations
-```
-
-This path is read from the Claude Code 2.1.300 binary and has not been confirmed live yet. Claude Code registers a development channel only when you accept that dialog. A headless session (`-p`) ignores the flag. A dialog that is dismissed leaves the session without the channel, and its log says `not in --channels list`. Confirm with a fresh interactive session. After accepting, this should print `Channel notifications registered`:
+Nothing to set up: with the plugin and a machine key, a reply in a session's thread appears in that session ([ADR 4](adr/0004-claude-replies-enter-through-the-session-inbox.md)). The session's server logs `listening for the owner's replies` once the session has messaged you:
 
 ```sh
-grep -h 'Channel notif' "$(ls -t ~/Library/Caches/claude-cli-nodejs/*/mcp-logs-plugin-sock-sock/*.jsonl | head -1)"
+grep -h 'listening for the owner' ~/Library/Caches/claude-cli-nodejs/*/mcp-logs-plugin-sock-sock/*.jsonl | tail -3
 ```
-
-A Team or Enterprise org must also set `channelsEnabled: true` in managed settings. Otherwise the log says `channels not enabled by org policy`.
 
 ## Rules
 
-- One consumer per project puppet: the runner service or an interactive session that accepted the channel, never both. Both would take the same messages. An interactive session without the channel is fine beside the runner.
+- The runner listens as the project's puppet and each interactive session as its own, so they never take each other's messages.
 - Run chat through the runner, not through a long-lived session. A session carrying a large context answers slowly. The runner's session holds only this project's chat.
 - The hub limits a puppet's posts to its owner (ADR 20 in sock-contract): about 3 replies at once, then one every 10 minutes per puppet, and 20 an hour across all your puppets. A busy chat hits this.
