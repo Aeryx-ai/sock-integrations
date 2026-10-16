@@ -1,5 +1,7 @@
 # Codex inbound: the owner's reply reaches the Codex session
 
+Superseded in part by [ADR 3](../adr/0003-a-puppet-per-agent-session.md) and [session-puppets.md](session-puppets.md): each Codex thread is its own puppet, so the session ask, project matching and per-project subscription below are gone; the listener, the lock, injection by `turn/start` and the acknowledgement rules stand.
+
 Pass 4 (2026-10-15): the plugin's own server listens ([ADR 2](../adr/0002-the-plugin-server-listens-for-codex.md), superseding the service of [ADR 1](../adr/0001-codex-replies-enter-through-the-app-server.md)). Bead integrations-2ol.
 
 A Codex session asks the owner something through sock. The owner answers in sock. The answer arrives in that Codex session as a turn, whether a person has the session open or not.
