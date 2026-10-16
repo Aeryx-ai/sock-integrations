@@ -1,12 +1,13 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "sock",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "description": "Message your human through sock: hooks for permission requests and the turn's ask, and the sock-mcp send tools.",
   "author": { "name": "Guy Grigsby" },
   "repository": "https://github.com/aeryx-ai/sock-integrations",
   "license": "MIT",
   "keywords": ["sock", "notifications", "messaging"],
+  "mcpServers": "./mcp.json",
   "extensions": {
     "com.openai": {
       "interface": {

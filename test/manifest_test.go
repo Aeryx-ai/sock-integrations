@@ -191,17 +191,25 @@ func TestSkillAnswersTheInboxReply(t *testing.T) {
 	}
 }
 
+// Codex discovers a plugin's hooks only under .codex-plugin/plugin.json; a
+// root plugin.json loads the MCP server and skills but silently drops every
+// hook, and .codex-plugin finds mcp.json only when named (app-server
+// hooks/list and mcpServerStatus/list, Codex 0.162.1).
 func TestCodexPluginManifest(t *testing.T) {
 	var p struct {
 		Name       string `json:"name"`
 		Version    string `json:"version"`
 		License    string `json:"license"`
+		MCPServers string `json:"mcpServers"`
 		Extensions struct {
 			OpenAI map[string]any `json:"com.openai"`
 		} `json:"extensions"`
 	}
-	readJSON(t, "plugin.json", &p)
-	if p.Name != "sock" || p.License != "MIT" || p.Version == "" {
+	if _, err := os.Stat(filepath.Join(root, "plugin.json")); err == nil {
+		t.Fatal("plugin.json at the repo root: Codex reads it first and loads no hooks from it")
+	}
+	readJSON(t, ".codex-plugin/plugin.json", &p)
+	if p.Name != "sock" || p.License != "MIT" || p.Version == "" || p.MCPServers != "./mcp.json" {
 		t.Fatalf("%+v", p)
 	}
 	// hooks and skills are found by their default places; naming them would
