@@ -99,7 +99,7 @@ func TestPluginManifest(t *testing.T) {
 	if _, ok := p.UserConfig["notify_on_stop"]; ok {
 		t.Fatal("userConfig notify_on_stop is back, but nothing reads it")
 	}
-	if d := p.UserConfig["sock_url"].Default; d != any("https://api.sock.aeryx.ai") {
+	if d := p.UserConfig["sock_url"].Default; d != any("https://api.joinsock.com") {
 		t.Fatalf("sock_url default %q", d)
 	}
 	// The owner hears from their puppets by default; the hub rate limits it.
