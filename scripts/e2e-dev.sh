@@ -67,7 +67,7 @@ whoami_in() {
 			printf '%s\n' '{"jsonrpc":"2.0","method":"notifications/initialized"}'
 			printf '%s\n' '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"sock_whoami","arguments":{}}}'
 			sleep 5
-		} | SOCK_TOKEN='' SOCK_URL=https://api.sock.aeryx.ai sock-mcp --outbound-only 2>"$work/mcp.err" |
+		} | SOCK_TOKEN='' SOCK_URL=https://api.joinsock.com sock-mcp --outbound-only 2>"$work/mcp.err" |
 			jq -c 'select(.id == 2) | .result.structuredContent // (.result.content[0].text | fromjson? // .)' | head -n 1
 	)
 }

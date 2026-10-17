@@ -1,7 +1,7 @@
 {
   "name": "sock",
   "description": "Message your human through sock and hear their replies in the session: hooks for permission and idle prompts and the sock-mcp tools.",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "author": { "name": "Guy Grigsby" },
   "license": "MIT",
   "userConfig": {
@@ -16,7 +16,7 @@
       "type": "string",
       "title": "sock server URL",
       "description": "Leave as is unless you run your own server.",
-      "default": "https://api.sock.aeryx.ai"
+      "default": "https://api.joinsock.com"
     },
     "message_owner": {
       "type": "boolean",
