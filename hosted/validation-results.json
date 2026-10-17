@@ -1,0 +1,61 @@
+{
+  "structural": {
+    "structural_validation": "passed",
+    "checks_passed": 67,
+    "failures": [],
+    "publication_readiness": "blocked",
+    "blockers": [
+      "production MCP endpoint is not reachable in observed verification",
+      "production OAuth discovery returned 404; no connection verified",
+      "live MCP/tool annotations and five positive/three negative cases remain unverified",
+      "owner.reply round trip into the intended dot remains unverified",
+      "Aeryx verified publisher identity and portal organization/project remain unconfirmed",
+      "publisher must confirm hosted connector privacy/terms coverage",
+      "dedicated reviewer account, login method and sample fixtures remain unverified",
+      "domain challenge, portal scans and authorized legal/policy attestations remain outstanding",
+      "verified demo recording URL is missing",
+      "publisher commerce declaration is missing",
+      "publisher country targeting is unconfirmed"
+    ],
+    "network_actions": "none",
+    "zip_created": false
+  },
+  "structural_exit_code": 0,
+  "submission_gate_exit_code": 2,
+  "submission_gate_expected_block": true,
+  "adversarial_package_checks": [
+    {
+      "check": "portable manifest rejects legacy fields",
+      "exit_code": 1,
+      "passed": true
+    },
+    {
+      "check": "portable MCP rejects an unknown transport",
+      "exit_code": 1,
+      "passed": true
+    },
+    {
+      "check": "public package excludes lifecycle hooks",
+      "exit_code": 1,
+      "passed": true
+    },
+    {
+      "check": "package excludes symlinks",
+      "exit_code": 1,
+      "passed": true
+    },
+    {
+      "check": "positive case count is enforced",
+      "exit_code": 1,
+      "passed": true
+    },
+    {
+      "check": "malformed PNG scanline data is rejected",
+      "exit_code": 1,
+      "passed": true
+    }
+  ],
+  "asset_decoder_check": "Pillow verify and full pixel load passed: PNG, 512 x 512, RGBA",
+  "fresh_context_review": "No material auth/identity/secret/trust finding; malformed-PNG validator gap fixed and regression checked",
+  "scope": "Offline package validation only. No live MCP tests, send actions, infrastructure changes, credentials, upload, submission or release."
+}

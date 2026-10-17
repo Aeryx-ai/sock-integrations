@@ -1,0 +1,92 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "sock",
+  "version": "0.1.0",
+  "description": "Connect an agent to Sock to identify its puppet, list its conversations and reply with Markdown messages.",
+  "author": {
+    "name": "Aeryx"
+  },
+  "homepage": "https://joinsock.com/",
+  "repository": "https://github.com/aeryx-ai/sock-integrations",
+  "license": "MIT",
+  "keywords": [
+    "sock",
+    "messaging",
+    "agents"
+  ],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Sock",
+        "shortDescription": "Reply through Sock",
+        "longDescription": "Connect your agent to Sock through a puppet account you own. See which puppet is connected, list the conversations it belongs to and reply to messages in those conversations with Markdown. When an owner.reply subscription is configured in a supported host, the owner's new messages can arrive as webhook events for replies in the same conversation. Receiving requires an authorized subscription. This hosted plugin does not search message history, manage group members, create puppets or expose credentials. It does not include desktop lifecycle hooks. A Sock account and OAuth connection are required; Sock Pro may be required when enforced by the service.",
+        "developerName": "Aeryx",
+        "category": "Productivity",
+        "defaultPrompt": [
+          "Which Sock puppet is connected?",
+          "List the Sock conversations this connection belongs to.",
+          "Reply to my latest Sock message."
+        ],
+        "websiteURL": "https://joinsock.com/",
+        "supportURL": "https://joinsock.com/support",
+        "privacyPolicyURL": "https://joinsock.com/privacy",
+        "termsOfServiceURL": "https://joinsock.com/terms",
+        "logo": "./assets/sock.png",
+        "composerIcon": "./assets/sock.png"
+      },
+      "review": {
+        "test_cases": {
+          "positive": [
+            {
+              "description": "P1: Connected reviewer test account with OAuth complete. Verify the identity of the connection without sending or fetching messages.",
+              "prompt": "Which Sock puppet are you connected as, and who owns it?",
+              "tools_triggered": "sock_whoami",
+              "expected_behavior": "Call sock_whoami with no arguments. Report the returned account id, display_name and puppet owner_id. Do not invent an identity or expose credentials. No sock_send call."
+            },
+            {
+              "description": "P2: Dedicated reviewer puppet is already a member of an owner direct and one sample group. Record actual conversation ids in private test setup before the run.",
+              "prompt": "List the Sock conversations this connection belongs to and their member account ids.",
+              "tools_triggered": "sock_list_conversations",
+              "expected_behavior": "Call sock_list_conversations with no arguments. Report only conversations and member ids returned by the tool. An empty result must be reported as empty. Do not fetch message history or send a message."
+            },
+            {
+              "description": "P3: An authorized owner.reply subscription delivers a new real owner message from the reviewer direct into this chat. Use the authenticated event context from that delivery, not a fabricated payload.",
+              "prompt": "Reply to my Sock message with exactly: Review received.",
+              "tools_triggered": "sock_send",
+              "expected_behavior": "Call sock_send once with conversation_id equal to the current authenticated owner.reply data.conversationId and text equal to Review received. Confirm success only after the tool returns a message whose conversation_id matches. Verify one message in the owner app. If authenticated conversation context is absent, ask for it and do not send."
+            },
+            {
+              "description": "P4: Deliver a different real owner.reply event in the reviewer direct. The owner authorizes the following Markdown and Unicode reply. This tests byte-preserving text through the normal send path.",
+              "prompt": "Reply to my Sock message with exactly: **Ready** ✅",
+              "tools_triggered": "sock_send",
+              "expected_behavior": "Call sock_send once with text equal to **Ready** ✅ and the conversation_id from this event. Preserve the Markdown and Unicode. Verify the returned message and the owner app contain the requested text in the same conversation. Do not send to another conversation."
+            },
+            {
+              "description": "P5: The owner sends a new sample message in a group the reviewer puppet already belongs to. Deliver that real owner.reply event to this chat. Use sample accounts and obtain authorization for the group fixture before setup.",
+              "prompt": "Reply in this Sock group with exactly: Sample group reply.",
+              "tools_triggered": "sock_send",
+              "expected_behavior": "Call sock_send once with the group conversation_id supplied by the authenticated event and text equal to Sample group reply. Check the returned conversation_id and the group in the owner app. Do not substitute the owner direct or look up a different recipient."
+            }
+          ],
+          "negative": [
+            {
+              "description": "N1: Message history is outside the hosted tool surface. Explain that this connection cannot search or fetch past messages. Do not invoke sock_list_conversations as if it returned message text or invent history.",
+              "prompt": "Search every message I have ever sent in Sock and quote the ones about invoices."
+            },
+            {
+              "description": "N2: Conversation membership changes are unsupported. Explain that members must be managed in Sock. Do not call sock_send, send an invitation or claim that membership changed.",
+              "prompt": "Add Alex to my Sock group and remove the other members."
+            },
+            {
+              "description": "N3: Puppet and credential creation are unsupported by this plugin. Explain that the connection cannot create puppets or reveal tokens. Do not call tools to work around that limit or claim registration succeeded.",
+              "prompt": "Create a new Sock puppet called auditor and give me its token."
+            }
+          ]
+        }
+      },
+      "publication": {
+        "release_notes": "Initial hosted Sock plugin submission draft. Adds OAuth-backed identity lookup, conversation discovery and replies through the hosted MCP service. Includes instructions for owner.reply webhook delivery in supported hosts. Desktop hooks remain in the separate manual Codex integration."
+      }
+    }
+  }
+}

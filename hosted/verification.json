@@ -1,0 +1,70 @@
+{
+  "status": "staged sources; not ready to submit",
+  "tracking_issue": "integrations-6w8",
+  "source_revisions": {
+    "integrations": "56faca6114fb8179252e934eaa5d10eb2a6e3bad",
+    "mcp": "d5c83989e9aaadb65475779e8c06c076862125e3",
+    "mcpd": "83a6ad074443238ff53daa553d01fc8fbedfe6de",
+    "website": "3562e6b284091aa94228c32e3185fc7591bb6db6"
+  },
+  "schemas": {
+    "plugin.schema.json": {
+      "url": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+      "sha256": "0a4aad95ce337878ad38802ebf0daa3fde76abe3f65400c86bcbb1ec0b3ab883"
+    },
+    "mcp.schema.json": {
+      "url": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+      "sha256": "6539175bfcdf43085855183e86da40ea94b166547a72b47ae9a0a390516d3acb"
+    }
+  },
+  "asset": {
+    "source": "../website/public/brand/sock-app-icon-light.svg",
+    "source_sha256": "6bf01cd43524b0503f5ab41a493890c5079a186f47035a7871035dfe53ccb943",
+    "rendering": "macOS Quick Look, 512 px",
+    "png_sha256": "40f219bd170cf79ba73cd9f64f4858c1029591172d35d2a90d0b993271543434"
+  },
+  "listing_urls": [
+    {
+      "url": "https://joinsock.com/",
+      "http_status": 200,
+      "content_checked": "Sock product homepage, messaging for people and agents, invite-only onboarding"
+    },
+    {
+      "url": "https://joinsock.com/privacy",
+      "http_status": 200,
+      "content_checked": "Sock privacy policy, Aeryx Industries LLC controller, data and retention details"
+    },
+    {
+      "url": "https://joinsock.com/terms",
+      "http_status": 200,
+      "content_checked": "Sock terms version 2026-10-11, Aeryx Industries LLC operator"
+    },
+    {
+      "url": "https://joinsock.com/support",
+      "http_status": 200,
+      "content_checked": "Sock support page with support@aeryx.ai and account help"
+    }
+  ],
+  "mcp_health": {
+    "url": "https://mcp.joinsock.com/healthz",
+    "result": "DNS resolution failed in read-only probe"
+  },
+  "oauth_discovery": {
+    "url": "https://api.joinsock.com/.well-known/oauth-authorization-server",
+    "http_status": 404
+  },
+  "live_tool_discovery": "not run: endpoint/auth unavailable",
+  "case_execution": "all live cases blocked or not run; see review.md",
+  "submission_blockers": [
+    "production MCP endpoint is not reachable in observed verification",
+    "production OAuth discovery returned 404; no connection verified",
+    "live MCP/tool annotations and five positive/three negative cases remain unverified",
+    "owner.reply round trip into the intended dot remains unverified",
+    "Aeryx verified publisher identity and portal organization/project remain unconfirmed",
+    "publisher must confirm hosted connector privacy/terms coverage",
+    "dedicated reviewer account, login method and sample fixtures remain unverified",
+    "domain challenge, portal scans and authorized legal/policy attestations remain outstanding"
+  ],
+  "observations_date_utc": "2026-10-17",
+  "prepared_at_utc": "2026-10-17T21:37:38.500301+00:00"
+}
