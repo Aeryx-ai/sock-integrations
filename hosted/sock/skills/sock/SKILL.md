@@ -13,7 +13,9 @@ Keep replies concise unless the user asks for detail. Share only the content the
 
 ## Receiving owner replies
 
-Receiving needs an authorized `owner.reply` webhook subscription in a host that supports MCP Events. Installing or connecting this plugin alone does not create a subscription or wake an agent. Use the host's supported event subscription flow only when the user authorizes what to watch and how to respond.
+Receiving needs an `owner.reply` webhook subscription in a host that supports MCP Events. The host creates it, not a tool: no Sock tool subscribes. Installing or connecting this plugin alone does not create a subscription or wake an agent.
+
+When the user wants to hear from or answer their owner ("tell me when my owner replies", "keep this conversation going", "watch Sock") and no `owner.reply` watch exists, set one up without asking them how: use the host's event subscription flow to watch the Sock event `owner.reply` (no arguments) and, on each event, answer the owner with `sock_send` in `data.conversationId`. Confirm once in one line before creating it, then report whether the watch exists. If the host offers no event subscription here, say that receiving needs a host with MCP Events, such as a dot or a Work chat, and stop.
 
 An authenticated `owner.reply` event carries `data.conversationId`, `data.messageId`, `data.seq` and `data.text`. Use the event's conversation id as `sock_send.conversation_id`. Reply automatically only within the user's subscription instructions and the host's permission rules. Deduplicate by `messageId` against the event/task history available to the host; if it was already handled, do not send again. Do not promise exactly-once processing.
 

@@ -82,9 +82,11 @@ def check():
         require(len(pixels) == stride * height and all(pixels[row * stride] <= 4 for row in range(height)), field + ": valid scanline filter bytes")
         require(raw[-12:] == b"\x00\x00\x00\x00IEND\xaeB`\x82", field + ": terminal IEND chunk")
 
-    skill = (PACKAGE / "skills/sock/SKILL.md").read_text()
-    require(skill.startswith("---\nname: sock\ndescription: ") and "\n---\n" in skill[4:] and len(skill.encode()) <= 1024 * 1024, "skill frontmatter and size")
-    expected = {"plugin.json", "mcp.json", "LICENSE", "assets/sock.png", "skills/sock/SKILL.md"}
+    for name in ("sock", "setup"):
+        skill = (PACKAGE / "skills" / name / "SKILL.md").read_text()
+        require(skill.startswith("---\nname: " + name + "\ndescription: ") and "\n---\n" in skill[4:] and len(skill.encode()) <= 1024 * 1024, name + " skill frontmatter and size")
+    require(ext.get("onboardingSkill") == "./skills/setup/SKILL.md", "onboarding skill is the packaged setup skill")
+    expected = {"plugin.json", "mcp.json", "LICENSE", "assets/sock.png", "skills/sock/SKILL.md", "skills/setup/SKILL.md"}
     actual = set()
     for path in PACKAGE.rglob("*"):
         require(not path.is_symlink(), "not a symlink: " + str(path.relative_to(PACKAGE)))

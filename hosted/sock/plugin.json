@@ -16,6 +16,7 @@
   ],
   "extensions": {
     "com.openai": {
+      "onboardingSkill": "./skills/setup/SKILL.md",
       "interface": {
         "displayName": "Sock",
         "shortDescription": "Reply through Sock",

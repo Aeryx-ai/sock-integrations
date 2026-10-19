@@ -6,7 +6,7 @@ Status: staged sources, not ready to submit. Preparation authorized by Guy on 20
 
 ## Review the draft
 
-Listing copy, release notes and exactly five positive and three negative review cases live in `sock/plugin.json`. `sock/skills/sock/SKILL.md` describes the hosted tools and authenticated owner-reply events. Review materials and fixture setup are in `review.md`. `verification.json` records source revisions and observations, not an attestation or live MCP test pass.
+Listing copy, release notes and exactly five positive and three negative review cases live in `sock/plugin.json`. `sock/skills/sock/SKILL.md` describes the hosted tools and authenticated owner-reply events. `sock/skills/setup/SKILL.md` is the onboarding skill (`extensions.com.openai.onboardingSkill`): after install it asks the host to watch `owner.reply`, since only the host can subscribe. Review materials and fixture setup are in `review.md`. `verification.json` records source revisions and observations, not an attestation or live MCP test pass.
 
 Run local validation from this directory with a Python environment containing `jsonschema==4.26.0`:
 
