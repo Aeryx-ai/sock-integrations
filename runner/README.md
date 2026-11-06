@@ -59,3 +59,31 @@ export SOCK_BRIDGE_BUDGET=500             # optional: a cap per session in US ce
 - Every session is billed on its own. The bridge never archives or deletes one: archive them in the console.
 - A tool call the agent's permission policy sends for confirmation (`always_ask`, or `auto` undecided) reaches the owner as `the agent wants to run <tool>: reply "approve <code>" or "deny <code> <optional reason>"`. Only that whole reply from the owner, in the same conversation, answers it; the code is never sent to the agent or logged, and the tool input is never shown. While a call waits, other replies are held and the owner is reminded of the codes. Custom tools, and calls the bridge did not see, are answered in the console.
 - Exit 0 acknowledges, 1 retries, 2 is a configuration error. The log is `bridge.log` in the state directory, one line per message and per session step, never the text, the answer, the key or the token.
+
+# sock-http
+
+The `sock listen --exec` command that forwards one owner message to an HTTP endpoint you configure, for any agent with an inbound API. The spec is `docs/specs/integrations.md`, "Generic HTTP forwarder: sock-http". Needs `sock`, `curl` and `jq` on `PATH`.
+
+```sh
+export SOCK_TOKEN=sock_pt_...             # the forwarder's own puppet, no other consumer
+export SOCK_HTTP_URL=https://agent.example/api/inbox
+export SOCK_HTTP_HEADERS='Authorization: Bearer ...'   # optional, one "Name: value" per line
+export SOCK_HTTP_BODY=/path/to/body.json  # JSON template
+sock listen --exec /path/to/runner/sock-http
+```
+
+The template's string values may hold `{{text}}`, `{{prompt}}` (the text in a `<sock-message>` tag with the conversation id, so the agent can reply with `sock_send`), `{{id}}`, `{{conversationId}}` and `{{sentAt}}`. OpenHands:
+
+```sh
+export SOCK_HTTP_URL=http://localhost:3000/api/conversations/<conversation id>/events
+export SOCK_HTTP_HEADERS='X-Session-API-Key: <key>'
+```
+
+```json
+{"role": "user", "content": [{"type": "text", "text": "{{prompt}}"}], "run": true}
+```
+
+- A 2xx acknowledges the message. Anything else leaves it pending: a wrong key or URL loses nothing, it stops delivery until fixed. Redirects are not followed.
+- `Idempotency-Key` carries the message id; delivery is at least once.
+- Optional: `SOCK_HTTP_METHOD` (`POST` or `PUT`), `SOCK_HTTP_TIMEOUT` (seconds, default 30), `SOCK_HTTP_STATE`.
+- The agent replies itself, with `sock_send` through `sock-mcp --outbound-only` on the same puppet.
