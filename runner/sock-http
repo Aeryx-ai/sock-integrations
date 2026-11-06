@@ -28,13 +28,19 @@ url=${SOCK_HTTP_URL:-}
 [ -n "$url" ] || die_config "SOCK_HTTP_URL is required"
 # the headers go to this URL: https, or http to a loopback address; no userinfo
 path_chars='[A-Za-z0-9._~%/?&=+,:@!*;-]*'
-url_re="https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/$path_chars)?|http://(localhost|127\\.0\\.0\\.1|\\[::1\\])(:[0-9]{1,5})?(/$path_chars)?"
+label='[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?'
+url_re="https://($label\\.)*$label(:[0-9]{1,5})?(/$path_chars)?|http://(localhost|127\\.0\\.0\\.1|\\[::1\\])(:[0-9]{1,5})?(/$path_chars)?"
 if [ "${#url}" -gt 2048 ] || ! matches "$url" "$url_re"; then
 	die_config "SOCK_HTTP_URL must be an https URL, or http to localhost, 127.0.0.1 or [::1], without userinfo, at most 2048 characters"
 fi
+port=$(printf '%s' "$url" | sed -n 's|^[a-z]*://[^/]*:\([0-9]*\)\(/.*\)\{0,1\}$|\1|p')
+if [ -n "$port" ] && [ "$port" -gt 65535 ]; then
+	die_config "SOCK_HTTP_URL has a port above 65535"
+fi
 case $url in
-http://*) proto='=http,https' ;;
-*) proto='=https' ;;
+# a loopback request ignores the proxy environment: the headers go to this URL only
+http://*) proto='=http,https' noproxy='*' ;;
+*) proto='=https' noproxy='' ;;
 esac
 
 method=${SOCK_HTTP_METHOD:-POST}
@@ -124,7 +130,7 @@ fi
 unset headers
 
 # a job waited on, as nap is, so a TERM need not wait out the request
-curl -q -sS --proto "$proto" --config "$cfg" --data-binary "@$body" -o /dev/null -D "$hdr" -w '%{http_code}' \
+curl -q -sS --proto "$proto" --noproxy "$noproxy" --config "$cfg" --data-binary "@$body" -o /dev/null -D "$hdr" -w '%{http_code}' \
 	--connect-timeout 10 --max-time "$timeout" >"$codef" 2>/dev/null &
 curl_pid=$!
 if wait "$curl_pid"; then code=$(cat "$codef"); else code=000; fi

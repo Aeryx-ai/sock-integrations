@@ -404,6 +404,9 @@ func TestHTTPBadConfigurationExits2BeforeAnyRequest(t *testing.T) {
 		"other scheme":    {"SOCK_HTTP_URL": "ftp://example.com/x"},
 		"quote in url":    {"SOCK_HTTP_URL": `https://example.com/x"`},
 		"long url":        {"SOCK_HTTP_URL": "https://example.com/" + strings.Repeat("a", 2100)},
+		"port range":      {"SOCK_HTTP_URL": "https://example.com:99999/x"},
+		"empty host":      {"SOCK_HTTP_URL": "https://-/x"},
+		"dots host":       {"SOCK_HTTP_URL": "https://../x"},
 		"bad method":      {"SOCK_HTTP_METHOD": "DELETE"},
 		"quote header":    {"SOCK_HTTP_HEADERS": `X-A: a"b`},
 		"slash header":    {"SOCK_HTTP_HEADERS": `X-A: a\b`},
@@ -443,5 +446,16 @@ func TestHTTPHeadersLeaveTheEnvironmentBeforeCurlRuns(t *testing.T) {
 	}
 	if strings.Contains(h.readRec("curl.0", "env"), "SOCK_HTTP_HEADERS") {
 		t.Fatal("curl inherited SOCK_HTTP_HEADERS")
+	}
+}
+
+func TestHTTPLoopbackIgnoresTheProxyEnvironment(t *testing.T) {
+	proxy := newHTTPServer(t)
+	h := newHTTPHarness(t)
+	h.env["http_proxy"] = proxy.srv.URL
+	h.env["HTTP_PROXY"] = proxy.srv.URL
+	h.env["ALL_PROXY"] = proxy.srv.URL
+	if r := h.send(rnOpts{}); r.Code != 0 || len(h.api.requests()) != 1 || len(proxy.requests()) != 0 {
+		t.Fatalf("exit %d, %d requests to the endpoint, %d to the proxy", r.Code, len(h.api.requests()), len(proxy.requests()))
 	}
 }

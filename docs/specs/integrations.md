@@ -385,7 +385,7 @@ sock listen --exec /path/to/runner/sock-http
 ```
 
 Settings, all validated before a message is read; a bad one exits 2 with nothing acknowledged:
-- `SOCK_HTTP_URL` (required): `https`, or `http` to `localhost`, `127.0.0.1` or `[::1]`; no userinfo, at most 2048 characters. The headers go there, so nothing else is accepted.
+- `SOCK_HTTP_URL` (required): `https`, or `http` to `localhost`, `127.0.0.1` or `[::1]`; no userinfo, valid host labels, a port of at most 65535, at most 2048 characters. The headers go there, so nothing else is accepted. A loopback request ignores the proxy environment (`--noproxy '*'`); an `https` one honours it.
 - `SOCK_HTTP_METHOD`: `POST` (default) or `PUT`.
 - `SOCK_HTTP_HEADERS`: one `Name: value` per line, names in HTTP token characters, no CR. Passed to `curl` as a config on stdin, never in argv, so a key does not show in `ps`. Never logged.
 - `SOCK_HTTP_BODY` (required): path to a JSON template file. Placeholders are whole JSON string values or substrings of one: `{{text}}` (the message text), `{{prompt}}` (the text inside the same `<sock-message from="owner" conversation=".." id="..">` tag `sock-runner` uses, so the agent knows where to reply and can recognise a repeat), `{{id}}`, `{{conversationId}}`, `{{sentAt}}`. `jq` substitutes into the parsed template, so the value is escaped and cannot leave its string. A template that is not JSON, or a placeholder outside a string value, exits 2.
