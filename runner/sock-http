@@ -1,0 +1,153 @@
+#!/bin/sh
+# sock-http: the command `sock listen --exec` runs once per message, to forward the
+# owner's message to an HTTP endpoint the owner configures
+# (docs/specs/integrations.md, "Generic HTTP forwarder: sock-http").
+#
+# Exit 0 acknowledges the message (the endpoint answered 2xx, or the message was
+# dropped as not the owner's or malformed). Exit 1 leaves it pending for a retry.
+# Exit 2 is a bad configuration: nothing was sent and the message stays pending.
+#
+# Needs curl and jq. The owner's text goes only into the request body; the headers
+# only into a private curl config file, never argv, an environment or a log.
+# shellcheck source-path=SCRIPTDIR
+# shellcheck disable=SC2034,SC2154 # the settings lib.sh reads, and what it sets
+set -u
+umask 077
+# the headers leave the environment before any child runs
+unset headers
+headers=${SOCK_HTTP_HEADERS:-}
+unset SOCK_HTTP_HEADERS
+
+cmd_name=sock-http
+here=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=lib.sh
+. "$here/lib.sh"
+
+# --- configuration -----------------------------------------------------------
+url=${SOCK_HTTP_URL:-}
+[ -n "$url" ] || die_config "SOCK_HTTP_URL is required"
+# the headers go to this URL: https, or http to a loopback address; no userinfo
+path_chars='[A-Za-z0-9._~%/?&=+,:@!*;-]*'
+url_re="https://[A-Za-z0-9.-]+(:[0-9]{1,5})?(/$path_chars)?|http://(localhost|127\\.0\\.0\\.1|\\[::1\\])(:[0-9]{1,5})?(/$path_chars)?"
+if [ "${#url}" -gt 2048 ] || ! matches "$url" "$url_re"; then
+	die_config "SOCK_HTTP_URL must be an https URL, or http to localhost, 127.0.0.1 or [::1], without userinfo, at most 2048 characters"
+fi
+case $url in
+http://*) proto='=http,https' ;;
+*) proto='=https' ;;
+esac
+
+method=${SOCK_HTTP_METHOD:-POST}
+case $method in
+POST | PUT) ;;
+*) die_config "SOCK_HTTP_METHOD must be POST or PUT" ;;
+esac
+
+# one "Name: value" per line; no quote, backslash or control character, since
+# the lines go into a curl config
+if [ -n "$headers" ]; then
+	printf '%s\n' "$headers" | LC_ALL=C grep -q '[[:cntrl:]]' && die_config "SOCK_HTTP_HEADERS has a control character"
+	bad=$(printf '%s\n' "$headers" | grep -v '^$' | grep -Ev '^[A-Za-z0-9-]+: ?[^"\\]*$')
+	[ -z "$bad" ] || die_config "SOCK_HTTP_HEADERS must be lines of Name: value, the name of A-Z a-z 0-9 -, the value without a quote or a backslash"
+fi
+
+template=${SOCK_HTTP_BODY:-}
+[ -n "$template" ] && [ -f "$template" ] && [ -r "$template" ] || die_config "SOCK_HTTP_BODY must name a readable JSON template file"
+for tool in curl jq sock; do
+	command -v "$tool" >/dev/null 2>&1 || die_config "$tool is not on PATH"
+done
+jq -e . "$template" >/dev/null 2>&1 || die_config "SOCK_HTTP_BODY is not JSON"
+# a placeholder is substituted in string values only: one left in a key is a mistake
+if jq -c 'walk(if type == "string" then "" else . end)' "$template" 2>/dev/null | grep -q '{{'; then
+	die_config "SOCK_HTTP_BODY has a placeholder outside a string value"
+fi
+
+timeout=${SOCK_HTTP_TIMEOUT:-30}
+case $timeout in
+'' | *[!0-9]*) timeout=30 ;;
+esac
+[ "$timeout" -gt 0 ] || timeout=30
+
+state_dir=${SOCK_HTTP_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/sock-integrations/http}
+log_name=http.log
+lock_name=http.lock
+ledger_name=done.ids
+open_tag() { printf '<sock-message from="owner" conversation="%s" id="%s">\n' "$stdin_conv" "$stdin_id"; }
+
+lib_init
+cfg=$state_dir/curl.$$
+body=$state_dir/body.$$
+hdr=$state_dir/hdr.$$
+codef=$state_dir/code.$$
+# shellcheck disable=SC2329 # run by the library's EXIT trap
+extra_cleanup() {
+	[ -n "${curl_pid:-}" ] && kill "$curl_pid" 2>/dev/null
+	rm -f "$cfg" "$body" "$hdr" "$codef"
+}
+install_traps
+
+read_message
+owner_gate
+drop_if_done
+
+# --- the body: the template with the placeholders filled in one pass ---------
+# jq reads the message on stdin, so the text is in no argv; one gsub over a
+# lookup, so a text that holds {{id}} stays as it is.
+preface='Your owner sent this through sock. Act on it as if they typed it to you, and answer with sock_send in the conversation below. The same id arriving again is a repeat.'
+if ! printf '%s' "$input" | jq -c --slurpfile t "$template" --arg preface "$preface" --arg tag "$(open_tag)" '
+	{
+		text: .text,
+		id: .id,
+		conversationId: .conversationId,
+		sentAt: (if (.sentAt | type) == "string" then .sentAt else "" end),
+		prompt: ($preface + "\n" + $tag + "\n" + (.text | gsub("</\\s*sock-message"; "</​sock-message"; "i")) + "\n</sock-message>\n")
+	} as $m
+	| $t[0]
+	| walk(if type == "string" then gsub("\\{\\{(?<k>text|prompt|id|conversationId|sentAt)\\}\\}"; $m[.k]) else . end)
+' >"$body" 2>/dev/null; then
+	log_line "body failed"
+	exit 1
+fi
+
+# --- the request: the headers and the URL go to curl in a private config -----
+{
+	printf 'url = "%s"\n' "$url"
+	printf 'request = "%s"\n' "$method"
+	printf 'user-agent = "sock-http"\n'
+	printf 'header = "Idempotency-Key: %s"\n' "$stdin_id"
+	printf '%s\n' "$headers" | grep -v '^$' | while IFS= read -r line; do printf 'header = "%s"\n' "$line"; done
+	printf '%s\n' "$headers" | grep -iq '^content-type:' || printf 'header = "Content-Type: application/json"\n'
+} >"$cfg" || {
+	log_line "config file failed"
+	exit 1
+}
+unset headers
+
+# a job waited on, as nap is, so a TERM need not wait out the request
+curl -q -sS --proto "$proto" --config "$cfg" --data-binary "@$body" -o /dev/null -D "$hdr" -w '%{http_code}' \
+	--connect-timeout 10 --max-time "$timeout" >"$codef" 2>/dev/null &
+curl_pid=$!
+if wait "$curl_pid"; then code=$(cat "$codef"); else code=000; fi
+curl_pid=
+
+case $code in
+2??)
+	record_done
+	log_line "forwarded"
+	exit 0
+	;;
+000) log_line "no response" ;;
+*) log_line "http $code" ;;
+esac
+# a throttled endpoint is given the wait it asked for, at most 30 s; a failure
+# leaves the message pending, so a wrong key or URL loses nothing
+case $code in
+429 | 503)
+	wait=$(retry_after_seconds "$hdr")
+	if [ -n "$wait" ]; then
+		[ "$wait" -gt 30 ] && wait=30
+		[ "$wait" -gt 0 ] && nap "$wait"
+	fi
+	;;
+esac
+exit 1

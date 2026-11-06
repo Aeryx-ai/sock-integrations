@@ -1,6 +1,6 @@
 # shellcheck shell=sh
 # shellcheck disable=SC2154,SC2034 # the settings the caller sets, listed below, and those runner_config sets for it
-# Shared by runner/sock-runner and runner/sock-bridge, the two commands
+# Shared by runner/sock-runner, runner/sock-bridge and runner/sock-http, the commands
 # `sock listen --exec` runs once per message (docs/specs/integrations.md). Source
 # it: it defines functions and runs nothing. A caller sets
 #   cmd_name     sock-runner or sock-bridge, for messages
@@ -171,6 +171,32 @@ nap() {
 install_traps() {
 	trap lib_cleanup EXIT
 	trap 'exit 143' TERM INT HUP
+}
+
+# retry_after_seconds FILE prints the seconds a Retry-After header in a curl -D
+# dump asks for (delta-seconds or an HTTP-date; negative for a past date), 999999
+# for a number too long to count, and nothing when there is none or it is garbage.
+retry_after_seconds() {
+	ra=$(sed -n 's/^[Rr]etry-[Aa]fter: *//p' "$1" | tr -d '\r' | sed 's/ *$//' | head -n 1)
+	case $ra in
+	'') ;;
+	*[!0-9]*)
+		when=$(LC_ALL=C TZ=UTC date -j -f '%a, %d %b %Y %H:%M:%S GMT' "$ra" +%s 2>/dev/null ||
+			LC_ALL=C date -u -d "$ra" +%s 2>/dev/null || echo "")
+		case $when in
+		'' | *[!0-9]*) ;;
+		*) echo $((when - $(now))) ;;
+		esac
+		;;
+	*)
+		digits=$(printf '%s' "$ra" | sed 's/^0*//')
+		case ${#digits} in
+		0) echo 0 ;;
+		[1-6]) echo "$digits" ;;
+		*) echo 999999 ;;
+		esac
+		;;
+	esac
 }
 
 # --- parse the message (protojson, whitespace randomized) --------------------

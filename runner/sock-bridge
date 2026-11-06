@@ -140,28 +140,9 @@ pass=
 # retry_wait [header file]: sleeps the Retry-After of that response (seconds, or
 # an HTTP date, which is GMT), else 1, 2, 4 s; never past the time left
 retry_wait() {
-	ra=$(sed -n 's/^[Rr]etry-[Aa]fter: *//p' "${1:-$hdr}" | tr -d '\r' | sed 's/ *$//' | head -n 1)
 	wait=$((1 << attempt))
-	case $ra in
-	'') ;;
-	*[!0-9]*)
-		when=$(LC_ALL=C TZ=UTC date -j -f '%a, %d %b %Y %H:%M:%S GMT' "$ra" +%s 2>/dev/null ||
-			LC_ALL=C date -u -d "$ra" +%s 2>/dev/null || echo "")
-		case $when in
-		'' | *[!0-9]*) ;;
-		*) wait=$((when - $(now))) ;;
-		esac
-		;;
-	*)
-		# a number too long for the arithmetic is past any time left
-		digits=$(printf '%s' "$ra" | sed 's/^0*//')
-		case ${#digits} in
-		0) wait=0 ;;
-		[1-6]) wait=$digits ;;
-		*) wait=$((deadline - $(now))) ;;
-		esac
-		;;
-	esac
+	ra=$(retry_after_seconds "${1:-$hdr}")
+	[ -z "$ra" ] || wait=$ra
 	[ "$wait" -lt 0 ] && wait=0
 	left=$((deadline - $(now)))
 	[ "$wait" -gt "$left" ] && wait=$left
