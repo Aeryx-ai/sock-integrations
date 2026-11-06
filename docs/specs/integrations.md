@@ -12,7 +12,7 @@ Caller class: puppet device (`sock_pt_`). A machine key (`sock_mk_`) is accepted
 
 v1 is bearer-token platforms only.
 
-In: Claude Code plugin, Codex config and hooks, Codex inbound through the plugin's server ([codex-inbound.md](codex-inbound.md)), Agent SDK example, the headless inbound runner (`runner/sock-runner`) and the Managed Agents bridge (`runner/sock-bridge`).
+In: Claude Code plugin, Codex config and hooks, Codex inbound through the plugin's server ([codex-inbound.md](codex-inbound.md)), Agent SDK example, the headless inbound runner (`runner/sock-runner`), the Managed Agents bridge (`runner/sock-bridge`) and the generic HTTP forwarder (`runner/sock-http`).
 
 Out, tracked in bd:
 - Managed Agents webhook delivery: a follow-up bead after the bridge below, declined. Session creation and owner-brokered tool confirmations are built (below).
@@ -363,6 +363,78 @@ If revisited (the bridge hosted next to `sock-mcpd`, which has a public HTTPS na
 - Settled by the API reference, not yet by the live API: the listed history carries `user.tool_confirmation` with its `tool_use_id` (Answering, step 3, relies on it), and a partial answer re-emits the idle with the remaining calls (step 5).
 - Open: whether `approve all` for a turn with several pending calls is worth its risk (one message approving calls the owner did not read).
 - Open: archiving. Sessions created per conversation accumulate; the bridge never archives. An idle sweep would be a clock; leaving it to the owner is the current answer.
+
+## Generic HTTP forwarder: sock-http
+
+An agent with an inbound HTTP endpoint (the OpenHands agent server, most agent frameworks) has no channel, and nothing pushes a sock message into it. `runner/sock-http` is the `sock listen --exec` command that forwards one owner message to an endpoint the owner configures. It knows no agent: the URL, headers and body shape are configuration, so a new agent is a config file, not code. Conformist downstream of `sock listen --exec` and of whatever HTTP API the target exposes; it adds no server surface and no domain model. It reuses `runner/lib.sh` (`read_message`, `owner_gate`, the done ledger, the log) and keeps a ledger, a log and the owner cache in its state directory, no lock.
+
+Rejected:
+- One adapter per agent: code for what configuration expresses.
+- Hosted push from `sock-mcpd`: it would hold the user's agent key, and the webhook rules require a public address.
+- An SSE wake-up from `sock-mcpd`: OpenHands' MCP client (`fastmcp` 3.2.0, `software-agent-sdk` at 893ca2e) acts only on `tools/list_changed`; other server notifications are dropped. Read from source, not run.
+- Hosted `sock_fetch` and `sock_ack`: needed only by an agent with no inbound endpoint and nowhere to run `sock listen`; tracked separately, no user yet.
+
+### Invocation
+
+```sh
+export SOCK_TOKEN=sock_pt_...            # the forwarder's own puppet, no other consumer
+export SOCK_HTTP_URL=https://agent.example/api/inbox
+export SOCK_HTTP_HEADERS='Authorization: Bearer ...'   # optional, one "Name: value" per line
+export SOCK_HTTP_BODY=/path/to/body.json
+sock listen --exec /path/to/runner/sock-http
+```
+
+Settings, all validated before a message is read; a bad one exits 2 with nothing acknowledged:
+- `SOCK_HTTP_URL` (required): `https`, or `http` to `localhost`, `127.0.0.1` or `[::1]`; no userinfo, at most 2048 characters. The headers go there, so nothing else is accepted.
+- `SOCK_HTTP_METHOD`: `POST` (default) or `PUT`.
+- `SOCK_HTTP_HEADERS`: one `Name: value` per line, names in HTTP token characters, no CR. Passed to `curl` as a config on stdin, never in argv, so a key does not show in `ps`. Never logged.
+- `SOCK_HTTP_BODY` (required): path to a JSON template file. Placeholders are whole JSON string values or substrings of one: `{{text}}` (the message text), `{{prompt}}` (the text inside the same `<sock-message from="owner" conversation=".." id="..">` tag `sock-runner` uses, so the agent knows where to reply and can recognise a repeat), `{{id}}`, `{{conversationId}}`, `{{sentAt}}`. `jq` substitutes into the parsed template, so the value is escaped and cannot leave its string. A template that is not JSON, or a placeholder outside a string value, exits 2.
+- `SOCK_HTTP_TIMEOUT`: seconds for the whole request, default 30 (connect 10). Not a positive integer falls back.
+- `SOCK_HTTP_STATE`: default `${XDG_STATE_HOME:-$HOME/.local/state}/sock-integrations/http`; one per forwarder.
+
+### Behavior
+
+1. Validate settings and that `jq`, `curl` and `sock` are on `PATH`.
+2. Read the message from stdin. The owner gate, before any network call: `senderId` equals `SOCK_SENDER_ID` and `account.puppet.ownerId` from `sock whoami --json`. Anything else is acked and dropped. A token that is not a puppet token exits 2 (`owner_gate`, as for the runner).
+3. A finished id in the ledger is acked without a request.
+4. Build the body from the template. Send one request: no redirects followed (the headers would follow them), `Idempotency-Key: <message id>` added, response body discarded and never logged.
+5. 2xx: record the id, exit 0. Anything else (no connection, timeout, 3xx, 4xx, 5xx) logs `http <code>` or `no response` and exits 1, so `listen` retries up to 5 times with backoff and then holds the message for the next connection. A 401 or 404 therefore does not lose messages; it stops them until the owner fixes the config. On 429 or 503 with `Retry-After` (delta-seconds or HTTP-date) the command first waits that long, at most 30 s.
+
+### Rules that follow
+
+- Message text is untrusted data even from the owner. It goes only into the body, never into argv, the environment, the URL or a header.
+- Ack means the endpoint accepted the request, not that the agent read or acted on it. Delivery is at least once; `Idempotency-Key` lets an endpoint that supports it drop a repeat, and `{{prompt}}` carries the id for one that does not.
+- One consumer per puppet (rule 2): `sock listen` is the only reader of the forwarder's puppet.
+- The target is fixed by the URL, so one forwarder feeds one agent conversation. Mapping a sock conversation to an agent conversation, and creating agent conversations, are not done here.
+- Replies are the agent's own: it calls `sock_send` through `sock-mcp --outbound-only` on the same puppet, or the hosted connector. The forwarder sends nothing.
+- Run it under the Runner service's pattern (a launchd or systemd user unit around `sock listen --exec`) for durability; extending `sock-runner-service` to take a command is a separate change.
+
+### Example: OpenHands
+
+The agent server's `POST /api/conversations/{id}/events` appends a user message and, with `"run": true`, starts a run, including on an idle or finished conversation. Auth is `X-Session-API-Key`. A server with no session keys configured accepts every request, so set one.
+
+```sh
+SOCK_HTTP_URL=http://localhost:3000/api/conversations/<conversation id>/events
+SOCK_HTTP_HEADERS='X-Session-API-Key: <key>'
+SOCK_HTTP_BODY=openhands.json
+```
+
+```json
+{"role": "user", "content": [{"type": "text", "text": "{{prompt}}"}], "run": true}
+```
+
+Read from `software-agent-sdk` at 893ca2e (`event_router.py`, `message_request.py`, `dependencies.py`); not run against a live server.
+
+### Tests
+
+Under `test/`, against stubs of `sock` and `curl` (the stub records argv, the stdin config and the body): the owner's message makes exactly one request with the substituted body; text with quotes, newlines and `{{id}}` inside it stays inside its string and never reaches argv, environment, URL or headers; headers appear only in the stdin config; a non-owner sender is acked with no request; a human session token exits 2 with no request; a repeated id is acked with no second request; 2xx acks and records; 3xx, 4xx, 5xx, timeout and no connection exit 1 and record nothing; `Retry-After` in both forms waits at most 30 s; bad URL scheme, userinfo, bad method, bad header name and a template with a placeholder outside a string exit 2.
+
+Security review before merge, as the review gate below: owner gate bypass, text leaving the body, header and key leakage through argv, logs or redirects, and SSRF through the URL setting.
+
+### Follow-up: open questions
+
+- Open: a live run against an OpenHands agent server, to confirm the body shape and that `run: true` wakes an idle conversation.
+- Open: whether `sock-runner-service` takes a command, or `sock-http` gets its own installer.
 
 ## Tests
 
