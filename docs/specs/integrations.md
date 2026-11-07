@@ -433,7 +433,7 @@ Security review before merge, as the review gate below: owner gate bypass, text 
 
 ### Follow-up: open questions
 
-- Open: a live run against an OpenHands agent server, to confirm the body shape and that `run: true` wakes an idle conversation.
+- Settled 2026-11-07, against `agent-server` built from `software-agent-sdk` 893ca2e on `127.0.0.1` with a session key (a request without it got 401): `sock-http` with the body above got a 2xx, the user message arrived intact in the conversation's events and an idle conversation went to `running`. The LLM endpoint was unreachable on purpose, so an agent's reply through `sock_send` is not covered.
 - Open: whether `sock-runner-service` takes a command, or `sock-http` gets its own installer.
 
 ## Tests
