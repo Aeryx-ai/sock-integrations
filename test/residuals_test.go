@@ -55,4 +55,7 @@ func TestAgentSDKExampleIsOutboundOnlyAndHoldsNoAmbientToken(t *testing.T) {
 	if del < 0 || del > q {
 		t.Error("example.ts: SOCK_TOKEN stays in process.env when query() spawns Claude Code")
 	}
+	if !strings.Contains(src, `SOCK_MCP_MESSAGE_OWNER: "1"`) {
+		t.Error(`example.ts: sock-mcp refuses sock_send with no conversation_id unless its env sets SOCK_MCP_MESSAGE_OWNER: "1"; the default prompt messages the owner`)
+	}
 }

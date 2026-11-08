@@ -5,7 +5,8 @@
 // radius is the puppet: its owner and the conversations it belongs to, at
 // 60 sends per minute. Use one puppet per binding.
 // Pass text (and optionally conversation_id) to sock_send; omit conversation_id
-// to message the owner.
+// to message the owner, which sock-mcp allows only with SOCK_MCP_MESSAGE_OWNER=1
+// in its own environment.
 //
 // Inbound reads (sock_fetch, sock_ack) are not exposed at all (--outbound-only):
 // fetch returns messages from every sender in every conversation the puppet
@@ -25,7 +26,12 @@ for await (const msg of query({
         type: "stdio",
         command: "sock-mcp",
         args: ["--outbound-only"],
-        env: { SOCK_TOKEN: token, ...(process.env.SOCK_URL ? { SOCK_URL: process.env.SOCK_URL } : {}) },
+        env: {
+          SOCK_TOKEN: token,
+          // sock-mcp refuses sock_send with no conversation_id (a message to the owner) without this
+          SOCK_MCP_MESSAGE_OWNER: "1",
+          ...(process.env.SOCK_URL ? { SOCK_URL: process.env.SOCK_URL } : {}),
+        },
       },
     },
     allowedTools: [

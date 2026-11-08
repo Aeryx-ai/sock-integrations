@@ -90,7 +90,7 @@ npm install @anthropic-ai/claude-agent-sdk tsx
 SOCK_TOKEN=sock_pt_... npx tsx agent-sdk/example.ts "tell me when you are done"
 ```
 
-`agent-sdk/example.ts` is the whole integration: it hands the token to `sock-mcp --outbound-only` and allows the three send tools.
+`agent-sdk/example.ts` is the whole integration: it hands the token and `SOCK_MCP_MESSAGE_OWNER=1` to `sock-mcp --outbound-only` and allows the three send tools.
 
 ## sock-runner: headless chat per project
 
