@@ -433,7 +433,7 @@ Security review before merge, as the review gate below: owner gate bypass, text 
 
 ### Follow-up: open questions
 
-- Settled 2026-11-07, against `agent-server` built from `software-agent-sdk` 893ca2e on `127.0.0.1` with a session key (a request without it got 401): `sock-http` with the body above got a 2xx, the user message arrived intact in the conversation's events and an idle conversation went to `running`. The LLM endpoint was unreachable on purpose, so an agent's reply through `sock_send` is not covered.
+- Settled 2026-11-07, against `agent-server` built from `software-agent-sdk` 893ca2e on `127.0.0.1` with a session key (a request without it got 401): `sock-http` with the body above got a 2xx, the user message arrived intact in the conversation's events and an idle conversation went to `running`. Then with a real model (`qwen3.8-flash-next` on `llama.guy.ts.net`) and a stub MCP server holding a `sock_send` tool (conversation created with `mcp_config` `{"sock": {"url": ..., "transport": "streamable-http"}}`): the agent answered through `sock_send` with the conversation id from the tag, and a second message on the now `finished` conversation woke it and was answered the same way. Not covered: `sock listen` against a hub (the owner gate ran with a stubbed `sock whoami`) and the real `sock-mcp`.
 - Open: whether `sock-runner-service` takes a command, or `sock-http` gets its own installer.
 
 ## Tests
