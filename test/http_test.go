@@ -296,6 +296,68 @@ func TestHTTPNotTheOwnerIsAckedWithNoRequest(t *testing.T) {
 	}
 }
 
+func TestHTTPAPuppetOfTheOwnerIsForwardedAndNamed(t *testing.T) {
+	h := newHTTPHarness(t)
+	f := h.fields()
+	f["senderId"] = rnOther
+	env := map[string]string{"SOCK_SENDER_ID": rnOther, "STUB_PUPPETS": rnOther, "STUB_PUPPET_NAME": `Andy <the> pod!`}
+	// without the setting the owner's puppet is dropped before any lookup
+	r := h.run(rnOpts{Stdin: rnMessage(f), Env: env})
+	if r.Code != 0 || len(h.api.requests()) != 0 || h.readRec("accounts-get") != "" || !strings.Contains(h.httpLog(), "dropped: sender "+rnOther) {
+		t.Fatalf("without SOCK_ACCEPT_PUPPETS: exit %d, %d requests, lookups %q, log %q", r.Code, len(h.api.requests()), h.readRec("accounts-get"), h.httpLog())
+	}
+	env["SOCK_ACCEPT_PUPPETS"] = "1"
+	r = h.run(rnOpts{Stdin: rnMessage(f), Env: env})
+	if r.Code != 0 || len(h.api.requests()) != 1 {
+		t.Fatalf("exit %d, %d requests, log %q", r.Code, len(h.api.requests()), h.httpLog())
+	}
+	var body struct {
+		Content []struct{ Text string }
+	}
+	if err := json.Unmarshal([]byte(h.api.requests()[0].Body), &body); err != nil || len(body.Content) != 1 {
+		t.Fatalf("body %q: %v", h.api.requests()[0].Body, err)
+	}
+	// the name reaches the tag with only letters, digits, space, . _ and -
+	tag := `<sock-message from="puppet" name="Andy the pod" conversation="` + rnConvID + `" id="` + rnMsgID + `">`
+	if !strings.Contains(body.Content[0].Text, tag+"\n"+rnTextSentinel) || !strings.HasPrefix(body.Content[0].Text, "Andy the pod, one of your owner's puppets") {
+		t.Fatalf("prompt %q", body.Content[0].Text)
+	}
+	// the account is cached: a second message from the same puppet makes no second lookup
+	r = h.run(rnOpts{Stdin: rnMessage(f), Env: env})
+	lookups := strings.Count(h.readRec("accounts-get"), rnOther)
+	if r.Code != 0 || lookups != 1 {
+		t.Fatalf("exit %d, %d lookups", r.Code, lookups)
+	}
+	h.noLeak(r)
+}
+
+func TestHTTPAnAccountLookupThatFailsLeavesTheMessagePending(t *testing.T) {
+	h := newHTTPHarness(t)
+	f := h.fields()
+	f["senderId"] = rnOther
+	r := h.run(rnOpts{Stdin: rnMessage(f), Env: map[string]string{"SOCK_SENDER_ID": rnOther, "SOCK_ACCEPT_PUPPETS": "1", "STUB_ACCOUNTS": "fail"}})
+	if r.Code != 1 || len(h.api.requests()) != 0 || !strings.Contains(h.httpLog(), "account lookup failed") {
+		t.Fatalf("exit %d, %d requests, log %q", r.Code, len(h.api.requests()), h.httpLog())
+	}
+}
+
+// An id the hub does not know, or a human, is dropped and acked, and the verdict is cached.
+func TestHTTPAStrangerIsDroppedAfterOneLookup(t *testing.T) {
+	for name, mode := range map[string]string{"unknown id": "none", "a human": ""} {
+		t.Run(name, func(t *testing.T) {
+			h := newHTTPHarness(t)
+			f := h.fields()
+			f["senderId"] = rnOther
+			env := map[string]string{"SOCK_SENDER_ID": rnOther, "SOCK_ACCEPT_PUPPETS": "1", "STUB_ACCOUNTS": mode}
+			h.run(rnOpts{Stdin: rnMessage(f), Env: env})
+			r := h.run(rnOpts{Stdin: rnMessage(f), Env: env})
+			if r.Code != 0 || len(h.api.requests()) != 0 || !strings.Contains(h.httpLog(), "dropped: sender "+rnOther) || strings.Count(h.readRec("accounts-get"), rnOther) != 1 {
+				t.Fatalf("exit %d, %d requests, log %q, lookups %q", r.Code, len(h.api.requests()), h.httpLog(), h.readRec("accounts-get"))
+			}
+		})
+	}
+}
+
 func TestHTTPAHumanTokenExits2WithNoRequest(t *testing.T) {
 	h := newHTTPHarness(t)
 	r := h.send(rnOpts{Env: map[string]string{"STUB_WHOAMI": "nopuppet"}})

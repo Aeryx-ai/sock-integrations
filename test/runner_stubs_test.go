@@ -67,6 +67,17 @@ if [ "$1" = activity ]; then
   printf '%s %s\n' "$(date +%s)" "$*" >> "$STUB_DIR/activity"
   exit "${STUB_ACTIVITY_EXIT:-0}"
 fi
+if [ "$1 $2 $4" = "accounts get --json" ]; then
+  echo "$3" >> "$STUB_DIR/accounts-get"
+  [ "$STUB_ACCOUNTS" = fail ] && exit 1
+  # an id the hub does not know: the CLI prints nothing and exits 0
+  [ "$STUB_ACCOUNTS" = none ] && exit 0
+  case " $STUB_PUPPETS " in
+  *" $3 "*) printf '{"id":"%s","displayName":"%s","puppet":{"ownerId":"%s","name":"Andy"}}\n' "$3" "${STUB_PUPPET_NAME:-Andy}" "$STUB_OWNER" ;;
+  *) printf '{"id":"%s","displayName":"someone","human":{"handle":"someone"}}\n' "$3" ;;
+  esac
+  exit 0
+fi
 echo "$SOCK_TOKEN" >> "$STUB_DIR/sock-token"
 if [ "$1 $2" != "whoami --json" ]; then exit 64; fi
 case "$STUB_WHOAMI" in

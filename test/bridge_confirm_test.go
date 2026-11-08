@@ -311,6 +311,34 @@ func TestConfirmOnlyTheOwnerApproves(t *testing.T) {
 	}
 }
 
+// A puppet of the owner may speak to the agent, but only the owner answers a
+// confirmation: its "approve <code>" reaches the session as a plain message.
+func TestConfirmAPuppetOfTheOwnerCannotApprove(t *testing.T) {
+	h := newBridgeHarness(t)
+	code := h.askOnce()
+	o := h.reply(2, "approve "+code)
+	o.Env["SOCK_SENDER_ID"] = rnOther
+	o.Env["SOCK_ACCEPT_PUPPETS"] = "1"
+	o.Env["STUB_PUPPETS"] = rnOther
+	f := h.fields()
+	f["id"] = o.Env["SOCK_MESSAGE_ID"]
+	f["senderId"] = rnOther
+	f["text"] = "approve " + code
+	o.Stdin = rnMessage(f)
+	r := h.run(o)
+	if strings.Contains(h.bridgeLog(), "approval recorded") || strings.Contains(h.bridgeLog(), "dropped: sender") {
+		t.Fatalf("exit %d, log %q", r.Code, h.bridgeLog())
+	}
+	if !strings.Contains(h.pendingFile(), code+" ") {
+		t.Fatal("the code is gone")
+	}
+	for _, b := range h.api.sentBodies() {
+		if strings.Contains(b, "user.tool_confirmation") {
+			t.Fatalf("a puppet confirmed a tool call: %q", b)
+		}
+	}
+}
+
 func TestConfirmLookAlikesApproveNothing(t *testing.T) {
 	h := newBridgeHarness(t)
 	code := h.askOnce()

@@ -29,6 +29,16 @@ if [ "$1 $2" = "send --help" ]; then
   [ -n "$STUB_NO_IDEM" ] || echo "      --idempotency-key string   a key per message"
   exit 0
 fi
+# a sender that is not the owner: a puppet of the owner when STUB_PUPPETS names it, else a human
+if [ "$1 $2 $4" = "accounts get --json" ]; then
+  [ "$STUB_ACCOUNTS" = fail ] && exit 1
+  [ "$STUB_ACCOUNTS" = none ] && exit 0
+  case " $STUB_PUPPETS " in
+  *" $3 "*) printf '{"id":"%s","displayName":"%s","puppet":{"ownerId":"%s","name":"Andy"}}\n' "$3" "${STUB_PUPPET_NAME:-Andy}" "$STUB_OWNER" ;;
+  *) printf '{"id":"%s","displayName":"someone","human":{"handle":"someone"}}\n' "$3" ;;
+  esac
+  exit 0
+fi
 echo "$SOCK_TOKEN" >> "$STUB_DIR/sock-token"
 case "$1" in
 whoami)

@@ -78,7 +78,6 @@ state_dir=${SOCK_HTTP_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/sock-integrat
 log_name=http.log
 lock_name=http.lock
 ledger_name=done.ids
-open_tag() { printf '<sock-message from="owner" conversation="%s" id="%s">\n' "$stdin_conv" "$stdin_id"; }
 
 lib_init
 cfg=$state_dir/curl.$$
@@ -99,8 +98,7 @@ drop_if_done
 # --- the body: the template with the placeholders filled in one pass ---------
 # jq reads the message on stdin, so the text is in no argv; one gsub over a
 # lookup, so a text that holds {{id}} stays as it is.
-preface='Your owner sent this through sock. Act on it as if they typed it to you, and answer with sock_send in the conversation below. The same id arriving again is a repeat.'
-if ! printf '%s' "$input" | jq -c --slurpfile t "$template" --arg preface "$preface" --arg tag "$(open_tag)" '
+if ! printf '%s' "$input" | jq -c --slurpfile t "$template" --arg preface "$(preface "to you")" --arg tag "$(open_tag)" '
 	{
 		text: .text,
 		id: .id,

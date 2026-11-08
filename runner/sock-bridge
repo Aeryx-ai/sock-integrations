@@ -1086,9 +1086,13 @@ follow_stream() {
 # lines past their age go each time the file is read under the lock
 [ ! -f "$confirm_file" ] || confirm_put "$confirm_file"
 # an owner reply that answers a confirmation is looked up before the session:
-# a code no line holds for this conversation is answered at once
-parse_reply
-[ -z "$verb" ] || confirm_line
+# a code no line holds for this conversation is answered at once. Only the
+# owner approves or denies; a puppet's "approve <code>" is a plain message.
+verb=
+if [ "$sender_from" = owner ]; then
+	parse_reply
+	[ -z "$verb" ] || confirm_line
+fi
 
 [ -z "$agent" ] || resolve_session
 base="$api/v1/sessions/$session/events"

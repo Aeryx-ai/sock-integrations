@@ -232,12 +232,17 @@ read_message() {
 }
 
 # --- the owner gate ----------------------------------------------------------
-# The sender in the environment and on stdin must be one id, and equal the
-# puppet's owner. The owner id is cached for a minute per token, so a non-owner
-# in a shared conversation costs no network call per message. It also sets
-# puppet_id, the puppet's own account id, cached beside the owner; a caller
-# that sets need_puppet_id=1 takes no cache without it, and a whoami without it
-# is not a puppet token.
+# The sender in the environment and on stdin must be one id, and be the
+# puppet's owner or another puppet of that owner. The owner id is cached for a
+# minute per token, and a sender's account for a minute per sender, so a
+# stranger in a shared conversation costs one lookup a minute, not one per
+# message. It also sets puppet_id, the puppet's own account id, cached beside
+# the owner; a caller that sets need_puppet_id=1 takes no cache without it, and
+# a whoami without it is not a puppet token. On the way out sender_from is
+# "owner" or "puppet", and sender_name the puppet's display name, safe for a
+# tag attribute.
+sender_from=owner
+sender_name=
 owner_gate() {
 	if [ "$sender" != "$SOCK_SENDER_ID" ]; then
 		log_line "dropped: sender $SOCK_SENDER_ID"
@@ -276,10 +281,45 @@ owner_gate() {
 		fi
 		printf '%s %s %s\n' "$(now)" "$owner" "$puppet_id" >"$owner_cache" 2>/dev/null || true
 	fi
-	if [ "$sender" != "$owner" ]; then
+	[ "$sender" = "$owner" ] && return 0
+	# another account: with SOCK_ACCEPT_PUPPETS=1 a puppet of the same owner passes; anything
+	# else, and everything without the setting, is dropped. Off by default so two runners of one
+	# owner in one conversation cannot answer each other without end.
+	if [ "${SOCK_ACCEPT_PUPPETS:-}" != 1 ]; then
 		log_line "dropped: sender $sender"
 		exit 0
 	fi
+	sender_cache=$state_dir/sender.$(printf '%s' "$sender" | hash16)
+	sender_owner=
+	if [ -f "$sender_cache" ]; then
+		read -r cached_at cached_owner cached_name <"$sender_cache" 2>/dev/null || true
+		case ${cached_at:-} in
+		'' | *[!0-9]*) ;;
+		*) if [ $(($(now) - cached_at)) -lt 60 ] && is_uuid "${cached_owner:-}"; then
+			sender_owner=$cached_owner
+			sender_name=$(printf '%s' "${cached_name:-}" | LC_ALL=C tr -cd 'A-Za-z0-9 ._-' | cut -c1-64)
+		fi ;;
+		esac
+	fi
+	if [ -z "$sender_owner" ]; then
+		if ! account=$(sock accounts get "$sender" --json 2>/dev/null); then
+			log_line "account lookup failed"
+			exit 1
+		fi
+		sender_owner=$(printf '%s' "$account" | jq -r 'if (.puppet.ownerId | type) == "string" then .puppet.ownerId else empty end' 2>/dev/null)
+		# the name goes into a tag attribute: letters, digits, space, . _ and -, at most 64
+		sender_name=$(printf '%s' "$account" | jq -r 'if (.displayName | type) == "string" then .displayName else "" end' 2>/dev/null |
+			LC_ALL=C tr -cd 'A-Za-z0-9 ._-' | cut -c1-64)
+		# an account that is no puppet is cached as owned by nobody, so it is dropped without a call
+		is_uuid "$sender_owner" || sender_owner=00000000-0000-4000-8000-000000000000
+		printf '%s %s %s\n' "$(now)" "$sender_owner" "$sender_name" >"$sender_cache" 2>/dev/null || true
+	fi
+	if [ "$sender_owner" != "$owner" ]; then
+		log_line "dropped: sender $sender"
+		exit 0
+	fi
+	sender_from=puppet
+	[ -n "$sender_name" ] || sender_name=puppet
 }
 
 # --- redelivery: an id that already finished is acknowledged, not rerun ------
@@ -350,10 +390,26 @@ take_lock() {
 	done
 }
 
-# --- the prompt: the owner's text only, in a private file --------------------
+# --- the prompt: the sender's text only, in a private file -------------------
 # open_tag prints the prompt's opening tag line. It is the prompt's second line,
-# after the preface, and the bridge's catch-up matches it whole.
-open_tag() { printf '<sock-message from="owner" conversation="%s" id="%s">\n' "$stdin_conv" "$stdin_id"; }
+# after the preface, and the bridge's catch-up matches it whole. From the owner
+# it is from="owner"; from one of the owner's puppets it names the puppet.
+open_tag() {
+	if [ "$sender_from" = puppet ]; then
+		printf '<sock-message from="puppet" name="%s" conversation="%s" id="%s">\n' "$sender_name" "$stdin_conv" "$stdin_id"
+	else
+		printf '<sock-message from="owner" conversation="%s" id="%s">\n' "$stdin_conv" "$stdin_id"
+	fi
+}
+# preface prints the one line above the tag: who sent the message and what to
+# do with it. $1 says where the agent is spoken to ("in this session", "to you").
+preface() {
+	if [ "$sender_from" = puppet ]; then
+		printf '%s, one of your owner'"'"'s puppets, sent this through sock on your owner'"'"'s behalf. Act on it as if your owner typed it %s, and answer with sock_send in the conversation below. The same id arriving again is a repeat.\n' "$sender_name" "$1"
+	else
+		printf 'Your owner sent this through sock. Act on it as if they typed it %s, and answer with sock_send in the conversation below. The same id arriving again is a repeat.\n' "$1"
+	fi
+}
 # write_prompt sets prompt, or logs and exits 1.
 write_prompt() {
 	prompt=$state_dir/prompt.$$
@@ -362,7 +418,7 @@ write_prompt() {
 		exit 1
 	}
 	{
-		printf '%s\n' 'Your owner sent this through sock. Act on it as if they typed it in this session, and answer with sock_send in the conversation below. The same id arriving again is a repeat.'
+		preface "in this session"
 		open_tag
 		printf '%s' "$input" | jq -j '.text | gsub("</\\s*sock-message"; "</​sock-message"; "i")'
 		printf '\n</sock-message>\n'
