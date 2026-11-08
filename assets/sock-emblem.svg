@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="280" height="280" viewBox="0 0 280 280" role="img" aria-labelledby="title desc">
+<title id="title">Sock emblem</title>
+<desc id="desc">Editable vector paths. No embedded raster images or font dependencies.</desc>
+<g transform="translate(36 4) scale(.75)"><defs>
+<linearGradient id="sock-front" gradientUnits="userSpaceOnUse" x1="345" y1="125" x2="250" y2="295"><stop stop-color="#FF4037"/><stop offset="1" stop-color="#FF2B31"/></linearGradient>
+<linearGradient id="sock-back" gradientUnits="userSpaceOnUse" x1="285" y1="247" x2="398" y2="365"><stop stop-color="#8E1218"/><stop offset="1" stop-color="#CE2525"/></linearGradient>
+<linearGradient id="sock-lower" gradientUnits="userSpaceOnUse" x1="305" y1="321" x2="336" y2="403"><stop stop-color="#6B1014"/><stop offset="1" stop-color="#C02224"/></linearGradient>
+<linearGradient id="sock-toe" gradientUnits="userSpaceOnUse" x1="270" y1="323" x2="272" y2="412"><stop stop-color="#FF302F"/><stop offset="1" stop-color="#FF3C34"/></linearGradient>
+</defs><g id="sock-emblem" transform="translate(-200 -65)">
+<path id="sock-continuous-body" fill="#CE2525" d="M 326 131 L 407 180 C 401 190 396 195 387 201 L 326 233 L 392 271 C 412 282 420 298 419 321 C 420 343 411 358 394 368 L 316 404 C 296 412 276 416 255 408 C 233 399 214 371 228 347 C 235 334 250 329 273 322 L 306 307 L 240 278 C 224 270 218 257 218 240 C 216 220 222 205 238 193 L 302 155 C 315 147 318 141 326 131 Z"/>
+<path id="sock-back-fold" fill="url(#sock-back)" d="M 326 233 L 392 271 C 412 282 420 298 419 321 C 420 343 411 358 394 368 L 353 389 C 375 374 374 350 351 337 L 267 292 C 259 277 267 265 289 254 Z"/>
+<path id="sock-lower-fold" fill="url(#sock-lower)" d="M 306 307 L 351 337 C 374 350 375 374 353 389 L 316 404 C 306 376 293 341 273 322 Z"/>
+<path id="sock-cuff-top" fill="#FF4037" d="M 353 92 L 361 80 C 365 74 371 74 379 78 L 434 112 C 442 117 444 123 440 131 L 433 142 Z"/>
+<path id="sock-cuff-middle" fill="#FF4037" d="M 345 103 L 426 153 L 415 169 L 334 119 Z"/>
+<path id="sock-front-ribbon" fill="url(#sock-front)" d="M 326 131 L 407 180 C 401 190 396 195 387 201 L 289 254 C 269 265 261 276 267 291 L 240 278 C 224 270 218 257 218 240 C 216 220 222 205 238 193 L 302 155 C 315 147 318 141 326 131 Z"/>
+<path id="sock-rounded-toe" fill="url(#sock-toe)" d="M 273 322 C 250 329 235 334 228 347 C 214 371 233 399 255 408 C 276 416 296 412 316 404 C 306 376 293 341 273 322 Z"/>
+<path id="sock-toe-seam" fill="#09090B" d="M 286 333 L 292 328 C 301 339 309 355 313 367 L 307 371 C 302 356 295 342 286 333 Z"/>
+</g></g>
+</svg>
