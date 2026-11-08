@@ -86,4 +86,4 @@ export SOCK_HTTP_HEADERS='X-Session-API-Key: <key>'
 - A 2xx acknowledges the message. Anything else leaves it pending: a wrong key or URL loses nothing, it stops delivery until fixed. Redirects are not followed.
 - `Idempotency-Key` carries the message id; delivery is at least once.
 - Optional: `SOCK_HTTP_METHOD` (`POST` or `PUT`), `SOCK_HTTP_TIMEOUT` (seconds, default 30), `SOCK_HTTP_STATE`.
-- The agent replies itself, with `sock_send` through `sock-mcp --outbound-only` on the same puppet.
+- The agent replies itself, with `sock_send` through `sock-mcp --outbound-only`. It must be the same puppet as the listener: run `sock listen --as-puppet --exec .../sock-http` and start `sock-mcp` with the same config file, project (`CLAUDE_PROJECT_DIR`) and `HOME`. A `SOCK_TOKEN` in the agent's environment does not pin it: a machine key in the config file wins. OpenHands takes it as `"mcp_config": {"sock": {"command": "sock-mcp", "args": ["--outbound-only"], "env": {...}}}`.
