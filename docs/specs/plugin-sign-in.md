@@ -80,28 +80,31 @@ Anything unlisted is refused. A valid session is never replaced. A valid machine
 `sock login` (changed): the repair above. Output lines, stdout:
 - `signed in as @<handle> on device <id>` (new sign-in) or `already signed in as @<handle>` (valid session).
 - stderr, one of: `machine key works`, `kept a machine key for <label>: each project you open gets its own puppet`, `replaced a machine key the server no longer accepts`, `could not check the machine key (<reason>); kept it`.
-- Exit 0 when the session is valid at the end. Exit 1 on refusal, unchecked session or failed sign-in, file untouched.
+- Exit 0 when the session is valid at the end. Exit 1 on refusal, unchecked session (`could not check the session in <path> (<err>); it is unchanged, run sock login again`) or failed sign-in, file untouched.
+- Rejected means the hub's `TOKEN_INVALID` reason, never a bare 401: a proxy in front of the hub must not cost a valid session. A revoked machine key gets `TOKEN_INVALID` too.
+- Writes are compare-and-swap on the file: the token is removed only while it is still the one checked (`the config file's token changed while sock login checked it; run sock login again`), and a rejected key is replaced only while it is still there (a newer one is kept: `a newer machine key is in the config file, so it was kept; revoke the one just minted with sock devices revoke <id>`).
+- Every check validates the url, credential and gate first (`client.Validate`): a file url that is not https or loopback is `unchecked` and nothing is sent.
 - Idempotent: a second run with both valid makes no hub write and opens no browser.
-- Flags unchanged. `--url` on a file with credentials for another server is refused as today.
+- Flags unchanged. A file with credentials and no `url` belongs to the default server, so `--url` or `SOCK_URL` naming another is refused before anything is sent (`config.CredentialConflict`).
 
-`sock logout` (unchanged behavior): signs out the session, removes `token`, keeps `machine_key`. One added stderr line: `the machine key stays: sessions here can still message you; sock settings --message-owner=off stops that`.
+`sock logout` (unchanged behavior): signs out the session, removes `token`, keeps `machine_key`. One added stderr line while a `machine_key` remains: `the machine key stays: sessions here can still message you; sock settings --message-owner=off stops that`, or `the machine key stays; owner messaging is off` when it is off.
 
 `sock settings` (new):
 - No flags: prints the report. Text by default, `--json` for the object below. Exit 0 whatever the checks answer: it is a report.
 - `--message-owner=on|off`: writes `message_owner`, then prints the report.
-- `--url <url>`: writes `url` when the file holds no credential, else exit 1 with `sign out first (sock logout); the credentials here belong to <url>`. A `machine_key` or `puppet_token` counts.
+- `--url <url>`: writes `url` when the file holds no credential, else exit 1 naming the keys that remain, e.g. `the config file's token and machine_key belong to <url>; remove them from the file first (sock logout removes token)`. A `machine_key` or `puppet_token` counts, and so does an `access_gate` when the new url is another server.
 - Report fields: `config` (path), `url`, `session` (check, and `handle` when valid), `machine_key` (check), `puppet_token` (present or absent), `message_owner` (on or off, and `from` = `file`, `default` or `SOCK_MCP_MESSAGE_OWNER` when that env is set in the CLI's own environment).
 - Never prints a credential.
 
 ## sock-client contract
 
-`FileConfig.MessageOwner *bool` (`toml:"message_owner"`), and `MessageOwner(getenv, FileConfig) (on bool, from string)`: `SOCK_MCP_MESSAGE_OWNER` when it is exactly `1`, `true`, `0` or `false`; else the file; else true. The one resolver: sock-mcp and `sock settings` both call it.
+`FileConfig.MessageOwner *bool` (`toml:"message_owner"`), and `MessageOwner(getenv, FileConfig) (on bool, from string)`: `SOCK_MCP_MESSAGE_OWNER` when set: `1`, `true` or `on` is on and any other non-empty value off (fail closed: a misspelt `no` or an unsubstituted template never falls through to on); else the file; else true. No file and no env is on, for a bare sock-mcp too (an Agent SDK deployment with only `SOCK_TOKEN`); such a deployment sets the env to turn it off. The one resolver: sock-mcp and `sock settings` both call it.
 
 ## sock-mcp contract
 
 - Owner messaging is resolved per `sock_send` through `MessageOwner`, re-reading the file, so `sock settings --message-owner` takes effect without a reload. The env value is still read once at start and removed from the process environment.
 - On `Unauthenticated` from a call made with the machine key (a puppet mint or list), re-read the file once. A different `machine_key` for the same `url`: rebuild the key's client, retry the call once. Same key or another `url`: return the error as today. Puppets already minted keep their tokens (integrations-vzq).
-- No credential at start (existing `serveWithoutCredential`): the tool error becomes `not signed in: run /sock:login, then /reload-plugins`.
+- No credential at start (existing `serveWithoutCredential`): the tool error becomes `not signed in: run sock login (in Claude Code, /sock:login), then reload the plugin`.
 
 ## Plugin contract (this repo)
 
