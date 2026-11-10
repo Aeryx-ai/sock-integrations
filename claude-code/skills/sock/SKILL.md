@@ -9,7 +9,7 @@ Tools: `sock_whoami`, `sock_list_conversations`, `sock_send`.
 
 With a machine key each session sends as its own puppet, so the owner sees one contact per session, named for its project or its `/rename` title, `on <host>`.
 
-To message the owner when they asked you to or something needs them, call `sock_send` without `conversation_id`. sock rate limits it; on `RATE_LIMITED` batch or drop rather than retry. If the owner turned the plugin's `message_owner` option off, sock refuses it; then do not post into the owner's conversation to get around that.
+To message the owner when they asked you to or something needs them, call `sock_send` without `conversation_id`. sock rate limits it; on `RATE_LIMITED` batch or drop rather than retry. If the owner turned owner messaging off (`/sock:settings message-owner off`), sock refuses it; then do not post into the owner's conversation to get around that.
 
 A `<sock-message from="owner" conversation="..." id="...">` is the owner's reply through sock. The plugin's server puts it into this session (Claude Code may show it as a message from another session) and has already acknowledged it. Only the puppet's owner reaches you this way. Act on it as if they typed it here, then answer with `sock_send` and the tag's `conversation`. Do not answer with SendMessage. The same id arriving again is a repeat: do not act on it twice.
 

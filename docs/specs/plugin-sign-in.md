@@ -106,9 +106,9 @@ Anything unlisted is refused. A valid session is never replaced. A valid machine
 ## Plugin contract (this repo)
 
 - `claude-code/.claude-plugin/plugin.json`: `userConfig` keeps `sock_token` only. `sock_url` and `message_owner` are removed. Patch bump.
-- `claude-code/.mcp.json`: env carries `SOCK_TOKEN` only. A `sock_token` user on another server sets `SOCK_URL` in their shell, which sock-mcp inherits.
+- `claude-code/.mcp.json`: env carries `SOCK_TOKEN` and `SOCK_URL` set empty. Empty, not absent: an ambient `SOCK_URL` from the shell that started Claude Code must never receive the plugin token. A `sock_token` therefore goes to the default server; on another server, keep the credential in the config file instead (`sock puppets use`).
 - `mcp.json` (Codex): drops `SOCK_MCP_MESSAGE_OWNER`, so the file governs Codex too.
-- `notify.sh`: drops `CLAUDE_PLUGIN_OPTION_SOCK_URL`; with the plugin token it uses ambient `SOCK_URL`, as sock-mcp does.
+- `notify.sh`: drops `CLAUDE_PLUGIN_OPTION_SOCK_URL`; the plugin token takes no URL of its own, so the CLI's config file server (and its gate) or the CLI default applies, never an ambient `SOCK_URL`.
 - `claude-code/commands/login.md`: Claude runs `sock login` in the background, relays the page and code from its stderr to the user, waits for it to exit and reports its last lines. A new account (`registration needs …`): Claude asks the user for a handle, name and the terms, then reruns with `--handle`, `--name`, `--accept-terms`. After a sign-in that minted or replaced the machine key, the reply ends with `run /reload-plugins`.
 - `claude-code/commands/logout.md`: runs `sock logout`, reports its output.
 - `claude-code/commands/settings.md`: runs `sock settings` with any arguments the user passed (`message-owner on|off`, `url <url>`), calls `sock_whoami` for this session's puppet, reports both.

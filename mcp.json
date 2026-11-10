@@ -4,8 +4,7 @@
     "sock": {
       "type": "stdio",
       "command": "sock-mcp",
-      "args": ["--outbound-only", "--codex-inbound"],
-      "env": { "SOCK_MCP_MESSAGE_OWNER": "1" }
+      "args": ["--outbound-only", "--codex-inbound"]
     }
   }
 }

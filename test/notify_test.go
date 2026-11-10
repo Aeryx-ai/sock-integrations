@@ -28,22 +28,39 @@ func TestPermissionPrompt(t *testing.T) {
 	}
 }
 
+// configAt is an XDG_CONFIG_HOME whose sock config file holds body.
+func configAt(t *testing.T, body string) string {
+	t.Helper()
+	cfg := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cfg, "sock"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg, "sock", "config.toml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return cfg
+}
+
+// configURL is an XDG_CONFIG_HOME whose sock config file names url.
+func configURL(t *testing.T, url string) string { return configAt(t, "url = \""+url+"\"\n") }
+
 func TestPluginOptionTokenWinsOverSockToken(t *testing.T) {
 	s := newStub(t)
-	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_other_other", "CLAUDE_PLUGIN_OPTION_SOCK_URL": s.URL, "SOCK_URL": ""}}, "--permission")
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_other_other", "XDG_CONFIG_HOME": configURL(t, s.URL), "SOCK_URL": ""}}, "--permission")
 	if g := s.Requests(); len(g) != 1 || g[0].Auth != "Bearer sock_pt_other_other" {
 		t.Fatalf("%+v", g)
 	}
 }
 
-// The plugin token must go only to the plugin URL, never to an ambient SOCK_URL.
-func TestPluginTokenNeverReachesAmbientURL(t *testing.T) {
-	plugin, ambient := newStub(t), newStub(t)
-	runHook(t, ambient.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_other_other", "CLAUDE_PLUGIN_OPTION_SOCK_URL": plugin.URL}}, "--permission")
-	if g := ambient.Requests(); len(g) != 0 {
-		t.Fatalf("plugin token leaked to ambient SOCK_URL: %+v", g)
+// The plugin has no URL option (ADR 6): a value left from an older plugin
+// names nothing, and the plugin token goes to the config file's server.
+func TestStalePluginURLOptionIsIgnored(t *testing.T) {
+	cfgStub, stale := newStub(t), newStub(t)
+	runHook(t, stale.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_other_other", "CLAUDE_PLUGIN_OPTION_SOCK_URL": stale.URL, "SOCK_URL": "", "XDG_CONFIG_HOME": configURL(t, cfgStub.URL)}}, "--permission")
+	if g := stale.Requests(); len(g) != 0 {
+		t.Fatalf("plugin token went to the stale plugin URL: %+v", g)
 	}
-	if g := plugin.Requests(); len(g) != 1 || g[0].Auth != "Bearer sock_pt_other_other" {
+	if g := cfgStub.Requests(); len(g) != 1 || g[0].Auth != "Bearer sock_pt_other_other" {
 		t.Fatalf("%+v", g)
 	}
 }
@@ -51,14 +68,7 @@ func TestPluginTokenNeverReachesAmbientURL(t *testing.T) {
 // With no URL from the token's source, the CLI config applies and the ambient SOCK_URL does not.
 func TestNoURLFromSourceUsesCLIConfig(t *testing.T) {
 	cfgStub, ambient := newStub(t), newStub(t)
-	cfg := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(cfg, "sock"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(cfg, "sock", "config.toml"), []byte("url = \""+cfgStub.URL+"\"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	runHook(t, ambient.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_other_other", "XDG_CONFIG_HOME": cfg}}, "--permission")
+	runHook(t, ambient.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_other_other", "XDG_CONFIG_HOME": configURL(t, cfgStub.URL)}}, "--permission")
 	if g := ambient.Requests(); len(g) != 0 {
 		t.Fatalf("token leaked to ambient SOCK_URL: %+v", g)
 	}
@@ -67,7 +77,7 @@ func TestNoURLFromSourceUsesCLIConfig(t *testing.T) {
 	}
 }
 
-// An env token must go only to SOCK_URL, never to the plugin URL.
+// An env token must go only to SOCK_URL, never to a stale plugin URL.
 func TestEnvTokenNeverReachesPluginURL(t *testing.T) {
 	env, plugin := newStub(t), newStub(t)
 	runHook(t, env.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_OPTION_SOCK_URL": plugin.URL}}, "--permission")
@@ -79,10 +89,10 @@ func TestEnvTokenNeverReachesPluginURL(t *testing.T) {
 	}
 }
 
-// An ambient access gate belongs to the env-token deployment and must not go to the plugin URL.
+// An ambient access gate belongs to the env-token deployment and must not go with the plugin token.
 func TestPluginTokenDropsAmbientAccessGate(t *testing.T) {
 	s := newStub(t)
-	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_other_other", "CLAUDE_PLUGIN_OPTION_SOCK_URL": s.URL, "SOCK_ACCESS_GATE": "gate-secret"}}, "--permission")
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_other_other", "XDG_CONFIG_HOME": configURL(t, s.URL), "SOCK_ACCESS_GATE": "gate-secret"}}, "--permission")
 	g := s.Requests()
 	if len(g) != 1 || g[0].Gate != "" {
 		t.Fatalf("access gate leaked to plugin URL: %+v", g)
@@ -99,26 +109,21 @@ func TestEnvTokenKeepsAccessGate(t *testing.T) {
 	}
 }
 
-// access_gate in the CLI config file belongs to the config's own URL, not the plugin URL.
-func TestPluginTokenIgnoresConfigFileAccessGate(t *testing.T) {
+// The plugin token goes to the config file's server, and the file's
+// access_gate belongs to that server, so it goes along.
+func TestPluginTokenTakesConfigFileServerAndGate(t *testing.T) {
 	s := newStub(t)
-	cfg := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(cfg, "sock"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(cfg, "sock", "config.toml"), []byte("access_gate = \"file-gate\"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_other_other", "CLAUDE_PLUGIN_OPTION_SOCK_URL": s.URL, "XDG_CONFIG_HOME": cfg}}, "--permission")
+	cfg := configAt(t, "url = \""+s.URL+"\"\naccess_gate = \"file-gate\"\n")
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_other_other", "SOCK_URL": "", "XDG_CONFIG_HOME": cfg}}, "--permission")
 	g := s.Requests()
-	if len(g) != 1 || g[0].Gate != "" {
-		t.Fatalf("config file access gate leaked to plugin URL: %+v", g)
+	if len(g) != 1 || g[0].Gate != "file-gate" || g[0].Auth != "Bearer sock_pt_other_other" {
+		t.Fatalf("%+v", g)
 	}
 }
 
 func TestPluginOptionTokenUsedWhenSockTokenUnset(t *testing.T) {
 	s := newStub(t)
-	runHook(t, s.URL, hookEnv{Env: map[string]string{"SOCK_TOKEN": "", "CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_opt_opt", "CLAUDE_PLUGIN_OPTION_SOCK_URL": s.URL, "SOCK_URL": ""}}, "--permission")
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"SOCK_TOKEN": "", "CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_opt_opt", "XDG_CONFIG_HOME": configURL(t, s.URL), "SOCK_URL": ""}}, "--permission")
 	if g := s.Requests(); len(g) != 1 || g[0].Auth != "Bearer sock_pt_opt_opt" {
 		t.Fatalf("%+v", g)
 	}
@@ -873,7 +878,7 @@ func TestMachineKeyEnsureFailureSendsNothingAndHidesTheKey(t *testing.T) {
 func TestPluginOptionMachineKeyWorksToo(t *testing.T) {
 	s := newStub(t)
 	bin, rec := fakeSockForKeys(t, "")
-	env := map[string]string{"PATH": bin + ":" + hookPathTail, "SOCK_TOKEN": "", "CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": machineKey, "CLAUDE_PLUGIN_OPTION_SOCK_URL": s.URL, "CLAUDE_PROJECT_DIR": "/x/proj"}
+	env := map[string]string{"PATH": bin + ":" + hookPathTail, "SOCK_TOKEN": "", "CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": machineKey, "CLAUDE_PROJECT_DIR": "/x/proj"}
 	runHook(t, s.URL, hookEnv{Env: env, Stdin: hookJSON(map[string]any{"hook_event_name": "Notification", "notification_type": "permission_prompt", "message": "Claude needs your permission to use Bash"})}, "--permission")
 	if got := readRec(t, rec, "send-token"); got != "sock_pt_projectpuppet_secret" {
 		t.Fatalf("send ran with %q", got)
@@ -932,7 +937,6 @@ func TestMachineKeyIsNotInTheSendEnvironment(t *testing.T) {
 	env := machineKeyEnv(bin)
 	env["SOCK_TOKEN"] = ""
 	env["CLAUDE_PLUGIN_OPTION_SOCK_TOKEN"] = machineKey
-	env["CLAUDE_PLUGIN_OPTION_SOCK_URL"] = s.URL
 	runHook(t, s.URL, hookEnv{Env: env, Stdin: stopInput("k7", "Ship it?")}, "--stop", "--ask-now")
 	if !sent(rec) {
 		t.Fatal("nothing sent")
@@ -1176,7 +1180,7 @@ func TestCodexPluginRouteIgnoresAnExportedSockToken(t *testing.T) {
 
 func TestClaudePluginWithPluginRootIsUnchanged(t *testing.T) {
 	s := newStub(t)
-	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_ROOT": "/x/cplugin", "PLUGIN_ROOT": "/x/plugin", "SOCK_TOKEN": "", "CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_other_other", "CLAUDE_PLUGIN_OPTION_SOCK_URL": s.URL}}, "--permission")
+	runHook(t, s.URL, hookEnv{Env: map[string]string{"CLAUDE_PLUGIN_ROOT": "/x/cplugin", "PLUGIN_ROOT": "/x/plugin", "SOCK_TOKEN": "", "CLAUDE_PLUGIN_OPTION_SOCK_TOKEN": "sock_pt_other_other", "SOCK_URL": "", "XDG_CONFIG_HOME": configURL(t, s.URL)}}, "--permission")
 	if g := s.Requests(); len(g) != 1 || g[0].Auth != "Bearer sock_pt_other_other" {
 		t.Fatalf("%+v", g)
 	}

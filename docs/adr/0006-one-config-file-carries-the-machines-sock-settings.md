@@ -24,5 +24,5 @@ Zero-config plugins (integrations-hle) read every credential from the sock CLI c
 ## Consequences
 
 - A plugin user who set `message_owner` off loses that on upgrade until they run `/sock:settings message-owner off`. The default stays on.
-- A `sock_token` user on a non-default server sets `SOCK_URL` in their shell.
+- A `sock_token` goes to the default server. On another server the credential belongs in the config file (`sock puppets use`), which carries its server.
 - sock-client, sock-cli, sock-mcp and both plugins change, released in that order.

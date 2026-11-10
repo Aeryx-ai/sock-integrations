@@ -38,12 +38,13 @@ or, from the sibling checkouts `../cli` and `../mcp`:
 make install-bins
 ```
 
-Then sign in once and keep a machine key in the sock config file. Every project then gets its own puppet, named `<project> on <host>`, with no token to paste anywhere:
+Then sign in once. `sock login` keeps a machine key in the sock config file, and every project then gets its own puppet, named `<project> on <host>`, with no token to paste anywhere:
 
 ```sh
 sock login
-sock machine-key create | sock machine-key use
 ```
+
+Run it again whenever something stops working: it keeps a session and a machine key the server accepts and replaces only what it rejects. `sock settings` shows both, the server and whether your puppets may message you first (`--message-owner=on|off`, default on). The server and that setting live in the config file, shared by every plugin and runner on the machine.
 
 The key can only make and erase the puppets it made: it cannot read or send your messages. Erase a project's puppet from the app like any other puppet.
 
@@ -60,9 +61,11 @@ Or from a checkout:
 make install
 ```
 
+In Claude Code, `/sock:login`, `/sock:logout` and `/sock:settings` run those commands for you; after a first sign-in, `/reload-plugins`.
+
 Leave the plugin's `sock_token` empty. With a machine key every session gets its own puppet the first time it messages you, named `<project> <first 8 of the session id> on <host>` until you `/rename` the session, then for its title. Reply in that puppet's thread and the reply appears in that session, idle or busy ([ADR 4](docs/adr/0004-claude-replies-enter-through-the-session-inbox.md)). A session's puppet is archived when the session ends and comes back when it is resumed. Tokens are cached in `${XDG_STATE_HOME:-~/.local/state}/sock-integrations/puppets` (mode 600).
 
-A puppet token (`sock_pt_`) set as `sock_token` instead makes every session on the machine share one puppet, and replies race between sessions. Change the value with `claude plugin configure sock@sock-integrations`.
+A puppet token (`sock_pt_`) set as `sock_token` instead makes every session on the machine share one puppet on the default server, and replies race between sessions. Change the value with `claude plugin configure sock@sock-integrations`.
 
 The hooks message you when a permission prompt is waiting and, at the end of a turn, with the turn's question when it has one. They send only from an interactive session, at most once an hour per project; `-p`, SDK, background and subagent sessions never do.
 

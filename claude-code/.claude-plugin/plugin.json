@@ -1,28 +1,16 @@
 {
   "name": "sock",
-  "description": "Message your human through sock and hear their replies in the session: hooks for permission and idle prompts and the sock-mcp tools.",
-  "version": "0.5.1",
+  "description": "Message your human through sock and hear their replies in the session: hooks for permission and idle prompts, the sock-mcp tools and /sock:login, /sock:logout and /sock:settings.",
+  "version": "0.5.2",
   "author": { "name": "Guy Grigsby" },
   "license": "MIT",
   "userConfig": {
     "sock_token": {
       "type": "string",
       "title": "sock machine key or puppet token",
-      "description": "Leave empty: after sock login once, every session gets its own puppet, named for its project or its /rename title on <host>. A sock_pt_ puppet token here makes one puppet for every session on this machine.",
+      "description": "Leave empty: after /sock:login once, every session gets its own puppet, named for its project or its /rename title on <host>. A sock_pt_ puppet token here makes one puppet for every session on this machine, on the default server.",
       "sensitive": true,
       "required": false
-    },
-    "sock_url": {
-      "type": "string",
-      "title": "sock server URL",
-      "description": "Leave as is unless you run your own server.",
-      "default": "https://api.joinsock.com"
-    },
-    "message_owner": {
-      "type": "boolean",
-      "title": "Let Claude message you",
-      "description": "Lets a session message you through sock without you writing first. sock limits how often your puppets can.",
-      "default": true
     }
   }
 }

@@ -5,8 +5,7 @@
       "args": ["--outbound-only", "--claude-inbound"],
       "env": {
         "SOCK_TOKEN": "${user_config.sock_token}",
-        "SOCK_URL": "${user_config.sock_url}",
-        "SOCK_MCP_MESSAGE_OWNER": "${user_config.message_owner}"
+        "SOCK_URL": ""
       }
     }
   }

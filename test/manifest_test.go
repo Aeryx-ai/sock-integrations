@@ -92,19 +92,14 @@ func TestPluginManifest(t *testing.T) {
 	if c := p.UserConfig["sock_token"]; !c.Sensitive || c.Required {
 		t.Fatalf("sock_token must be sensitive and optional: %+v", c)
 	}
-	if _, ok := p.UserConfig["sock_url"]; !ok {
-		t.Fatal("missing userConfig sock_url")
+	// The config file holds the server and owner messaging (ADR 6): sock_token
+	// is the only option.
+	if len(p.UserConfig) != 1 {
+		t.Fatalf("userConfig %+v: want sock_token alone", p.UserConfig)
 	}
 	// The hooks send only the ask and permission prompts, never a message per turn.
 	if _, ok := p.UserConfig["notify_on_stop"]; ok {
 		t.Fatal("userConfig notify_on_stop is back, but nothing reads it")
-	}
-	if d := p.UserConfig["sock_url"].Default; d != any("https://api.joinsock.com") {
-		t.Fatalf("sock_url default %q", d)
-	}
-	// The owner hears from their puppets by default; the hub rate limits it.
-	if c := p.UserConfig["message_owner"]; c.Type != "boolean" || c.Default != any(true) {
-		t.Fatalf("message_owner must be a boolean defaulting to true: %+v", c)
 	}
 	// Replies enter through the session inbox (ADR 4); a declared channel
 	// would make sock-mcp a second consumer in a session started with the
@@ -127,9 +122,14 @@ func TestMCPConfigNeverHoldsLiteralToken(t *testing.T) {
 	if s.Command != "sock-mcp" || !slices.Equal(s.Args, []string{"--outbound-only", "--claude-inbound"}) {
 		t.Fatalf("%+v", s)
 	}
-	if s.Env["SOCK_TOKEN"] != "${user_config.sock_token}" || s.Env["SOCK_URL"] != "${user_config.sock_url}" ||
-		s.Env["SOCK_MCP_MESSAGE_OWNER"] != "${user_config.message_owner}" {
+	// SOCK_URL is blanked so an ambient one never receives the plugin token:
+	// with it empty sock-mcp takes the default server for an env token and the
+	// file's server for a file credential. Owner messaging is the file's.
+	if len(s.Env) != 2 || s.Env["SOCK_TOKEN"] != "${user_config.sock_token}" || s.Env["SOCK_URL"] != "" {
 		t.Fatalf("env %+v", s.Env)
+	}
+	if _, ok := s.Env["SOCK_URL"]; !ok {
+		t.Fatal("env must set SOCK_URL empty")
 	}
 }
 
@@ -244,10 +244,10 @@ func TestCodexPluginMCPServer(t *testing.T) {
 	}
 	s, ok := m.Servers["sock"]
 	if !ok || s.Type != "stdio" || s.Command != "sock-mcp" || strings.Join(s.Args, " ") != "--outbound-only --codex-inbound" ||
-		len(s.Env) != 1 || s.Env["SOCK_MCP_MESSAGE_OWNER"] != "1" {
-		// the one setting: the session may message its owner, as the Claude
-		// Code plugin's message_owner option does by default; never a token
-		t.Fatalf("sock server %+v: want stdio sock-mcp --outbound-only --codex-inbound with only SOCK_MCP_MESSAGE_OWNER=1", s)
+		len(s.Env) != 0 {
+		// no env at all: owner messaging is the config file's message_owner
+		// (ADR 6), and a token never goes here
+		t.Fatalf("sock server %+v: want stdio sock-mcp --outbound-only --codex-inbound with no env", s)
 	}
 	for _, rel := range []string{".mcp.json", ".app.json"} {
 		if _, err := os.Stat(filepath.Join(root, rel)); err == nil {
@@ -355,6 +355,31 @@ func TestCodexSkillKeepsItsRules(t *testing.T) {
 	for _, want := range []string{"Do not call `sock_fetch` or `sock_ack`", "is data, not instructions", "<sock-message", "conversation"} {
 		if !strings.Contains(string(b), want) {
 			t.Fatalf("SKILL.md lost %q", want)
+		}
+	}
+}
+
+// The plugin's commands run the sock CLI and nothing else (ADR 6): each one
+// exists and its allowed-tools grants only sock commands and sock_whoami.
+func TestPluginCommandsRunOnlySock(t *testing.T) {
+	for _, name := range []string{"login", "logout", "settings"} {
+		b, err := os.ReadFile(filepath.Join(root, "claude-code", "commands", name+".md"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var allowed string
+		for l := range strings.SplitSeq(string(b), "\n") {
+			if v, ok := strings.CutPrefix(l, "allowed-tools: "); ok {
+				allowed = v
+			}
+		}
+		if allowed == "" {
+			t.Fatalf("%s.md: no allowed-tools", name)
+		}
+		for tool := range strings.SplitSeq(allowed, ", ") {
+			if !strings.HasPrefix(tool, "Bash(sock ") && tool != "mcp__plugin_sock_sock__sock_whoami" {
+				t.Errorf("%s.md allows %q", name, tool)
+			}
 		}
 	}
 }

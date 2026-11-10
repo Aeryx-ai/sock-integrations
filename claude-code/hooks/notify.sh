@@ -40,13 +40,13 @@ asks=$state_dir/asks
 # The token and the URL come from the same source, so a token never goes to a
 # server chosen by a different source. The plugin option wins: .mcp.json gives
 # sock-mcp the plugin token, and an ambient SOCK_TOKEN exported for another
-# platform (Codex) must not make these hooks post as that puppet.
-from_plugin=0
+# platform (Codex) must not make these hooks post as that puppet. The plugin
+# names no server (ADR 6), so its token goes to the CLI config file's, or the
+# CLI default; an ambient SOCK_URL or a stale plugin URL option never applies.
 if [ -n "${CLAUDE_PLUGIN_OPTION_SOCK_TOKEN:-}" ]; then
-	from_plugin=1
 	token=$CLAUDE_PLUGIN_OPTION_SOCK_TOKEN
-	url=${CLAUDE_PLUGIN_OPTION_SOCK_URL:-}
-	# An ambient access gate belongs to the env-token deployment, not this URL.
+	url=
+	# An ambient access gate belongs to the env-token deployment.
 	unset SOCK_ACCESS_GATE
 else
 	token=${SOCK_TOKEN:-}
@@ -560,11 +560,6 @@ send_text() {
 	local url_args=()
 	if [ -n "$url" ]; then
 		url_args=(--url "$url")
-		# The config file's access_gate belongs to the config's own URL. When the
-		# plugin names the URL, point the CLI at a config path that does not exist.
-		if [ "$from_plugin" = 1 ]; then
-			export XDG_CONFIG_HOME=${TMPDIR:-/tmp}/sock-hook-noconfig.$$
-		fi
 	fi
 	local work
 	work=$(mktemp -d "${TMPDIR:-/tmp}/sock-hook.XXXXXX") || {
