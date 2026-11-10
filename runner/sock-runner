@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # sock-runner: the command `sock listen --exec` runs once per message. It
 # resumes an agent's session headlessly with the owner's message as the prompt
 # (docs/specs/integrations.md, "Headless inbound: sock-runner").
