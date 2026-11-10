@@ -16,8 +16,8 @@ const mcpSendText = "smoke: mcp"
 // and the test asserts the stub saw one authenticated request with the text.
 // With SOCK_SMOKE=1 it targets SOCK_URL with SOCK_TOKEN from the environment
 // (scripts/smoke.sh) and asserts only that the call succeeded. Only a session
-// configured to message the owner may (sock-mcp SOCK_MCP_MESSAGE_OWNER, the
-// plugin's message_owner option).
+// configured to message the owner may: SOCK_MCP_MESSAGE_OWNER, else
+// message_owner in the sock config file, else on.
 func TestMCPSend(t *testing.T) {
 	url, tok := "", token
 	var s *stub
@@ -56,22 +56,37 @@ func TestMCPSend(t *testing.T) {
 	}
 }
 
-// Any other session's sock_send without conversation_id is refused and
-// reaches nothing.
+// A session with owner messaging off, by the env or by message_owner = false
+// in the config file, has its sock_send without conversation_id refused, and
+// it reaches nothing.
 func TestMCPSendRefusedOutsideDigestChannel(t *testing.T) {
-	s := newStub(t)
-	c := startMCP(t, s.URL, token)
-	line := c.request(2, "tools/call", `{"name":"sock_send","arguments":{"text":"`+mcpSendText+`"}}`)
-	var resp struct {
-		Result struct {
-			IsError bool `json:"isError"`
-		} `json:"result"`
+	cfg := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cfg, "sock"), 0o700); err != nil {
+		t.Fatal(err)
 	}
-	if err := json.Unmarshal(line, &resp); err != nil || !resp.Result.IsError {
-		c.die("want an isError refusal, got %v: %s", err, line)
+	if err := os.WriteFile(filepath.Join(cfg, "sock", "config.toml"), []byte("message_owner = false\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if got := s.Requests(); len(got) != 0 {
-		t.Fatalf("stub saw %+v", got)
+	for name, env := range map[string]string{
+		"env":  "SOCK_MCP_MESSAGE_OWNER=off",
+		"file": "XDG_CONFIG_HOME=" + cfg,
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := newStub(t)
+			c := startMCP(t, s.URL, token, env)
+			line := c.request(2, "tools/call", `{"name":"sock_send","arguments":{"text":"`+mcpSendText+`"}}`)
+			var resp struct {
+				Result struct {
+					IsError bool `json:"isError"`
+				} `json:"result"`
+			}
+			if err := json.Unmarshal(line, &resp); err != nil || !resp.Result.IsError {
+				c.die("want an isError refusal, got %v: %s", err, line)
+			}
+			if got := s.Requests(); len(got) != 0 {
+				t.Fatalf("stub saw %+v", got)
+			}
+		})
 	}
 }
 
