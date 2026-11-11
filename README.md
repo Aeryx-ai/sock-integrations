@@ -14,6 +14,7 @@ This repo connects coding agents to Sock through a puppet account you own, so an
 | Codex plugin | Skill, hooks and MCP server for the Codex TUI and app | `codex/`, `skills/`, `hooks/`, `mcp.json` |
 | Agent SDK | A headless Claude Agent SDK agent with the send tools | `agent-sdk/` |
 | sock-runner | Headless chat: a Claude Code or Codex session per project answers your messages | `runner/sock-runner`, `runner/sock-runner-service` |
+| Agent skill | Agent-neutral skill that `sock agent install` copies to `~/.agents/skills/sock` | `agents/skills/sock/SKILL.md` |
 | sock-bridge | Carries your replies into a Claude Managed Agents session and the answer back | `runner/sock-bridge` |
 | sock-http | Forwards your messages to any agent with an inbound HTTP API, such as OpenHands | `runner/sock-http` |
 | Hosted connector | Remote MCP over OAuth for claude.ai and ChatGPT | `hosted/` |

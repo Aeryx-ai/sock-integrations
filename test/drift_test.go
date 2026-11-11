@@ -239,7 +239,7 @@ func TestScanTools(t *testing.T) {
 
 func TestToolNamesExist(t *testing.T) {
 	have := listTools(t, newStub(t).URL)
-	for _, rel := range []string{"claude-code/skills/sock/SKILL.md", "skills/sock/SKILL.md", "agent-sdk/example.ts", "codex/install.md", "docs/specs/integrations.md"} {
+	for _, rel := range []string{"claude-code/skills/sock/SKILL.md", "skills/sock/SKILL.md", agentSkill, "agent-sdk/example.ts", "codex/install.md", "docs/specs/integrations.md"} {
 		b, err := os.ReadFile(filepath.Join(root, rel))
 		if err != nil {
 			t.Fatal(err)

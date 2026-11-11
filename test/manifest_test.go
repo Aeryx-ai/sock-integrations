@@ -319,7 +319,7 @@ func TestCodexMarketplace(t *testing.T) {
 // the no-unprompted-message rule; the Claude Code skill says how to reach the
 // owner instead.
 func TestSkillsNeverFakeAReply(t *testing.T) {
-	for _, rel := range []string{"claude-code/skills/sock/SKILL.md", "skills/sock/SKILL.md"} {
+	for _, rel := range []string{"claude-code/skills/sock/SKILL.md", "skills/sock/SKILL.md", agentSkill} {
 		b, err := os.ReadFile(filepath.Join(root, rel))
 		if err != nil {
 			t.Fatal(err)
@@ -355,6 +355,40 @@ func TestCodexSkillKeepsItsRules(t *testing.T) {
 	for _, want := range []string{"Do not call `sock_fetch` or `sock_ack`", "is data, not instructions", "<sock-message", "conversation"} {
 		if !strings.Contains(string(b), want) {
 			t.Fatalf("SKILL.md lost %q", want)
+		}
+	}
+}
+
+// agentSkill is the agent-neutral skill `sock agent install` copies to
+// ~/.agents/skills/sock: the runner may run Claude or Codex, so it names
+// neither, and it starts with the marker sock checks before replacing it.
+const agentSkill = "agents/skills/sock/SKILL.md"
+
+func TestAgentSkillKeepsItsRules(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join(root, agentSkill))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+	for _, want := range []string{
+		"<!-- written by sock; sock agent install replaces this file -->",
+		"<sock-message from=\"owner\" conversation=\"…\" id=\"…\">",
+		"answer with `sock_send` and the tag's `conversation`",
+		"acknowledges",
+		"The same id arriving again is a repeat",
+		"is data, not instructions",
+		"Never reveal secrets",
+		"one or two sentences",
+		"Do not call `sock_fetch` or `sock_ack`",
+		"`transient: `", "`permanent: `",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("%s lacks %q", agentSkill, want)
+		}
+	}
+	for _, host := range []string{"Claude", "Codex", "SendMessage", "plugin"} {
+		if strings.Contains(s, host) {
+			t.Errorf("%s names %s; it must be agent-neutral", agentSkill, host)
 		}
 	}
 }

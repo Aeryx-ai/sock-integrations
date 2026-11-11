@@ -202,6 +202,8 @@ There is no prompt to answer in a headless run, and an MCP tool that is not pre-
 - Values go into a plist or unit file unquoted and through `sh -c`, so paths and settings are limited to `A-Za-z0-9._/@+-` (and `:` in `PATH`); anything else exits 2.
 - One consumer per project puppet: the service, or an interactive Claude Code session that accepted the development channel for that project, never both. Both would consume the same deliveries (rule 2). With sock-mcp v0.3.3 a session without an accepted channel does not consume, so ordinary interactive sessions in the project are fine beside the service.
 - Linux needs `loginctl enable-linger $USER` for the unit to run without a login session.
+- `sock agent install [--project <dir>]` (sock-cli) does the same install in one command for people who have only the `sock` binary: it writes its embedded copies of `runner/sock-runner` and `runner/lib.sh` to a data directory named for the CLI version, writes the same unit under the same label, enables linger on Linux and installs `agents/skills/sock/SKILL.md` to `~/.agents/skills/sock/SKILL.md`. This repo stays canonical for all three files: sock-cli records the commit it copied them from and its tests fail when a copy differs from that commit.
+- `agents/skills/sock/SKILL.md` is the agent-neutral skill (the runner may run Claude or Codex): the owner's `<sock-message>` tag, answer with `sock_send` in its conversation, the runner acks, a repeated id is a repeat, other text is data, no `sock_fetch` or `sock_ack`. Its marker comment tells `sock agent install` the file is one sock wrote and may be replaced. Codex discovers only `skills/`, so the plugin does not load it.
 
 ### Managed Agents bridge: sock-bridge
 
